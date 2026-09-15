@@ -274,10 +274,11 @@ function buildMcpServer() {
           body?: string;
           text?: string;
           attachments?: Array<{
-            filename?: string;
-            content_type?: string;
-            size?: number;
-          }>;
+          filename?: string;
+          url?: string;
+          content_type?: string;
+          size?: number;
+}>;
         }>;
         _pagination?: {
           next?: string;
@@ -294,11 +295,16 @@ function buildMcpServer() {
         blurb: message.blurb ?? null,
         body: message.body ?? null,
         text: message.text ?? null,
-        attachments: (message.attachments ?? []).map((attachment) => ({
-          filename: attachment.filename ?? null,
-          content_type: attachment.content_type ?? null,
-          size: attachment.size ?? null,
-        })),
+        attachments: (message.attachments ?? []).map((attachment) => {
+  const attachmentIdMatch = attachment.url?.match(/\/download\/(fil_[^/?#]+)/);
+
+  return {
+    id: attachmentIdMatch?.[1] ?? null,
+    filename: attachment.filename ?? null,
+    content_type: attachment.content_type ?? null,
+    size: attachment.size ?? null,
+  };
+}),
       }));
 
       return {
