@@ -16,6 +16,32 @@ function buildMcpServer() {
     }
   );
 
+  server.registerTool(
+    "ap_connection_test",
+    {
+      title: "AP Connection Test",
+      description:
+        "Harmless diagnostic tool that confirms the AP MCP server is connected. Does not access Front, Xero, or any external business data.",
+    },
+    async () => {
+      const result = {
+        status: "ok",
+        service: "ap-mcp-server",
+        front_configured: Boolean(process.env.FRONT_API_TOKEN),
+        xero_configured: Boolean(process.env.XERO_CLIENT_ID),
+      };
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result),
+          },
+        ],
+      };
+    }
+  );
+
   return server;
 }
 
