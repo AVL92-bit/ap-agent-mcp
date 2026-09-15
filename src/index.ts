@@ -2,7 +2,7 @@ import http from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
-
+import * as z from "zod/v4";
 function buildMcpServer() {
   const server = new McpServer(
     {
@@ -131,6 +131,192 @@ function buildMcpServer() {
       };
     }
   );
+ server.registerTool(
+    "get_front_message",
+    {
+      title: "Get Front Message",
+      description:
+        "Reads messages from a Front conversation only after verifying server-side that the conversation belongs to the configured enabled AP inbox. Read-only.",
+      inputSchema: z.object({
+        conversation_id: z
+          .string()
+          .startsWith("cnv_")
+          .describe("Front conversation ID beginning with cnv_."),
+}),
+    async ({ conversation_id }) => {
+      const frontToken = process.env.FRONT_API_TOKEN;
+      const enabledInboxId = process.env.FRONT_ENABLED_INBOX_ID;
+
+      if (!frontToken || !enabledInboxId) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Front AP configuration is incomplete",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (
+        typeof conversation_id !== "string" ||
+        !conversation_id.startsWith("cnv_")
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Invalid Front conversation ID",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const headers = {
+        Authorization: `Bearer ${frontToken}`,
+        Accept: "application/json",
+      };
+
+      // Security boundary:
+      // verify the requested conversation belongs to the enabled AP inbox
+      // before retrieving any message content.
+      const inboxResponse = await fetch(
+        `https://api2.frontapp.com/conversations/${encodeURIComponent(conversation_id)}/inboxes`,
+        {
+          method: "GET",
+          headers,
+        }
+      );
+
+      if (!inboxResponse.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to verify Front conversation inbox",
+                http_status: inboxResponse.status,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const inboxData = (await inboxResponse.json()) as {
+        _results?: Array<{
+          id?: string;
+        }>;
+      };
+
+      const belongsToEnabledInbox = (inboxData._results ?? []).some(
+        (inbox) => inbox.id === enabledInboxId
+      );
+
+      if (!belongsToEnabledInbox) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Conversation is outside the enabled AP inbox",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const messageResponse = await fetch(
+        `https://api2.frontapp.com/conversations/${encodeURIComponent(conversation_id)}/messages?limit=25`,
+        {
+          method: "GET",
+          headers,
+        }
+      );
+
+      if (!messageResponse.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to retrieve Front conversation messages",
+                http_status: messageResponse.status,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const messageData = (await messageResponse.json()) as {
+        _results?: Array<{
+          id?: string;
+          type?: string;
+          is_inbound?: boolean;
+          is_draft?: boolean;
+          created_at?: number;
+          subject?: string;
+          blurb?: string;
+          body?: string;
+          text?: string;
+          attachments?: Array<{
+            filename?: string;
+            content_type?: string;
+            size?: number;
+          }>;
+        }>;
+        _pagination?: {
+          next?: string;
+        };
+      };
+
+      const messages = (messageData._results ?? []).map((message) => ({
+        id: message.id ?? null,
+        type: message.type ?? null,
+        is_inbound: message.is_inbound ?? null,
+        is_draft: message.is_draft ?? null,
+        created_at: message.created_at ?? null,
+        subject: message.subject ?? null,
+        blurb: message.blurb ?? null,
+        body: message.body ?? null,
+        text: message.text ?? null,
+        attachments: (message.attachments ?? []).map((attachment) => ({
+          filename: attachment.filename ?? null,
+          content_type: attachment.content_type ?? null,
+          size: attachment.size ?? null,
+        })),
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "ok",
+              conversation_id,
+              verified_inbox_id: enabledInboxId,
+              message_count: messages.length,
+              messages,
+              has_more: Boolean(messageData._pagination?.next),
+            }),
+          },
+        ],
+      };
+    }
+  ); 
   return server;
 }
 
