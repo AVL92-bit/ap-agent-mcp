@@ -41,7 +41,81 @@ function buildMcpServer() {
       };
     }
   );
+  server.registerTool(
+    "list_front_inboxes",
+    {
+      title: "List Front Inboxes",
+      description:
+        "Temporary read-only setup tool that lists Front inbox names and IDs so an administrator can select the single pilot AP inbox. Does not read messages, attachments, or modify Front.",
+    },
+    async () => {
+      const frontToken = process.env.FRONT_API_TOKEN;
 
+      if (!frontToken) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "FRONT_API_TOKEN is not configured",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const response = await fetch("https://api2.frontapp.com/inboxes", {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${frontToken}`,
+          Accept: "application/json",
+        },
+      });
+
+      if (!response.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Front API request failed",
+                http_status: response.status,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const data = (await response.json()) as {
+        _results?: Array<{
+          id?: string;
+          name?: string;
+        }>;
+      };
+
+      const inboxes = (data._results ?? []).map((inbox) => ({
+        id: inbox.id ?? null,
+        name: inbox.name ?? null,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "ok",
+              inbox_count: inboxes.length,
+              inboxes,
+            }),
+          },
+        ],
+      };
+    }
+  );
   return server;
 }
 
