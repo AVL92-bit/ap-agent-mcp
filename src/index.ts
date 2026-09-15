@@ -143,6 +143,7 @@ function buildMcpServer() {
           .startsWith("cnv_")
           .describe("Front conversation ID beginning with cnv_."),
 }),
+    },
     async ({ conversation_id }) => {
       const frontToken = process.env.FRONT_API_TOKEN;
       const enabledInboxId = process.env.FRONT_ENABLED_INBOX_ID;
