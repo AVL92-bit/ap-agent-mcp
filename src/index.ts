@@ -42,23 +42,24 @@ function buildMcpServer() {
     }
   );
   server.registerTool(
-    "list_front_inboxes",
+    "scan_enabled_ap_inboxes",
     {
-      title: "List Front Inboxes",
+      title: "Scan Enabled AP Inboxes",
       description:
-        "Temporary read-only setup tool that lists Front inbox names and IDs so an administrator can select the single pilot AP inbox. Does not read messages, attachments, or modify Front.",
+        "Lists conversations from the configured enabled AP inbox only. The inbox is selected by server-side configuration and cannot be supplied or changed by the agent. Read-only.",
     },
     async () => {
       const frontToken = process.env.FRONT_API_TOKEN;
+      const enabledInboxId = process.env.FRONT_ENABLED_INBOX_ID;
 
-      if (!frontToken) {
+      if (!frontToken || !enabledInboxId) {
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
                 status: "error",
-                error: "FRONT_API_TOKEN is not configured",
+                error: "Front AP configuration is incomplete",
               }),
             },
           ],
@@ -66,13 +67,16 @@ function buildMcpServer() {
         };
       }
 
-      const response = await fetch("https://api2.frontapp.com/inboxes", {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${frontToken}`,
-          Accept: "application/json",
-        },
-      });
+      const response = await fetch(
+        `https://api2.frontapp.com/inboxes/${encodeURIComponent(enabledInboxId)}/conversations`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${frontToken}`,
+            Accept: "application/json",
+          },
+        }
+      );
 
       if (!response.ok) {
         return {
@@ -93,13 +97,22 @@ function buildMcpServer() {
       const data = (await response.json()) as {
         _results?: Array<{
           id?: string;
-          name?: string;
+          subject?: string;
+          status?: string;
+          created_at?: number;
+          updated_at?: number;
         }>;
+        _pagination?: {
+          next?: string;
+        };
       };
 
-      const inboxes = (data._results ?? []).map((inbox) => ({
-        id: inbox.id ?? null,
-        name: inbox.name ?? null,
+      const conversations = (data._results ?? []).map((conversation) => ({
+        id: conversation.id ?? null,
+        subject: conversation.subject ?? null,
+        status: conversation.status ?? null,
+        created_at: conversation.created_at ?? null,
+        updated_at: conversation.updated_at ?? null,
       }));
 
       return {
@@ -108,8 +121,10 @@ function buildMcpServer() {
             type: "text",
             text: JSON.stringify({
               status: "ok",
-              inbox_count: inboxes.length,
-              inboxes,
+              enabled_inbox_id: enabledInboxId,
+              conversation_count: conversations.length,
+              conversations,
+              has_more: Boolean(data._pagination?.next),
             }),
           },
         ],
