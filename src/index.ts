@@ -425,25 +425,27 @@ function buildMcpServer() {
       }
 
       // Security boundary 2:
-      // Retrieve the requested message and verify it belongs to
-      // the already-verified conversation.
-      const messageResponse = await fetch(
-        `https://api2.frontapp.com/messages/${encodeURIComponent(message_id)}`,
+      // Retrieve messages from the already-verified conversation and
+      // locate the requested message inside that conversation.
+      // This proves message membership without trusting an agent-supplied
+      // relationship between the message and conversation.
+      const conversationMessagesResponse = await fetch(
+        `https://api2.frontapp.com/conversations/${encodeURIComponent(conversation_id)}/messages?limit=100`,
         {
           method: "GET",
           headers,
         }
       );
 
-      if (!messageResponse.ok) {
+      if (!conversationMessagesResponse.ok) {
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
                 status: "error",
-                error: "Unable to retrieve Front message",
-                http_status: messageResponse.status,
+                error: "Unable to retrieve messages from verified conversation",
+                http_status: conversationMessagesResponse.status,
               }),
             },
           ],
@@ -451,20 +453,24 @@ function buildMcpServer() {
         };
       }
 
-      const message = (await messageResponse.json()) as {
-        id?: string;
-        conversation?: {
-          id?: string;
+      const conversationMessagesData =
+        (await conversationMessagesResponse.json()) as {
+          _results?: Array<{
+            id?: string;
+            attachments?: Array<{
+              filename?: string;
+              url?: string;
+              content_type?: string;
+              size?: number;
+            }>;
+          }>;
         };
-        attachments?: Array<{
-          filename?: string;
-          url?: string;
-          content_type?: string;
-          size?: number;
-        }>;
-      };
 
-      if (message.conversation?.id !== conversation_id) {
+      const message = (conversationMessagesData._results ?? []).find(
+        (candidate) => candidate.id === message_id
+      );
+
+      if (!message) {
         return {
           content: [
             {
