@@ -324,6 +324,312 @@ function buildMcpServer() {
       };
     }
   ); 
+    
+  server.registerTool(
+    "get_invoice_attachment",
+    {
+      title: "Get Invoice Attachment",
+      description:
+        "Retrieves a PDF attachment only after verifying server-side that the conversation belongs to the configured enabled AP inbox, the message belongs to that conversation, and the attachment belongs to that message. Read-only.",
+      inputSchema: z.object({
+        conversation_id: z
+          .string()
+          .startsWith("cnv_")
+          .describe("Front conversation ID beginning with cnv_."),
+        message_id: z
+          .string()
+          .startsWith("msg_")
+          .describe("Front message ID beginning with msg_."),
+        attachment_id: z
+          .string()
+          .startsWith("fil_")
+          .describe("Front attachment ID beginning with fil_."),
+      }),
+    },
+    async ({ conversation_id, message_id, attachment_id }) => {
+      const frontToken = process.env.FRONT_API_TOKEN;
+      const enabledInboxId = process.env.FRONT_ENABLED_INBOX_ID;
+
+      // 10 MB initial safety limit for invoice PDFs.
+      const MAX_PDF_BYTES = 10 * 1024 * 1024;
+
+      if (!frontToken || !enabledInboxId) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Front AP configuration is incomplete",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const headers = {
+        Authorization: `Bearer ${frontToken}`,
+        Accept: "application/json",
+      };
+
+      // Security boundary 1:
+      // Verify the conversation belongs to the enabled AP inbox.
+      const inboxResponse = await fetch(
+        `https://api2.frontapp.com/conversations/${encodeURIComponent(conversation_id)}/inboxes`,
+        {
+          method: "GET",
+          headers,
+        }
+      );
+
+      if (!inboxResponse.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to verify Front conversation inbox",
+                http_status: inboxResponse.status,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const inboxData = (await inboxResponse.json()) as {
+        _results?: Array<{
+          id?: string;
+        }>;
+      };
+
+      const belongsToEnabledInbox = (inboxData._results ?? []).some(
+        (inbox) => inbox.id === enabledInboxId
+      );
+
+      if (!belongsToEnabledInbox) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Conversation is outside the enabled AP inbox",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Security boundary 2:
+      // Retrieve the requested message and verify it belongs to
+      // the already-verified conversation.
+      const messageResponse = await fetch(
+        `https://api2.frontapp.com/messages/${encodeURIComponent(message_id)}`,
+        {
+          method: "GET",
+          headers,
+        }
+      );
+
+      if (!messageResponse.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to retrieve Front message",
+                http_status: messageResponse.status,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const message = (await messageResponse.json()) as {
+        id?: string;
+        conversation?: {
+          id?: string;
+        };
+        attachments?: Array<{
+          filename?: string;
+          url?: string;
+          content_type?: string;
+          size?: number;
+        }>;
+      };
+
+      if (message.conversation?.id !== conversation_id) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Message does not belong to the verified conversation",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Security boundary 3:
+      // Find the requested attachment only inside this verified message.
+      const attachment = (message.attachments ?? []).find((candidate) => {
+        const idMatch = candidate.url?.match(/\/download\/(fil_[^/?#]+)/);
+        return idMatch?.[1] === attachment_id;
+      });
+
+      if (!attachment) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Attachment does not belong to the verified message",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Invoice reader V1 is deliberately PDF-only.
+      if (attachment.content_type !== "application/pdf") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Attachment is not an allowed PDF",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (
+        typeof attachment.size === "number" &&
+        attachment.size > MAX_PDF_BYTES
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "PDF exceeds the maximum allowed size",
+                max_bytes: MAX_PDF_BYTES,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // Security boundary 4:
+      // Download using the verified message and attachment IDs.
+      // The authenticated Front URL itself is never exposed to Claude.
+      const downloadResponse = await fetch(
+        `https://api2.frontapp.com/messages/${encodeURIComponent(message_id)}/download/${encodeURIComponent(attachment_id)}`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${frontToken}`,
+            Accept: "application/pdf",
+          },
+        }
+      );
+
+      if (!downloadResponse.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to download Front attachment",
+                http_status: downloadResponse.status,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const contentType =
+        downloadResponse.headers.get("content-type")?.split(";")[0].trim() ??
+        "";
+
+      if (contentType !== "application/pdf") {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Downloaded attachment is not a PDF",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const pdfBuffer = Buffer.from(await downloadResponse.arrayBuffer());
+
+      if (pdfBuffer.length > MAX_PDF_BYTES) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Downloaded PDF exceeds the maximum allowed size",
+                max_bytes: MAX_PDF_BYTES,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "ok",
+              conversation_id,
+              message_id,
+              attachment_id,
+              verified_inbox_id: enabledInboxId,
+              content_type: "application/pdf",
+              size: pdfBuffer.length,
+            }),
+          },
+          {
+            type: "resource",
+            resource: {
+              uri: `front-attachment://${attachment_id}`,
+              mimeType: "application/pdf",
+              blob: pdfBuffer.toString("base64"),
+            },
+          },
+        ],
+      };
+    }
+  );
+  
   return server;
 }
 
