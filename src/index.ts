@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
+import { pdfToPng } from "pdf-to-png-converter";
 function buildMcpServer() {
   const server = new McpServer(
     {
@@ -609,6 +610,77 @@ function buildMcpServer() {
         };
       }
 
+ // Render a limited number of PDF pages to PNG so Claude can
+      // visually read scanned/image-only invoices.
+      const MAX_RENDERED_PAGES = 5;
+      const MAX_PNG_BYTES = 5 * 1024 * 1024;
+
+      let renderedPages;
+
+      try {
+        renderedPages = await pdfToPng(pdfBuffer, {
+          disableFontFace: false,
+          useSystemFonts: true,
+          viewportScale: 2.0,
+          pagesToProcess: Array.from(
+            { length: MAX_RENDERED_PAGES },
+            (_, index) => index + 1
+          ),
+        });
+      } catch {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to render invoice PDF for visual reading",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (renderedPages.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "PDF produced no readable pages",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const safePages = renderedPages
+        .slice(0, MAX_RENDERED_PAGES)
+        .filter(
+          (page) =>
+            page.content instanceof Buffer &&
+            page.content.length <= MAX_PNG_BYTES
+        );
+
+      if (safePages.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "error",
+                error: "Rendered invoice pages exceed the allowed image size",
+                max_png_bytes: MAX_PNG_BYTES,
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
       return {
         content: [
           {
@@ -619,20 +691,19 @@ function buildMcpServer() {
               message_id,
               attachment_id,
               verified_inbox_id: enabledInboxId,
-              content_type: "application/pdf",
-              size: pdfBuffer.length,
+              original_content_type: "application/pdf",
+              original_size: pdfBuffer.length,
+              rendered_page_count: safePages.length,
+              max_rendered_pages: MAX_RENDERED_PAGES,
             }),
           },
-          {
-            type: "resource",
-            resource: {
-              uri: `front-attachment://${attachment_id}`,
-              mimeType: "application/pdf",
-              blob: pdfBuffer.toString("base64"),
-            },
-          },
+          ...safePages.map((page) => ({
+            type: "image" as const,
+            data: page.content.toString("base64"),
+            mimeType: "image/png",
+          })),
         ],
-      };
+  };
     }
   );
   
