@@ -699,7 +699,7 @@ function buildMcpServer() {
           },
           ...safePages.map((page) => ({
             type: "image" as const,
-            data: page.content.toString("base64"),
+            data: page.content!.toString("base64"),
             mimeType: "image/png",
           })),
         ],
