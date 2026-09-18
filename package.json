@@ -12,14 +12,16 @@
   "engines": {
     "node": ">=20"
   },
-"dependencies": {
-  "@modelcontextprotocol/server": "^2.0.0",
-  "@modelcontextprotocol/node": "^2.0.0",
-  "pdf-to-png-converter": "^3.11.0",
-  "zod": "^4.0.0"
-},
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "pdf-to-png-converter": "^3.11.0",
+    "pg": "^8.16.3",
+    "zod": "^4.0.0"
+  },
   "devDependencies": {
     "@types/node": "^20.10.0",
+    "@types/pg": "^8.15.5",
     "typescript": "^5.3.3",
     "tsx": "^4.7.0"
   }
