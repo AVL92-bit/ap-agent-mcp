@@ -1,4 +1,5 @@
 import http from "node:http";
+import { handleXeroOAuth } from "./xero-oauth.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -744,7 +745,8 @@ const httpServer = http.createServer(async (req, res) => {
     req.url || "/",
     `http://${req.headers.host || "localhost"}`
   );
-
+  if (await handleXeroOAuth(req, res, url)) return;
+  
   // Public Railway health check.
   // This deliberately does not require MCP authentication.
   if (url.pathname === "/health" && req.method === "GET") {
