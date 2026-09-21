@@ -4,8 +4,9 @@ import { Pool, type PoolClient } from "pg";
 const EXPECTED_INBOX_ID = "inb_bys7q";
 const EXPECTED_TENANT_NAME = "St George's Road Surgery";
 const TEST_SUPPLIER_NAME = "Aquacool Limited";
+const TEST_INVOICE_NUMBER = "504694";
 
-type TestMode = "connection" | "organisation" | "supplier";
+type TestMode = "connection" | "organisation" | "supplier" | "duplicate";
 
 type StoredTokens = {
   access_token: string;
@@ -22,6 +23,22 @@ type ConnectionRow = {
   tenant_type: string;
   encrypted_tokens: string;
   enabled: boolean;
+};
+
+type XeroContact = {
+  ContactID?: string;
+  Name?: string;
+  IsSupplier?: boolean;
+};
+
+type XeroInvoice = {
+  InvoiceID?: string;
+  InvoiceNumber?: string;
+  Type?: string;
+  Status?: string;
+  Contact?: {
+    ContactID?: string;
+  };
 };
 
 function encryptionKey(): Buffer {
@@ -273,7 +290,7 @@ async function verifyPilotConnection(mode: TestMode) {
       };
     }
 
-    // Verify the pilot organisation before any supplier lookup.
+    // Verify the pilot organisation before accessing contacts or invoices.
     const organisationResponse = await fetch(
       "https://api.xero.com/api.xro/2.0/Organisation",
       {
@@ -332,11 +349,12 @@ async function verifyPilotConnection(mode: TestMode) {
       };
     }
 
-    // Read-only, server-side exact-name contact lookup.
-    // The agent cannot supply a different name or tenant.
+    // Read-only exact-name supplier lookup.
+    // Neither the supplier name nor tenant can be changed by the agent.
     const contactsUrl = new URL(
       "https://api.xero.com/api.xro/2.0/Contacts"
     );
+
     contactsUrl.searchParams.set(
       "where",
       `Name=="${TEST_SUPPLIER_NAME}"`
@@ -359,17 +377,14 @@ async function verifyPilotConnection(mode: TestMode) {
     }
 
     const contactsData = (await contactsResponse.json()) as {
-      Contacts?: Array<{
-        Name?: string;
-        IsSupplier?: boolean;
-      }>;
+      Contacts?: XeroContact[];
     };
 
     if (!contactsData || !Array.isArray(contactsData.Contacts)) {
       throw new Error("Xero returned an unexpected contacts response");
     }
 
-    // Check the response locally as well; do not trust the API filter alone.
+    // Check locally as well; do not trust the API filter alone.
     const exactMatches = contactsData.Contacts.filter(
       (contact) => contact.Name === TEST_SUPPLIER_NAME
     );
@@ -380,6 +395,136 @@ async function verifyPilotConnection(mode: TestMode) {
 
     const uniqueMatch =
       exactMatches.length === 1 ? exactMatches[0] : undefined;
+
+    if (mode === "supplier") {
+      return {
+        status: "ok",
+        front_inbox_id: EXPECTED_INBOX_ID,
+        tenant_name: EXPECTED_TENANT_NAME,
+        tenant_type: "ORGANISATION",
+        enabled: false,
+        xero_connection_verified: true,
+        token_refreshed: tokenRefreshed,
+        accounting_api_verified: true,
+        organisation_name_verified: true,
+        supplier_name_searched: TEST_SUPPLIER_NAME,
+        exact_match_count: exactMatches.length,
+        unique_match: exactMatches.length === 1,
+        is_supplier:
+          uniqueMatch && typeof uniqueMatch.IsSupplier === "boolean"
+            ? uniqueMatch.IsSupplier
+            : null,
+        contacts_read: true,
+        invoices_read: false,
+        bills_created: false,
+        contacts_modified: false,
+      };
+    }
+
+    // Fail closed: do not search invoices unless exactly one supplier
+    // contact is verified and its ContactID is available.
+    if (
+      !uniqueMatch ||
+      uniqueMatch.IsSupplier !== true ||
+      typeof uniqueMatch.ContactID !== "string" ||
+      !uniqueMatch.ContactID
+    ) {
+      throw new Error(
+        "Duplicate test requires one verified supplier with a ContactID"
+      );
+    }
+
+    const supplierContactId = uniqueMatch.ContactID;
+
+    // Search bills (ACCPAY) by exact invoice number across the pilot
+    // organisation. This also detects same-number bills under OTHER
+    // suppliers rather than incorrectly reporting a clean result.
+    //
+    // Xero's paginated Invoices endpoint returns up to 100 records
+    // per page. Continue until a short page; fail closed if the
+    // safety limit is reached without confirming the final page.
+    const PAGE_SIZE = 100;
+    const MAX_PAGES = 20;
+    const matchingInvoices: XeroInvoice[] = [];
+    let searchComplete = false;
+
+    for (let page = 1; page <= MAX_PAGES; page += 1) {
+      const invoicesUrl = new URL(
+        "https://api.xero.com/api.xro/2.0/Invoices"
+      );
+
+      invoicesUrl.searchParams.set(
+        "where",
+        `Type=="ACCPAY"&&InvoiceNumber=="${TEST_INVOICE_NUMBER}"`
+      );
+      invoicesUrl.searchParams.set("page", String(page));
+
+      const invoicesResponse = await fetch(invoicesUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          "xero-tenant-id": connection.tenant_id,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(20000),
+      });
+
+      if (!invoicesResponse.ok) {
+        throw new Error(
+          `Xero duplicate invoice lookup failed (HTTP ${invoicesResponse.status})`
+        );
+      }
+
+      const invoicesData = (await invoicesResponse.json()) as {
+        Invoices?: XeroInvoice[];
+      };
+
+      if (!invoicesData || !Array.isArray(invoicesData.Invoices)) {
+        throw new Error("Xero returned an unexpected invoices response");
+      }
+
+      if (invoicesData.Invoices.length > PAGE_SIZE) {
+        throw new Error("Xero returned an unexpected invoice page size");
+      }
+
+      for (const invoice of invoicesData.Invoices) {
+        // Fail closed if Xero returns a record outside the requested
+        // bill type or exact invoice number.
+        if (
+          invoice.Type !== "ACCPAY" ||
+          invoice.InvoiceNumber !== TEST_INVOICE_NUMBER ||
+          typeof invoice.InvoiceID !== "string" ||
+          !invoice.InvoiceID ||
+          typeof invoice.Contact?.ContactID !== "string" ||
+          !invoice.Contact.ContactID
+        ) {
+          throw new Error(
+            "Xero returned an invoice outside the verified duplicate search"
+          );
+        }
+
+        matchingInvoices.push(invoice);
+      }
+
+      if (invoicesData.Invoices.length < PAGE_SIZE) {
+        searchComplete = true;
+        break;
+      }
+    }
+
+    if (!searchComplete) {
+      throw new Error(
+        "Duplicate invoice search exceeded its page limit; result is inconclusive"
+      );
+    }
+
+    const supplierMatches = matchingInvoices.filter(
+      (invoice) => invoice.Contact?.ContactID === supplierContactId
+    );
+
+    const otherSupplierMatches = matchingInvoices.filter(
+      (invoice) => invoice.Contact?.ContactID !== supplierContactId
+    );
 
     return {
       status: "ok",
@@ -392,15 +537,18 @@ async function verifyPilotConnection(mode: TestMode) {
       accounting_api_verified: true,
       organisation_name_verified: true,
       supplier_name_searched: TEST_SUPPLIER_NAME,
-      exact_match_count: exactMatches.length,
-      unique_match: exactMatches.length === 1,
-      is_supplier:
-        uniqueMatch && typeof uniqueMatch.IsSupplier === "boolean"
-          ? uniqueMatch.IsSupplier
-          : null,
+      supplier_verified: true,
+      invoice_number_searched: TEST_INVOICE_NUMBER,
+      search_complete: true,
+      matching_supplier_bill_count: supplierMatches.length,
+      same_number_other_supplier_bill_count: otherSupplierMatches.length,
+      duplicate_found_for_supplier: supplierMatches.length > 0,
+      same_number_other_supplier_review_required:
+        otherSupplierMatches.length > 0,
       contacts_read: true,
-      invoices_read: false,
+      invoices_read: true,
       bills_created: false,
+      bills_modified: false,
       contacts_modified: false,
     };
   } catch (error) {
@@ -429,4 +577,8 @@ export async function testPilotXeroOrganisation() {
 
 export async function testPilotXeroSupplier() {
   return verifyPilotConnection("supplier");
+}
+
+export async function testPilotXeroDuplicateInvoice() {
+  return verifyPilotConnection("duplicate");
 }
