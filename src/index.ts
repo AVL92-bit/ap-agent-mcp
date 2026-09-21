@@ -3,6 +3,7 @@ import { handleXeroOAuth } from "./xero-oauth.js";
 import {
   testPilotXeroConnection,
   testPilotXeroOrganisation,
+  testPilotXeroSupplier,
 } from "./xero-pilot-test.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
@@ -894,6 +895,44 @@ server.registerTool(
           error instanceof Error ? error.message : "Unknown test failure";
 
         console.error("Pilot Xero organisation test failed:", message);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ status: "error", error: message }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+    server.registerTool(
+    "test_pilot_xero_supplier",
+    {
+      title: "Test pilot Xero supplier lookup",
+      description:
+        "Manually performs a read-only exact-name lookup for Aquacool Limited in the disabled St George's Road Surgery pilot organisation. Does not modify contacts, read invoices, create bills, or enable processing.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await testPilotXeroSupplier();
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown test failure";
+
+        console.error("Pilot Xero supplier test failed:", message);
 
         return {
           content: [
