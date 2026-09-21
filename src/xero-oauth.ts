@@ -160,6 +160,8 @@ export async function handleXeroOAuth(
     return true;
   }
 
+  let setupStage = "configuration check";
+
   try {
     if (
       !process.env.DATABASE_URL ||
@@ -175,8 +177,13 @@ export async function handleXeroOAuth(
       return true;
     }
 
+    setupStage = "encryption key validation";
     encryptionKey();
+
+    setupStage = "PostgreSQL table setup";
     await ensureTables();
+
+    setupStage = "request handling";
 
     if (url.pathname === "/xero/connect") {
       if (!basicAuthorized(req)) {
@@ -436,7 +443,7 @@ export async function handleXeroOAuth(
 
     return true;
   } catch {
-    console.error("Xero OAuth setup failed (details withheld)");
+    console.error(`Xero OAuth setup failed at stage: ${setupStage}`);
 
     if (!res.headersSent) {
       send(
