@@ -85,7 +85,9 @@ function encrypt(tokens: StoredTokens): string {
     .join(".");
 }
 
-export async function testPilotXeroConnection() {
+async function verifyPilotConnection(
+  includeOrganisationTest: boolean
+) {
   if (process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID) {
     throw new Error("Pilot inbox configuration does not match");
   }
@@ -104,13 +106,14 @@ export async function testPilotXeroConnection() {
     connectionTimeoutMillis: 5000,
   });
 
-  const client = await pool.connect();
+  let client: Awaited<ReturnType<typeof pool.connect>> | undefined;
   let transactionOpen = false;
 
   try {
-    // Lock the saved connection while checking and, if needed,
-    // rotating its refresh token. This prevents two test calls
-    // from attempting to use the same refresh token concurrently.
+    client = await pool.connect();
+
+    // Lock the saved connection while checking and, if necessary,
+    // rotating its refresh token.
     await client.query("BEGIN");
     transactionOpen = true;
 
@@ -136,7 +139,6 @@ export async function testPilotXeroConnection() {
     let tokens = decrypt(connection.encrypted_tokens);
     let tokenRefreshed = false;
 
-    // Refresh early rather than waiting for an expired token.
     const expiresIn =
       typeof tokens.expires_in === "number" &&
       Number.isFinite(tokens.expires_in)
@@ -198,8 +200,7 @@ export async function testPilotXeroConnection() {
         obtained_at: Date.now(),
       };
 
-      // Commit the rotated refresh token BEFORE making any
-      // subsequent Xero request. Never log or return token values.
+      // Save the rotated refresh token before any further Xero request.
       await client.query(
         `UPDATE xero_oauth_connections
          SET encrypted_tokens = $1
@@ -215,23 +216,27 @@ export async function testPilotXeroConnection() {
       transactionOpen = false;
     }
 
-    // Connectivity/identity test only: no accounting API calls.
-    const response = await fetch("https://api.xero.com/connections", {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${tokens.access_token}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(20000),
-    });
+    // Confirm the exact saved connection before accessing the
+    // accounting API. Do not expose tokens or tenant IDs.
+    const connectionsResponse = await fetch(
+      "https://api.xero.com/connections",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(20000),
+      }
+    );
 
-    if (!response.ok) {
+    if (!connectionsResponse.ok) {
       throw new Error(
-        `Xero connection verification failed (HTTP ${response.status})`
+        `Xero connection verification failed (HTTP ${connectionsResponse.status})`
       );
     }
 
-    const connections = (await response.json()) as Array<{
+    const connections = (await connectionsResponse.json()) as Array<{
       id?: string;
       tenantId?: string;
       tenantName?: string;
@@ -254,6 +259,62 @@ export async function testPilotXeroConnection() {
       throw new Error("Xero did not confirm the exact pilot connection");
     }
 
+    if (!includeOrganisationTest) {
+      return {
+        status: "ok",
+        front_inbox_id: EXPECTED_INBOX_ID,
+        tenant_name: EXPECTED_TENANT_NAME,
+        tenant_type: "ORGANISATION",
+        enabled: false,
+        xero_connection_verified: true,
+        token_refreshed: tokenRefreshed,
+        accounting_data_accessed: false,
+        bills_created: false,
+      };
+    }
+
+    // One read-only accounting request for organisation details only.
+    // No invoices, contacts, bill creation or other accounting calls.
+    const organisationResponse = await fetch(
+      "https://api.xero.com/api.xro/2.0/Organisation",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          "xero-tenant-id": connection.tenant_id,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(20000),
+      }
+    );
+
+    if (!organisationResponse.ok) {
+      throw new Error(
+        `Xero organisation read failed (HTTP ${organisationResponse.status})`
+      );
+    }
+
+    const organisationData = (await organisationResponse.json()) as {
+      Organisations?: Array<{
+        Name?: string;
+        OrganisationID?: string;
+      }>;
+    };
+
+    const organisations = organisationData?.Organisations;
+
+    if (
+      !Array.isArray(organisations) ||
+      organisations.length !== 1 ||
+      organisations[0].Name !== EXPECTED_TENANT_NAME ||
+      typeof organisations[0].OrganisationID !== "string" ||
+      !organisations[0].OrganisationID
+    ) {
+      throw new Error(
+        "Xero accounting API organisation details do not match the pilot"
+      );
+    }
+
     return {
       status: "ok",
       front_inbox_id: EXPECTED_INBOX_ID,
@@ -262,11 +323,15 @@ export async function testPilotXeroConnection() {
       enabled: false,
       xero_connection_verified: true,
       token_refreshed: tokenRefreshed,
-      accounting_data_accessed: false,
+      accounting_api_verified: true,
+      organisation_name_verified: true,
+      organisation_details_read: true,
+      invoices_read: false,
+      contacts_read: false,
       bills_created: false,
     };
   } catch (error) {
-    if (transactionOpen) {
+    if (transactionOpen && client) {
       try {
         await client.query("ROLLBACK");
       } catch {
@@ -276,7 +341,15 @@ export async function testPilotXeroConnection() {
 
     throw error;
   } finally {
-    client.release();
+    client?.release();
     await pool.end();
   }
+}
+
+export async function testPilotXeroConnection() {
+  return verifyPilotConnection(false);
+}
+
+export async function testPilotXeroOrganisation() {
+  return verifyPilotConnection(true);
 }
