@@ -106,7 +106,7 @@ async function verifyPilotConnection(
     connectionTimeoutMillis: 5000,
   });
 
-  let client: Awaited<ReturnType<typeof pool.connect>> | undefined;
+  let client: import("pg").PoolClient | undefined;
   let transactionOpen = false;
 
   try {
