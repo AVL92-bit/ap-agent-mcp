@@ -1,5 +1,6 @@
 import http from "node:http";
 import { handleXeroOAuth } from "./xero-oauth.js";
+import { testPilotXeroConnection } from "./xero-pilot-test.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -821,6 +822,47 @@ function buildMcpServer() {
         };
       } finally {
         await pilotPool.end();
+      }
+    }
+  );
+
+server.registerTool(
+    "test_pilot_xero_api_connection",
+    {
+      title: "Test Pilot Xero API Connection",
+      description:
+        "Manually verifies the exact St George's Road Surgery Xero connection. May securely refresh its OAuth token. Does not retrieve accounting data, create bills, or enable invoice processing.",
+    },
+    async () => {
+      try {
+        const result = await testPilotXeroConnection();
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown test failure";
+
+        console.error("Pilot Xero API test failed:", message);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "error",
+                error: message,
+              }),
+            },
+          ],
+          isError: true,
+        };
       }
     }
   );
