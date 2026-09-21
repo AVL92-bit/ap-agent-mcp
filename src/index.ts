@@ -4,6 +4,7 @@ import {
   testPilotXeroConnection,
   testPilotXeroOrganisation,
   testPilotXeroSupplier,
+  testPilotXeroDuplicateInvoice,
 } from "./xero-pilot-test.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
@@ -933,6 +934,44 @@ server.registerTool(
           error instanceof Error ? error.message : "Unknown test failure";
 
         console.error("Pilot Xero supplier test failed:", message);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ status: "error", error: message }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+   server.registerTool(
+    "test_pilot_xero_duplicate_invoice",
+    {
+      title: "Test pilot Xero duplicate invoice lookup",
+      description:
+        "Manually performs a read-only check for invoice number 504694 against Aquacool Limited in the disabled St George's Road Surgery pilot organisation. Also flags same-number bills under other suppliers. Does not create or modify bills, modify contacts, or enable processing.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await testPilotXeroDuplicateInvoice();
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown test failure";
+
+        console.error("Pilot Xero duplicate invoice test failed:", message);
 
         return {
           content: [
