@@ -1,6 +1,9 @@
 import http from "node:http";
 import { handleXeroOAuth } from "./xero-oauth.js";
-import { testPilotXeroConnection } from "./xero-pilot-test.js";
+import {
+  testPilotXeroConnection,
+  testPilotXeroOrganisation,
+} from "./xero-pilot-test.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -866,7 +869,44 @@ server.registerTool(
       }
     }
   );
+server.registerTool(
+    "test_pilot_xero_organisation",
+    {
+      title: "Test pilot Xero organisation read",
+      description:
+        "Manually verify read-only access to the disabled St George's Road Surgery pilot organisation. Does not read invoices or contacts, create bills, or enable processing.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await testPilotXeroOrganisation();
 
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unknown test failure";
+
+        console.error("Pilot Xero organisation test failed:", message);
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ status: "error", error: message }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
   return server;
 }
 
