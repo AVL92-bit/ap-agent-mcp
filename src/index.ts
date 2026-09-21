@@ -708,6 +708,123 @@ function buildMcpServer() {
     }
   );
   
+  server.registerTool(
+    "get_pilot_xero_connection",
+    {
+      title: "Get Pilot Xero Connection",
+      description:
+        "Reads only the saved Xero connection's organisation name, tenant ID, tenant type and enabled status from PostgreSQL. Restricted to the St George's Road Surgery pilot. Does not read tokens, call Xero or create bills.",
+    },
+    async () => {
+      const expectedInboxId = "inb_bys7q";
+      const expectedTenantName = "St George's Road Surgery";
+
+      if (process.env.FRONT_ENABLED_INBOX_ID !== expectedInboxId) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "error",
+                error: "Pilot Front inbox does not match the expected configuration",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      if (!process.env.DATABASE_URL) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "error",
+                error: "Database configuration is missing",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const { Pool } = await import("pg");
+      const pilotPool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 1,
+        connectionTimeoutMillis: 5000,
+      });
+
+      try {
+        const result = await pilotPool.query<{
+          tenant_id: string;
+          tenant_name: string;
+          tenant_type: string;
+          enabled: boolean;
+        }>(
+          `SELECT tenant_id, tenant_name, tenant_type, enabled
+           FROM xero_oauth_connections`
+        );
+
+        if (
+          result.rows.length !== 1 ||
+          result.rows[0].tenant_name !== expectedTenantName ||
+          result.rows[0].tenant_type !== "ORGANISATION" ||
+          result.rows[0].enabled !== false
+        ) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({
+                  status: "error",
+                  error:
+                    "Saved Xero connection does not match the disabled pilot configuration",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const connection = result.rows[0];
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "ok",
+                front_inbox_id: expectedInboxId,
+                tenant_id: connection.tenant_id,
+                tenant_name: connection.tenant_name,
+                tenant_type: connection.tenant_type,
+                enabled: connection.enabled,
+                xero_api_called: false,
+              }),
+            },
+          ],
+        };
+      } catch {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "error",
+                error: "Unable to verify the pilot Xero connection",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      } finally {
+        await pilotPool.end();
+      }
+    }
+  );
+
   return server;
 }
 
