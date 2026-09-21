@@ -445,6 +445,14 @@ export async function handleXeroOAuth(
   } catch {
     console.error(`Xero OAuth setup failed at stage: ${setupStage}`);
 
+    if (setupStage === "encryption key validation") {
+      const raw = process.env.XERO_TOKEN_ENCRYPTION_KEY ?? "";
+
+      console.error(
+        `Xero encryption key diagnostic: present=${raw.length > 0}; character_count=${raw.length}; hex_characters_only=${/^[a-fA-F0-9]*$/.test(raw)}`
+      );
+    }
+
     if (!res.headersSent) {
       send(
         res,
