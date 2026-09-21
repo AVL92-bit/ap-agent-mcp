@@ -1,8 +1,11 @@
 import { createDecipheriv, createCipheriv, randomBytes } from "node:crypto";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 const EXPECTED_INBOX_ID = "inb_bys7q";
 const EXPECTED_TENANT_NAME = "St George's Road Surgery";
+const TEST_SUPPLIER_NAME = "Aquacool Limited";
+
+type TestMode = "connection" | "organisation" | "supplier";
 
 type StoredTokens = {
   access_token: string;
@@ -85,9 +88,7 @@ function encrypt(tokens: StoredTokens): string {
     .join(".");
 }
 
-async function verifyPilotConnection(
-  includeOrganisationTest: boolean
-) {
+async function verifyPilotConnection(mode: TestMode) {
   if (process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID) {
     throw new Error("Pilot inbox configuration does not match");
   }
@@ -106,7 +107,7 @@ async function verifyPilotConnection(
     connectionTimeoutMillis: 5000,
   });
 
-  let client: import("pg").PoolClient | undefined;
+  let client: PoolClient | undefined;
   let transactionOpen = false;
 
   try {
@@ -200,7 +201,7 @@ async function verifyPilotConnection(
         obtained_at: Date.now(),
       };
 
-      // Save the rotated refresh token before any further Xero request.
+      // Save the rotated refresh token before further Xero requests.
       await client.query(
         `UPDATE xero_oauth_connections
          SET encrypted_tokens = $1
@@ -216,8 +217,7 @@ async function verifyPilotConnection(
       transactionOpen = false;
     }
 
-    // Confirm the exact saved connection before accessing the
-    // accounting API. Do not expose tokens or tenant IDs.
+    // Verify the exact saved Xero connection.
     const connectionsResponse = await fetch(
       "https://api.xero.com/connections",
       {
@@ -259,7 +259,7 @@ async function verifyPilotConnection(
       throw new Error("Xero did not confirm the exact pilot connection");
     }
 
-    if (!includeOrganisationTest) {
+    if (mode === "connection") {
       return {
         status: "ok",
         front_inbox_id: EXPECTED_INBOX_ID,
@@ -273,8 +273,7 @@ async function verifyPilotConnection(
       };
     }
 
-    // One read-only accounting request for organisation details only.
-    // No invoices, contacts, bill creation or other accounting calls.
+    // Verify the pilot organisation before any supplier lookup.
     const organisationResponse = await fetch(
       "https://api.xero.com/api.xro/2.0/Organisation",
       {
@@ -315,6 +314,73 @@ async function verifyPilotConnection(
       );
     }
 
+    if (mode === "organisation") {
+      return {
+        status: "ok",
+        front_inbox_id: EXPECTED_INBOX_ID,
+        tenant_name: EXPECTED_TENANT_NAME,
+        tenant_type: "ORGANISATION",
+        enabled: false,
+        xero_connection_verified: true,
+        token_refreshed: tokenRefreshed,
+        accounting_api_verified: true,
+        organisation_name_verified: true,
+        organisation_details_read: true,
+        invoices_read: false,
+        contacts_read: false,
+        bills_created: false,
+      };
+    }
+
+    // Read-only, server-side exact-name contact lookup.
+    // The agent cannot supply a different name or tenant.
+    const contactsUrl = new URL(
+      "https://api.xero.com/api.xro/2.0/Contacts"
+    );
+    contactsUrl.searchParams.set(
+      "where",
+      `Name=="${TEST_SUPPLIER_NAME}"`
+    );
+
+    const contactsResponse = await fetch(contactsUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        "xero-tenant-id": connection.tenant_id,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+
+    if (!contactsResponse.ok) {
+      throw new Error(
+        `Xero supplier lookup failed (HTTP ${contactsResponse.status})`
+      );
+    }
+
+    const contactsData = (await contactsResponse.json()) as {
+      Contacts?: Array<{
+        Name?: string;
+        IsSupplier?: boolean;
+      }>;
+    };
+
+    if (!contactsData || !Array.isArray(contactsData.Contacts)) {
+      throw new Error("Xero returned an unexpected contacts response");
+    }
+
+    // Check the response locally as well; do not trust the API filter alone.
+    const exactMatches = contactsData.Contacts.filter(
+      (contact) => contact.Name === TEST_SUPPLIER_NAME
+    );
+
+    if (exactMatches.length !== contactsData.Contacts.length) {
+      throw new Error("Xero returned contacts outside the exact-name lookup");
+    }
+
+    const uniqueMatch =
+      exactMatches.length === 1 ? exactMatches[0] : undefined;
+
     return {
       status: "ok",
       front_inbox_id: EXPECTED_INBOX_ID,
@@ -325,10 +391,17 @@ async function verifyPilotConnection(
       token_refreshed: tokenRefreshed,
       accounting_api_verified: true,
       organisation_name_verified: true,
-      organisation_details_read: true,
+      supplier_name_searched: TEST_SUPPLIER_NAME,
+      exact_match_count: exactMatches.length,
+      unique_match: exactMatches.length === 1,
+      is_supplier:
+        uniqueMatch && typeof uniqueMatch.IsSupplier === "boolean"
+          ? uniqueMatch.IsSupplier
+          : null,
+      contacts_read: true,
       invoices_read: false,
-      contacts_read: false,
       bills_created: false,
+      contacts_modified: false,
     };
   } catch (error) {
     if (transactionOpen && client) {
@@ -347,9 +420,13 @@ async function verifyPilotConnection(
 }
 
 export async function testPilotXeroConnection() {
-  return verifyPilotConnection(false);
+  return verifyPilotConnection("connection");
 }
 
 export async function testPilotXeroOrganisation() {
-  return verifyPilotConnection(true);
+  return verifyPilotConnection("organisation");
+}
+
+export async function testPilotXeroSupplier() {
+  return verifyPilotConnection("supplier");
 }
