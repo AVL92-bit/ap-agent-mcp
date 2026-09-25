@@ -12,6 +12,7 @@ import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
 import { pdfToPng } from "pdf-to-png-converter";
+import sharp from "sharp";
 function buildMcpServer() {
   const server = new McpServer(
     {
@@ -618,10 +619,9 @@ function buildMcpServer() {
         };
       }
 
- // Render a limited number of PDF pages to PNG so Claude can
-      // visually read scanned/image-only invoices.
+ // Render up to five PDF pages for visual invoice reading.
       const MAX_RENDERED_PAGES = 5;
-      const MAX_PNG_BYTES = 5 * 1024 * 1024;
+      const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 
       let renderedPages;
 
@@ -642,7 +642,7 @@ function buildMcpServer() {
               type: "text",
               text: JSON.stringify({
                 status: "error",
-                error: "Unable to render invoice PDF for visual reading",
+                error: "Unable to render invoice PDF",
               }),
             },
           ],
@@ -665,23 +665,44 @@ function buildMcpServer() {
         };
       }
 
-      const safePages = renderedPages
-        .slice(0, MAX_RENDERED_PAGES)
-        .filter(
-          (page) =>
-            page.content instanceof Buffer &&
-            page.content.length <= MAX_PNG_BYTES
-        );
+      // Compress rendered pages before returning them to Claude.
+      // Fail closed if any rendered page cannot be processed.
+      const compressedPages: Buffer[] = [];
 
-      if (safePages.length === 0) {
+      try {
+        for (const page of renderedPages.slice(
+          0,
+          MAX_RENDERED_PAGES
+        )) {
+          if (!page.content) {
+            throw new Error("Missing rendered page content");
+          }
+
+          const compressed = await sharp(page.content)
+            .resize({
+              width: 1600,
+              withoutEnlargement: true,
+            })
+            .jpeg({
+              quality: 75,
+              mozjpeg: true,
+            })
+            .toBuffer();
+
+          if (compressed.length > MAX_IMAGE_BYTES) {
+            throw new Error("Compressed page exceeds size limit");
+          }
+
+          compressedPages.push(compressed);
+        }
+      } catch {
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
-                status: "error",
-                error: "Rendered invoice pages exceed the allowed image size",
-                max_png_bytes: MAX_PNG_BYTES,
+                status: "review_required",
+                error: "Unable to safely compress all invoice pages",
               }),
             },
           ],
@@ -701,17 +722,19 @@ function buildMcpServer() {
               verified_inbox_id: enabledInboxId,
               original_content_type: "application/pdf",
               original_size: pdfBuffer.length,
-              rendered_page_count: safePages.length,
+              rendered_page_count: compressedPages.length,
               max_rendered_pages: MAX_RENDERED_PAGES,
+              image_format: "jpeg",
+              images_compressed: true,
             }),
           },
-          ...safePages.map((page) => ({
+          ...compressedPages.map((page) => ({
             type: "image" as const,
-            data: page.content!.toString("base64"),
-            mimeType: "image/png",
+            data: page.toString("base64"),
+            mimeType: "image/jpeg",
           })),
         ],
-  };
+      };
     }
   );
   
