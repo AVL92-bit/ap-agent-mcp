@@ -5,6 +5,7 @@ import {
   testPilotXeroOrganisation,
   testPilotXeroSupplier,
   testPilotXeroDuplicateInvoice,
+  assessPilotXeroInvoice,
 } from "./xero-pilot-test.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
@@ -952,7 +953,7 @@ server.registerTool(
     {
       title: "Test pilot Xero duplicate invoice lookup",
       description:
-        "Manually performs a read-only check for invoice number 504694 against Aquacool Limited in the disabled St George's Road Surgery pilot organisation. Also flags same-number bills under other suppliers. Does not create or modify bills, modify contacts, or enable processing.",
+        "Manually performs a read-only check for invoice number 504694a against Aquacool Limited in the disabled St George's Road Surgery pilot organisation. Also flags same-number bills under other suppliers. Does not create or modify bills, modify contacts, or enable processing.",
       inputSchema: {},
     },
     async () => {
@@ -978,6 +979,58 @@ server.registerTool(
             {
               type: "text" as const,
               text: JSON.stringify({ status: "error", error: message }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
+  server.registerTool(
+    "assess_pilot_xero_invoice",
+    {
+      title: "Assess pilot Xero invoice",
+      description:
+        "Read-only supplier verification and duplicate checking for an invoice in the disabled St George's Road Surgery pilot organisation. Accepts an extracted supplier name and invoice number. Does not create bills, modify records, or enable processing.",
+      inputSchema: {
+        supplier_name: z.string().min(1).max(150),
+        invoice_number: z.string().min(1).max(100),
+      },
+    },
+    async ({ supplier_name, invoice_number }) => {
+      try {
+        const result = await assessPilotXeroInvoice({
+          supplier_name,
+          invoice_number,
+        });
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unknown assessment failure";
+
+        console.error(
+          "Pilot Xero invoice assessment failed:",
+          message
+        );
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "error",
+                error: message,
+              }),
             },
           ],
           isError: true,
