@@ -4,7 +4,7 @@ import { Pool, type PoolClient } from "pg";
 const EXPECTED_INBOX_ID = "inb_bys7q";
 const EXPECTED_TENANT_NAME = "St George's Road Surgery";
 const TEST_SUPPLIER_NAME = "Aquacool Limited";
-const TEST_INVOICE_NUMBER = "504694";
+const TEST_INVOICE_NUMBER = "504694a";
 
 type TestMode = "connection" | "organisation" | "supplier" | "duplicate";
 
