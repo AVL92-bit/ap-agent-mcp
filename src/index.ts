@@ -678,16 +678,11 @@ function buildMcpServer() {
             throw new Error("Missing rendered page content");
           }
 
-          const compressed = await sharp(page.content)
-            .resize({
-              width: 1600,
-              withoutEnlargement: true,
-            })
-            .jpeg({
-              quality: 75,
-              mozjpeg: true,
-            })
-            .toBuffer();
+const compressed = await sharp(page.content)
+  .png({
+    compressionLevel: 9,
+  })
+  .toBuffer();
 
           if (compressed.length > MAX_IMAGE_BYTES) {
             throw new Error("Compressed page exceeds size limit");
