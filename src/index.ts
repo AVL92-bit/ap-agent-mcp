@@ -11,8 +11,7 @@ import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
-import { pdfToPng } from "pdf-to-png-converter";
-import sharp from "sharp";
+import { PDFParse } from "pdf-parse";
 function buildMcpServer() {
   const server = new McpServer(
     {
@@ -619,117 +618,115 @@ function buildMcpServer() {
         };
       }
 
- // Render up to five PDF pages for visual invoice reading.
-      const MAX_RENDERED_PAGES = 5;
-      const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+// Text-first PDF extraction.
+      // Never send an incomplete or unverified invoice for drafting.
 
-      let renderedPages;
+      const MAX_TEXT_PAGES = 5;
+      const MAX_EXTRACTED_CHARACTERS = 30000;
+
+      let parser: PDFParse | undefined;
 
       try {
-        renderedPages = await pdfToPng(pdfBuffer, {
-          disableFontFace: false,
-          useSystemFonts: true,
-          viewportScale: 2.0,
-          pagesToProcess: Array.from(
-            { length: MAX_RENDERED_PAGES },
-            (_, index) => index + 1
-          ),
+        parser = new PDFParse({
+          data: new Uint8Array(pdfBuffer),
         });
-      } catch {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                status: "error",
-                error: "Unable to render invoice PDF",
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
 
-      if (renderedPages.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                status: "error",
-                error: "PDF produced no readable pages",
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
+        const info = await parser.getInfo();
+        const totalPages = info.total;
 
-      // Compress rendered pages before returning them to Claude.
-      // Fail closed if any rendered page cannot be processed.
-      const compressedPages: Buffer[] = [];
-
-      try {
-        for (const page of renderedPages.slice(
-          0,
-          MAX_RENDERED_PAGES
-        )) {
-          if (!page.content) {
-            throw new Error("Missing rendered page content");
-          }
-
-const compressed = await sharp(page.content)
-  .png({
-    compressionLevel: 9,
-  })
-  .toBuffer();
-
-          if (compressed.length > MAX_IMAGE_BYTES) {
-            throw new Error("Compressed page exceeds size limit");
-          }
-
-          compressedPages.push(compressed);
+        if (
+          !Number.isInteger(totalPages) ||
+          totalPages < 1 ||
+          totalPages > MAX_TEXT_PAGES
+        ) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "review_required",
+                  reason:
+                    "PDF page count is invalid or exceeds the verified extraction limit",
+                  total_pages: totalPages,
+                  max_pages: MAX_TEXT_PAGES,
+                  invoice_ready_for_draft: false,
+                }),
+              },
+            ],
+          };
         }
-      } catch {
+
+        const extracted = await parser.getText();
+        const invoiceText = extracted.text?.trim() ?? "";
+
+        if (
+          invoiceText.length < 50 ||
+          invoiceText.length > MAX_EXTRACTED_CHARACTERS
+        ) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  status: "review_required",
+                  reason:
+                    "PDF text is missing, insufficient or exceeds the extraction limit",
+                  total_pages: totalPages,
+                  extracted_characters: invoiceText.length,
+                  invoice_ready_for_draft: false,
+                }),
+              },
+            ],
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                status: "ok",
+                conversation_id,
+                message_id,
+                attachment_id,
+                verified_inbox_id: enabledInboxId,
+                original_content_type: "application/pdf",
+                original_size: pdfBuffer.length,
+                extraction_method: "embedded_pdf_text",
+                total_pages: totalPages,
+                extracted_characters: invoiceText.length,
+                invoice_text: invoiceText,
+                requires_field_verification: true,
+                invoice_ready_for_draft: false,
+                bills_created: false,
+              }),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error(
+          "PDF text extraction failed:",
+          error instanceof Error ? error.message : "Unknown error"
+        );
+
         return {
           content: [
             {
               type: "text",
               text: JSON.stringify({
                 status: "review_required",
-                error: "Unable to safely compress all invoice pages",
+                reason:
+                  "PDF text extraction failed; manual review required",
+                invoice_ready_for_draft: false,
               }),
             },
           ],
-          isError: true,
         };
+      } finally {
+        if (parser) {
+          await parser.destroy().catch(() => {});
+        }
       }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              status: "ok",
-              conversation_id,
-              message_id,
-              attachment_id,
-              verified_inbox_id: enabledInboxId,
-              original_content_type: "application/pdf",
-              original_size: pdfBuffer.length,
-              rendered_page_count: compressedPages.length,
-              max_rendered_pages: MAX_RENDERED_PAGES,
-              image_format: "jpeg",
-              images_compressed: true,
-            }),
-          },
-          ...compressedPages.map((page) => ({
-            type: "image" as const,
-            data: page.toString("base64"),
-            mimeType: "image/jpeg",
-          })),
-        ],
-      };
     }
   );
   
