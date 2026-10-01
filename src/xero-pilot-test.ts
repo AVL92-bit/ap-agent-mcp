@@ -9,6 +9,7 @@ const TEST_INVOICE_NUMBER = "504694a";
 type TestMode =
   | "connection"
   | "organisation"
+  | "settings"
   | "supplier"
   | "duplicate"
   | "assessment";
@@ -173,7 +174,10 @@ async function verifyPilotConnection(
   const invoiceNumber =
     assessment?.invoice_number ?? TEST_INVOICE_NUMBER;
 
-  if (process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID) {
+  if (
+    process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID ||
+    !process.env.XERO_PILOT_TENANT_ID
+  ) {
     throw new Error("Pilot inbox configuration does not match");
   }
 
@@ -206,7 +210,9 @@ async function verifyPilotConnection(
       `SELECT connection_id, tenant_id, tenant_name,
               tenant_type, encrypted_tokens, enabled
        FROM xero_oauth_connections
-       FOR UPDATE`
+       WHERE tenant_id = $1
+       FOR UPDATE`,
+      [process.env.XERO_PILOT_TENANT_ID]
     );
 
     if (
@@ -428,6 +434,105 @@ async function verifyPilotConnection(
         invoices_read: false,
         contacts_read: false,
         bills_created: false,
+      };
+    }
+
+    // Read-only chart of accounts and tax rates.
+    // This does not choose a code or rate for any invoice.
+    if (mode === "settings") {
+      const headers = {
+        Authorization: `Bearer ${tokens.access_token}`,
+        "xero-tenant-id": connection.tenant_id,
+        Accept: "application/json",
+      };
+
+      const [accountsResponse, ratesResponse] =
+        await Promise.all([
+          fetch(
+            "https://api.xero.com/api.xro/2.0/Accounts",
+            {
+              method: "GET",
+              headers,
+              signal: AbortSignal.timeout(20000),
+            }
+          ),
+          fetch(
+            "https://api.xero.com/api.xro/2.0/TaxRates",
+            {
+              method: "GET",
+              headers,
+              signal: AbortSignal.timeout(20000),
+            }
+          ),
+        ]);
+
+      if (!accountsResponse.ok || !ratesResponse.ok) {
+        throw new Error(
+          `Xero settings lookup failed (accounts HTTP ${accountsResponse.status}, tax rates HTTP ${ratesResponse.status})`
+        );
+      }
+
+      const accountsData =
+        (await accountsResponse.json()) as {
+          Accounts?: Array<{
+            AccountID?: string;
+            Code?: string;
+            Name?: string;
+            Type?: string;
+            Status?: string;
+            TaxType?: string;
+          }>;
+        };
+
+      const ratesData =
+        (await ratesResponse.json()) as {
+          TaxRates?: Array<{
+            Name?: string;
+            TaxType?: string;
+            Status?: string;
+            EffectiveRate?: number;
+            DisplayTaxRate?: number;
+            CanApplyToExpenses?: boolean;
+          }>;
+        };
+
+      if (
+        !Array.isArray(accountsData.Accounts) ||
+        !Array.isArray(ratesData.TaxRates)
+      ) {
+        throw new Error(
+          "Xero returned unexpected accounting settings data"
+        );
+      }
+
+      return {
+        status: "ok",
+        tenant_name: EXPECTED_TENANT_NAME,
+        enabled: false,
+        xero_connection_verified: true,
+        organisation_name_verified: true,
+        token_refreshed: tokenRefreshed,
+        accounts: accountsData.Accounts.map((account) => ({
+          account_id: account.AccountID ?? null,
+          code: account.Code ?? null,
+          name: account.Name ?? null,
+          type: account.Type ?? null,
+          status: account.Status ?? null,
+          default_tax_type: account.TaxType ?? null,
+        })),
+        tax_rates: ratesData.TaxRates.map((rate) => ({
+          name: rate.Name ?? null,
+          tax_type: rate.TaxType ?? null,
+          status: rate.Status ?? null,
+          effective_rate: rate.EffectiveRate ?? null,
+          display_tax_rate: rate.DisplayTaxRate ?? null,
+          can_apply_to_expenses:
+            rate.CanApplyToExpenses ?? null,
+        })),
+        account_code_selected: false,
+        tax_rate_selected: false,
+        bills_created: false,
+        bills_modified: false,
       };
     }
 
@@ -679,7 +784,6 @@ async function verifyPilotConnection(
           supplierContactId
       );
 
-    // New reusable assessment response.
     if (mode === "assessment") {
       const reviewReasons: string[] = [];
 
@@ -825,3 +929,12 @@ export async function assessPilotXeroInvoice(
     input
   );
 }
+
+// Manually invoked read-only pilot accounting-settings test.
+export async function testPilotXeroAccountingSettings() {
+  return verifyPilotConnection("settings");
+}
+
+
+
+Once you've pasted this into GitHub, tell me “Ready for index.ts” and I'll provide the complete second file.
