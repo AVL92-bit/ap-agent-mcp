@@ -935,6 +935,3 @@ export async function testPilotXeroAccountingSettings() {
   return verifyPilotConnection("settings");
 }
 
-
-
-Once you've pasted this into GitHub, tell me “Ready for index.ts” and I'll provide the complete second file.
