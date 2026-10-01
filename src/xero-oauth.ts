@@ -150,7 +150,8 @@ export async function handleXeroOAuth(
 ): Promise<boolean> {
   if (
     url.pathname !== "/xero/connect" &&
-    url.pathname !== "/xero/callback"
+    url.pathname !== "/xero/callback" &&
+    url.pathname !== "/xero/status"
   ) {
     return false;
   }
@@ -184,7 +185,43 @@ export async function handleXeroOAuth(
     await ensureTables();
 
     setupStage = "request handling";
+if (url.pathname === "/xero/status") {
+  if (!basicAuthorized(req)) {
+    send(res, 401, "Operator authentication required.", {
+      "WWW-Authenticate": 'Basic realm="AP Xero setup"',
+    });
+    return true;
+  }
 
+  const pilotId = process.env.XERO_PILOT_TENANT_ID;
+
+  if (!pilotId) {
+    send(res, 503, "Pilot organisation is not configured.");
+    return true;
+  }
+
+  const result = await pool.query(
+    `SELECT enabled
+     FROM xero_oauth_connections
+     WHERE tenant_id = $1`,
+    [pilotId]
+  );
+
+  if (result.rowCount !== 1) {
+    send(res, 409, "Pilot organisation verification failed.");
+    return true;
+  }
+
+  send(
+    res,
+    200,
+    result.rows[0].enabled
+      ? "Pilot organisation verified. Connection is enabled."
+      : "Pilot organisation verified. Connection remains disabled."
+  );
+
+  return true;
+}
     if (url.pathname === "/xero/connect") {
       if (!basicAuthorized(req)) {
         send(
