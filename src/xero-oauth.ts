@@ -90,7 +90,7 @@ async function ensureTables() {
 }
 
 function basicAuthorized(req: http.IncomingMessage): boolean {
-  const expected = process.env.MCP_AUTH_TOKEN;
+  const expected = process.env.XERO_SETUP_PASSWORD;
   const header = req.headers.authorization;
 
   if (!expected || !header?.startsWith("Basic ")) {
