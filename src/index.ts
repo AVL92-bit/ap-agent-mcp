@@ -1072,6 +1072,20 @@ server.registerTool(
             "Provide a supplier name or description to search"
           );
         }
+        return toolResult(
+          await testPilotXeroInvoiceHistory({
+            supplier_name,
+            description_query,
+          })
+        );
+      } catch (error) {
+        return safeError(
+          "Pilot Xero history search failed",
+          error
+        );
+      }
+    }
+  );
   return server;
 }
 
