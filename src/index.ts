@@ -1051,6 +1051,27 @@ server.registerTool(
       }
     }
   );
+  server.registerTool(
+    "search_pilot_xero_invoice_history",
+    {
+      title: "Search Pilot Xero Invoice History",
+      description:
+        "Manually searches historical purchase-bill descriptions and suppliers in the verified disabled pilot Xero organisation. Returns historical coding evidence only. Never selects an account code or modifies bills.",
+      inputSchema: {
+        supplier_name: z.string().max(150).optional(),
+        description_query: z.string().max(150).optional(),
+      },
+    },
+    async ({ supplier_name, description_query }) => {
+      try {
+        if (
+          !supplier_name?.trim() &&
+          !description_query?.trim()
+        ) {
+          return toolFailure(
+            "Provide a supplier name or description to search"
+          );
+        }
   return server;
 }
 
