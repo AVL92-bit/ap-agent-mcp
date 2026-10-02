@@ -201,7 +201,12 @@ async function refreshIfNeeded(
   };
 }
 
-export async function testPilotXeroInvoiceHistory() {
+export async function testPilotXeroInvoiceHistory(
+  search?: {
+    supplier_name?: string;
+    description_query?: string;
+  }
+) {
   if (
     process.env.FRONT_ENABLED_INBOX_ID !== PILOT_INBOX ||
     !process.env.XERO_PILOT_TENANT_ID ||
@@ -209,7 +214,23 @@ export async function testPilotXeroInvoiceHistory() {
   ) {
     throw new Error("Pilot configuration is incomplete or incorrect");
   }
+const supplierQuery = search?.supplier_name?.trim() ?? "";
+  const descriptionQuery = search?.description_query?.trim() ?? "";
 
+  if (
+    supplierQuery.length > 150 ||
+    descriptionQuery.length > 150
+  ) {
+    throw new Error("History search criteria are too long");
+  }
+
+  if (
+    search &&
+    !supplierQuery &&
+    !descriptionQuery
+  ) {
+    throw new Error("History search requires a search term");
+  }
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     max: 1,
@@ -348,9 +369,11 @@ export async function testPilotXeroInvoiceHistory() {
 
     // Retrieve a deliberately limited historical sample.
     // This is NOT a search of the entire Xero history.
-    const PAGE_LIMIT = 3;
+// Targeted searches can examine more historical bills.
+    // The existing test keeps its original limits.
+    const PAGE_LIMIT = search ? 10 : 3;
     const PAGE_SIZE = 100;
-    const MAX_EXAMPLES = 30;
+    const MAX_EXAMPLES = search ? 50 : 30;
 
     const examples: Array<{
       supplier: string;
@@ -407,7 +430,15 @@ export async function testPilotXeroInvoiceHistory() {
         }
 
         scannedBills++;
-
+// For targeted searches, filter by supplier.
+        if (
+          supplierQuery &&
+          !(invoice.Contact?.Name ?? "")
+            .toLowerCase()
+            .includes(supplierQuery.toLowerCase())
+        ) {
+          continue;
+        }
         // Only use authorised or paid bills as evidence.
         if (
           invoice.Status !== "AUTHORISED" &&
@@ -417,6 +448,16 @@ export async function testPilotXeroInvoiceHistory() {
         }
 
         for (const line of invoice.LineItems ?? []) {
+          // For targeted searches, match invoice descriptions.
+          if (
+            descriptionQuery &&
+            !(line.Description ?? "")
+              .toLowerCase()
+              .includes(descriptionQuery.toLowerCase())
+          ) {
+            continue;
+          }
+
           if (
             !line.AccountCode ||
             !line.Description?.trim()
@@ -427,7 +468,6 @@ export async function testPilotXeroInvoiceHistory() {
           if (examples.length >= MAX_EXAMPLES) {
             break;
           }
-
           examples.push({
             supplier: (invoice.Contact?.Name ?? "").slice(
               0,
@@ -462,6 +502,15 @@ export async function testPilotXeroInvoiceHistory() {
       status: "ok",
       tenant_name: PILOT_NAME,
       enabled: false,
+      search_mode: search ? "targeted" : "sample",
+      search_criteria: search
+        ? {
+            supplier_name: supplierQuery || null,
+            description_query: descriptionQuery || null,
+          }
+        : null,
+      matching_invoice_lines: examples.length,
+      search_complete: reachedEnd,
       xero_connection_verified: true,
       organisation_name_verified: true,
       token_refreshed: tokenResult.refreshed,
