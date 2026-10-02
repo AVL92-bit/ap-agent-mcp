@@ -16,7 +16,9 @@ import {
   assessPilotXeroInvoice,
   testPilotXeroAccountingSettings,
 } from "./xero-pilot-test.js";
-
+import {
+  testPilotXeroInvoiceHistory,
+} from "./xero-invoice-history.js";
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
 // in xero-pilot-test.ts.
@@ -1004,7 +1006,51 @@ function buildMcpServer() {
       }
     }
   );
+server.registerTool(
+    "test_pilot_xero_invoice_history",
+    {
+      title: "Read Pilot Xero Invoice Coding History",
+      description:
+        "Manually retrieves a limited read-only sample of historical purchase-bill descriptions and account codes from the verified disabled pilot organisation. Historical coding is evidence only. Never creates or modifies bills.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result =
+          await testPilotXeroInvoiceHistory();
 
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result),
+            },
+          ],
+        };
+      } catch (error) {
+        console.error(
+          "Pilot Xero invoice history test failed",
+          error instanceof Error
+            ? error.message
+            : "Unknown failure"
+        );
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                status: "error",
+                error:
+                  "Pilot Xero history test failed; check Railway logs",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
+    }
+  );
   return server;
 }
 
