@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "policies": [
+    {
+      "organisation_name": "St George's Road Surgery",
+      "supplier_name": "AMS Accountants",
+      "xero_supplier_name": "AMS Accountants (DD)",
+      "service": "Routine monthly payroll processing",
+      "account_code": "449",
+      "account_name": "Accounting & Audit",
+      "status": "approved",
+      "approved_date": "2026-10-14",
+      "approval_scope": "Account-code recommendation only",
+      "excluded_services": [
+        "P11D work",
+        "Annual accounts",
+        "Advisory services",
+        "Other non-payroll services"
+      ],
+      "human_review_required": true,
+      "vat_review_required": true,
+      "automatic_bill_creation_allowed": false,
+      "automatic_coding_allowed": false,
+      "notes": "Recommend account 449 only for routine monthly payroll-processing invoices from AMS Accountants in St George's Road Surgery. Verify the invoice and VAT treatment independently. Never automatically apply coding."
+    }
+  ]
+}
