@@ -1086,6 +1086,48 @@ server.registerTool(
       }
     }
   );
+  server.registerTool(
+    "get_pilot_coding_policies",
+    {
+      title: "Get Pilot Coding Policies",
+      description:
+        "Reads the approved coding-policy configuration for the pilot organisation. Returns recommendations and mandatory review conditions only. Does not modify Xero, create bills, or approve coding.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const fs = await import("node:fs/promises");
+        const path = await import("node:path");
+
+        const policyPath = path.join(
+          process.cwd(),
+          "config",
+          "coding-policies.json"
+        );
+
+        const fileContents = await fs.readFile(
+          policyPath,
+          "utf8"
+        );
+
+        const policies = JSON.parse(fileContents);
+
+        return toolResult({
+          status: "ok",
+          read_only: true,
+          policies,
+          account_code_selected: false,
+          bills_created: false,
+          bills_modified: false,
+        });
+      } catch (error) {
+        return safeError(
+          "Could not read pilot coding policies",
+          error
+        );
+      }
+    }
+  );
   return server;
 }
 
