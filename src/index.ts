@@ -5,7 +5,10 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
 import { PDFParse } from "pdf-parse";
 import { Pool } from "pg";
-
+import {
+  findExistingPilotReview,
+  recordPilotAssessment,
+} from "./pilot-review-register.js";
 import { handleXeroOAuth } from "./xero-oauth.js";
 
 import {
@@ -1123,6 +1126,332 @@ server.registerTool(
       } catch (error) {
         return safeError(
           "Could not read pilot coding policies",
+          error
+        );
+      }
+    }
+  );
+  // --------------------------------------------------
+  // PILOT REVIEW REGISTER: VERIFY FRONT ATTACHMENT
+  // --------------------------------------------------
+
+  async function verifyPilotReviewAttachment(
+    conversationId: string,
+    messageId: string,
+    fileId: string
+  ): Promise<void> {
+    // Fail closed if the pilot configuration is wrong.
+    if (
+      process.env.FRONT_ENABLED_INBOX_ID !==
+        "inb_bys7q" ||
+      !process.env.DATABASE_URL
+    ) {
+      throw new Error(
+        "Pilot review register configuration is invalid"
+      );
+    }
+
+    // Confirm conversation belongs to the permitted inbox.
+    const membership =
+      await verifyConversationInbox(conversationId);
+
+    if (!membership.allowed) {
+      throw new Error(
+        "Conversation is not verified in the pilot inbox"
+      );
+    }
+
+    // Confirm message belongs to the conversation.
+    const result = await getConversationMessages(
+      conversationId,
+      100
+    );
+
+    // Do not proceed with an incomplete message listing.
+    if (result.hasMore) {
+      throw new Error(
+        "Conversation message listing is incomplete"
+      );
+    }
+
+    const matchingMessages = result.messages.filter(
+      (message) => message.id === messageId
+    );
+
+    if (matchingMessages.length !== 1) {
+      throw new Error(
+        "Message does not uniquely belong to conversation"
+      );
+    }
+
+    // Confirm attachment belongs to the verified message.
+    const matchingAttachments = (
+      matchingMessages[0].attachments ?? []
+    ).filter(
+      (attachment) =>
+        attachmentId(attachment) === fileId
+    );
+
+    if (matchingAttachments.length !== 1) {
+      throw new Error(
+        "Attachment does not uniquely belong to message"
+      );
+    }
+
+    if (
+      matchingAttachments[0].content_type !==
+      "application/pdf"
+    ) {
+      throw new Error(
+        "Attachment is not a verified PDF"
+      );
+    }
+  }
+
+  // --------------------------------------------------
+  // PILOT REVIEW REGISTER: CHECK EXISTING ASSESSMENT
+  // --------------------------------------------------
+
+  server.registerTool(
+    "check_pilot_invoice_review",
+    {
+      title: "Check Pilot Invoice Review",
+      description:
+        "Checks whether a verified PDF attachment in the St George's Road Surgery pilot Front inbox already has a PostgreSQL assessment. Read-only. Use before assessing an attachment.",
+      inputSchema: {
+        conversation_id: z
+          .string()
+          .startsWith("cnv_")
+          .max(100),
+        message_id: z
+          .string()
+          .startsWith("msg_")
+          .max(100),
+        attachment_id: z
+          .string()
+          .startsWith("fil_")
+          .max(100),
+      },
+    },
+    async ({
+      conversation_id,
+      message_id,
+      attachment_id,
+    }) => {
+      try {
+        await verifyPilotReviewAttachment(
+          conversation_id,
+          message_id,
+          attachment_id
+        );
+
+        const pool = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          max: 1,
+          connectionTimeoutMillis: 5000,
+        });
+
+        try {
+          const existing =
+            await findExistingPilotReview(
+              pool,
+              message_id,
+              attachment_id
+            );
+
+          return toolResult({
+            status: "ok",
+            conversation_id,
+            message_id,
+            attachment_id,
+            already_recorded: existing !== null,
+            review_id: existing?.id ?? null,
+            review_status:
+              existing?.review_status ?? null,
+            read_only: true,
+          });
+        } finally {
+          await pool.end();
+        }
+      } catch (error) {
+        return safeError(
+          "Pilot invoice review check failed",
+          error
+        );
+      }
+    }
+  );
+
+  // --------------------------------------------------
+  // PILOT REVIEW REGISTER: RECORD NEW ASSESSMENT
+  // --------------------------------------------------
+
+  server.registerTool(
+    "record_pilot_invoice_assessment",
+    {
+      title: "Record Pilot Invoice Assessment",
+      description:
+        "Records a new supervised AP assessment in PostgreSQL for a verified PDF in the permitted pilot Front inbox. New records await human review. Existing records are never overwritten. Does not modify Front, Xero or Google Sheets.",
+      inputSchema: {
+        conversation_id: z
+          .string()
+          .startsWith("cnv_")
+          .max(100),
+        message_id: z
+          .string()
+          .startsWith("msg_")
+          .max(100),
+        attachment_id: z
+          .string()
+          .startsWith("fil_")
+          .max(100),
+
+        supplier_name: z
+          .string()
+          .max(150)
+          .optional(),
+
+        invoice_number: z
+          .string()
+          .max(100)
+          .optional(),
+
+        document_type: z.enum([
+          "invoice",
+          "credit_note",
+          "other",
+          "unknown",
+        ]),
+
+        assessment: z.object({
+          invoice_date: z
+            .string()
+            .max(30)
+            .nullable(),
+          due_date: z
+            .string()
+            .max(30)
+            .nullable(),
+          billed_to: z
+            .string()
+            .max(200)
+            .nullable(),
+          net_gbp: z
+            .number()
+            .finite()
+            .nullable(),
+          vat_gbp: z
+            .number()
+            .finite()
+            .nullable(),
+          gross_gbp: z
+            .number()
+            .finite()
+            .nullable(),
+          xero_supplier: z
+            .string()
+            .max(150)
+            .nullable(),
+          duplicate_check: z
+            .string()
+            .max(500)
+            .nullable(),
+          proposed_account: z
+            .string()
+            .max(100)
+            .nullable(),
+          proposed_vat_treatment: z
+            .string()
+            .max(200)
+            .nullable(),
+          exceptions: z
+            .array(z.string().max(500))
+            .max(20),
+          evidence_notes: z
+            .string()
+            .max(3000)
+            .nullable(),
+          requires_human_review: z
+            .literal(true),
+        }).strict(),
+      },
+    },
+    async ({
+      conversation_id,
+      message_id,
+      attachment_id,
+      supplier_name,
+      invoice_number,
+      document_type,
+      assessment,
+    }) => {
+      try {
+        await verifyPilotReviewAttachment(
+          conversation_id,
+          message_id,
+          attachment_id
+        );
+
+        const pool = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          max: 1,
+          connectionTimeoutMillis: 5000,
+        });
+
+        try {
+          // Check first so a repeated assessment can
+          // return immediately without changing anything.
+          const existing =
+            await findExistingPilotReview(
+              pool,
+              message_id,
+              attachment_id
+            );
+
+          if (existing) {
+            return toolResult({
+              status: "already_recorded",
+              review_id: existing.id,
+              review_status: existing.review_status,
+              created: false,
+              existing_record_preserved: true,
+              xero_modified: false,
+              front_modified: false,
+              google_sheets_modified: false,
+            });
+          }
+
+          // The database also enforces uniqueness,
+          // protecting against simultaneous inserts.
+          const result =
+            await recordPilotAssessment(pool, {
+              frontConversationId: conversation_id,
+              frontMessageId: message_id,
+              attachmentId: attachment_id,
+              supplierName: supplier_name,
+              invoiceNumber: invoice_number,
+              documentType: document_type,
+              assessmentJson: assessment,
+            });
+
+          return toolResult({
+            status: result.created
+              ? "recorded"
+              : "already_recorded",
+            review_id: result.id,
+            review_status: result.review_status,
+            created: result.created,
+            requires_human_review: true,
+            xero_modified: false,
+            front_modified: false,
+            google_sheets_modified: false,
+          });
+        } finally {
+          await pool.end();
+        }
+      } catch (error) {
+        return safeError(
+          "Pilot invoice assessment recording failed",
           error
         );
       }
