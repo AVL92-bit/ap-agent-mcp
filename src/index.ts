@@ -1667,6 +1667,18 @@ server.registerTool(
       });
     }
   );
+    // Log the registered MCP tool names when the server is built.
+  // Diagnostic only: no invoice data or credentials.
+  const registeredTools = Object.keys(
+    (server as unknown as {
+      _registeredTools?: Record<string, unknown>;
+    })._registeredTools ?? {}
+  );
+
+  console.log(
+    "Registered MCP tools:",
+    registeredTools.join(", ")
+  );
   return server;
 }
 
