@@ -1457,6 +1457,216 @@ server.registerTool(
       }
     }
   );
+  // --------------------------------------------------
+  // COST CONTROL: ONE BOUNDED BATCH PREFLIGHT
+  // --------------------------------------------------
+  server.registerTool(
+    "prepare_pilot_review_batch",
+    {
+      title: "Prepare Pilot Review Batch",
+      description:
+        "Verifies up to five Front PDF attachments and checks existing PostgreSQL reviews in one call. Returns compact metadata only. No PDF downloads, Xero calls or writes.",
+      inputSchema: {
+        items: z.array(z.object({
+          conversation_id: z.string().startsWith("cnv_").max(100),
+          message_id: z.string().startsWith("msg_").max(100),
+          attachment_id: z.string().startsWith("fil_").max(100),
+        }).strict()).min(1).max(5),
+      },
+    },
+    async ({ items }) => {
+      if (
+        process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
+        !process.env.DATABASE_URL
+      ) {
+        return toolFailure("Pilot batch configuration is invalid");
+      }
+
+      const keys = items.map((item) =>
+        `${item.message_id}:${item.attachment_id}`
+      );
+
+      if (new Set(keys).size !== keys.length) {
+        return toolFailure("Duplicate message/attachment pair in batch");
+      }
+
+      const results: Array<{
+        conversation_id: string;
+        message_id: string;
+        attachment_id: string;
+        action: "skip_existing" | "assess" | "manual_review";
+        review_id: string | null;
+        review_status: string | null;
+        reason?: string;
+      }> = [];
+
+      // Verify each attachment before consulting the database.
+      // A failure affects only that item, and fails closed.
+      for (const item of items) {
+        try {
+          await verifyPilotReviewAttachment(
+            item.conversation_id,
+            item.message_id,
+            item.attachment_id
+          );
+
+          results.push({
+            ...item,
+            action: "assess",
+            review_id: null,
+            review_status: null,
+          });
+        } catch {
+          results.push({
+            ...item,
+            action: "manual_review",
+            review_id: null,
+            review_status: null,
+            reason: "Front attachment verification failed or incomplete",
+          });
+        }
+      }
+
+      const verified = results.filter(
+        (item) => item.action === "assess"
+      );
+
+      if (verified.length > 0) {
+        const pool = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          max: 1,
+          connectionTimeoutMillis: 5000,
+        });
+
+        try {
+          const messages = verified.map(
+            (item) => item.message_id
+          );
+
+          const attachments = verified.map(
+            (item) => item.attachment_id
+          );
+
+          const existing = await pool.query<{
+            id: string;
+            front_message_id: string;
+            attachment_id: string;
+            review_status: string;
+          }>(
+            `SELECT id::text, front_message_id, attachment_id, review_status
+             FROM pilot_invoice_reviews
+             WHERE (front_message_id, attachment_id) IN (
+               SELECT * FROM unnest($1::text[], $2::text[])
+             )`,
+            [messages, attachments]
+          );
+
+          const lookup = new Map(
+            existing.rows.map((row) => [
+              `${row.front_message_id}:${row.attachment_id}`,
+              row,
+            ])
+          );
+
+          for (const item of verified) {
+            const row = lookup.get(
+              `${item.message_id}:${item.attachment_id}`
+            );
+
+            if (row) {
+              item.action = "skip_existing";
+              item.review_id = row.id;
+              item.review_status = row.review_status;
+            }
+          }
+        } catch (error) {
+          console.error(
+            "Batch preflight database failed",
+            error instanceof Error
+              ? error.message
+              : "Unknown failure"
+          );
+
+          // Never assess when duplicate status is unknown.
+          for (const item of verified) {
+            item.action = "manual_review";
+            item.reason =
+              "Existing review status could not be checked";
+          }
+        } finally {
+          await pool.end();
+        }
+      }
+
+      return toolResult({
+        status: "ok",
+        items: results,
+        assessed_count: results.filter(
+          (item) => item.action === "assess"
+        ).length,
+        skipped_count: results.filter(
+          (item) => item.action === "skip_existing"
+        ).length,
+        manual_review_count: results.filter(
+          (item) => item.action === "manual_review"
+        ).length,
+        no_writes: true,
+        note:
+          "PostgreSQL awaiting_review never overrides a Google Sheets human hold",
+      });
+    }
+  );
+
+  // --------------------------------------------------
+  // COST CONTROL: DETERMINISTIC GBP TOTALS CHECK
+  // --------------------------------------------------
+  server.registerTool(
+    "check_pilot_invoice_totals",
+    {
+      title: "Check Pilot Invoice Totals",
+      description:
+        "Checks GBP net plus VAT equals gross using integer pennies. Does not determine VAT recoverability, validate the PDF, or make accounting decisions.",
+      inputSchema: {
+        net_gbp: z.number().finite(),
+        vat_gbp: z.number().finite(),
+        gross_gbp: z.number().finite(),
+      },
+    },
+    async ({ net_gbp, vat_gbp, gross_gbp }) => {
+      const amounts = [
+        net_gbp,
+        vat_gbp,
+        gross_gbp,
+      ];
+
+      const pennies = amounts.map(
+        (value) => Math.round(value * 100)
+      );
+
+      const valid = amounts.every(
+        (value, index) =>
+          Number.isSafeInteger(pennies[index]) &&
+          Math.abs(value * 100 - pennies[index]) < 0.000001
+      );
+
+      if (!valid) {
+        return toolFailure(
+          "Amounts must be valid GBP values to two decimal places"
+        );
+      }
+
+      return toolResult({
+        status: "ok",
+        reconciles:
+          pennies[0] + pennies[1] === pennies[2],
+        difference_pence:
+          pennies[2] - pennies[0] - pennies[1],
+        requires_human_vat_review: true,
+        document_values_not_independently_verified: true,
+        read_only: true,
+      });
+    }
+  );
   return server;
 }
 
