@@ -1760,7 +1760,57 @@ const httpServer =
         ) {
           return;
         }
+ // Protected diagnostic: confirms which AP tools
+        // are included in this running deployment.
+        // No credentials or business data are returned.
+        if (
+          url.pathname === "/diagnostics/tools" &&
+          req.method === "GET"
+        ) {
+          if (!isAuthorized(req)) {
+            res.writeHead(401, {
+              "Content-Type": "application/json",
+            });
+            res.end(JSON.stringify({
+              error: "Unauthorized",
+            }));
+            return;
+          }
 
+          const toolNames = [
+            "ap_connection_test",
+            "scan_enabled_ap_inboxes",
+            "get_front_message",
+            "get_invoice_attachment",
+            "get_pilot_xero_connection",
+            "test_pilot_xero_api_connection",
+            "test_pilot_xero_organisation",
+            "test_pilot_xero_supplier",
+            "test_pilot_xero_duplicate_invoice",
+            "assess_pilot_xero_invoice",
+            "test_pilot_xero_accounting_settings",
+            "test_pilot_xero_invoice_history",
+            "search_pilot_xero_invoice_history",
+            "get_pilot_coding_policies",
+            "check_pilot_invoice_review",
+            "record_pilot_invoice_assessment",
+            "prepare_pilot_review_batch",
+            "check_pilot_invoice_totals",
+          ];
+
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Cache-Control": "no-store",
+          });
+
+          res.end(JSON.stringify({
+            status: "ok",
+            deployment: "ap-agent-mcp",
+            tool_names: toolNames,
+            tool_count: toolNames.length,
+          }));
+          return;
+        }
         // Public Railway health check.
         if (
           url.pathname ===
