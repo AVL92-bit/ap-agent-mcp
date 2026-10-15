@@ -1340,24 +1340,50 @@ const port =
     process.env.PORT ||
       3000
   );
+import("./pilot-review-register.js")
+  .then(async ({ ensurePilotReviewRegister }) => {
+    const reviewPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: 1,
+      connectionTimeoutMillis: 5000,
+    });
 
-httpServer.listen(
-  port,
-  "0.0.0.0",
-  () => {
-    console.log(
-      `AP MCP server listening on port ${port}`
+    try {
+      await ensurePilotReviewRegister(reviewPool);
+
+      console.log(
+        "Pilot review register database ready"
+      );
+
+      httpServer.listen(
+        port,
+        "0.0.0.0",
+        () => {
+          console.log(
+            `AP MCP server listening on port ${port}`
+          );
+
+          console.log(
+            "Health endpoint: /health"
+          );
+
+          console.log(
+            "MCP endpoint: /mcp"
+          );
+        }
+      );
+    } finally {
+      await reviewPool.end();
+    }
+  })
+  .catch((error) => {
+    console.error(
+      "Pilot review register initialization failed:",
+      error
     );
 
-    console.log(
-      "Health endpoint: /health"
-    );
-
-    console.log(
-      "MCP endpoint: /mcp"
-    );
-  }
-);
+    process.exitCode = 1;
+  });
 
 process.on(
   "SIGTERM",
