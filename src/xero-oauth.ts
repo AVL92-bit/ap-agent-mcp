@@ -20,7 +20,7 @@ const REDIRECT =
   "https://ap-agent-mcp-production.up.railway.app/xero/callback";
 
 const SCOPES =
-  "offline_access accounting.invoices.read accounting.contacts.read accounting.settings.read";
+  "offline_access accounting.invoices accounting.attachments accounting.contacts.read accounting.settings.read";
 
 const htmlHeaders = {
   "Content-Type": "text/html; charset=utf-8",
