@@ -181,3 +181,25 @@ export async function recordPilotAssessment(
     created: false,
   };
 }
+export async function claimPilotDraft(
+  pool: Pool,
+  reviewId: string
+): Promise<boolean> {
+  const result = await pool.query(
+    `
+      UPDATE pilot_invoice_reviews
+      SET xero_draft_status = 'creating',
+          xero_draft_updated_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+        AND review_status = 'awaiting_review'
+        AND document_type = 'invoice'
+        AND xero_draft_id IS NULL
+        AND xero_draft_status IS NULL
+      RETURNING id
+    `,
+    [reviewId]
+  );
+
+  return result.rowCount === 1;
+}
