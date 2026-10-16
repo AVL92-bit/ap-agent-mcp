@@ -63,7 +63,20 @@ export async function ensurePilotReviewRegister(
       ADD COLUMN IF NOT EXISTS xero_draft_error TEXT,
       ADD COLUMN IF NOT EXISTS xero_draft_updated_at TIMESTAMPTZ
   `);
-
+  // Preserve existing human holds from the pilot Google Sheet.
+  // These attachments must not be processed into Xero drafts.
+  await pool.query(
+    `
+      UPDATE pilot_invoice_reviews
+      SET review_status = 'on_hold',
+          updated_at = NOW()
+      WHERE (front_message_id, attachment_id) IN (
+        ('msg_2ighxw0m', 'fil_4za3pfva'),
+        ('msg_2ihh8owm', 'fil_4ze0zmvq')
+      )
+        AND review_status = 'awaiting_review'
+    `
+  );
   // One Xero draft must never be linked to multiple assessments.
   await pool.query(`
     CREATE UNIQUE INDEX IF NOT EXISTS
