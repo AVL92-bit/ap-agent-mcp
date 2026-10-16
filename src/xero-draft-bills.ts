@@ -89,13 +89,16 @@ if (
     [PILOT_TENANT_ID]
   );
 
-  if (
+ if (
     connection.rowCount !== 1 ||
+    connection.rows[0].tenant_id !== PILOT_TENANT_ID ||
     connection.rows[0].tenant_name !==
       "St George's Road Surgery" ||
-    connection.rows[0].enabled !== true
+    connection.rows[0].enabled !== false
   ) {
-    throw new Error("Xero pilot connection is not enabled");
+    throw new Error(
+      "Xero pilot connection is not in the expected supervised state"
+    );
   }
 }
 export async function getPilotDraftReadiness(
