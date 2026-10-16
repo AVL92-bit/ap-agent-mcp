@@ -10,7 +10,9 @@ import {
   recordPilotAssessment,
 } from "./pilot-review-register.js";
 import { handleXeroOAuth } from "./xero-oauth.js";
-
+import {
+  getPilotDraftReadiness,
+} from "./xero-draft-bills.js";
 import {
   testPilotXeroConnection,
   testPilotXeroOrganisation,
@@ -1481,6 +1483,57 @@ server.registerTool(
       }
     }
   );
+   // --------------------------------------------------
+  // PILOT DRAFT: DATABASE READINESS CHECK
+  // --------------------------------------------------
+
+  server.registerTool(
+    "check_pilot_draft_database_readiness",
+    {
+      title: "Check Pilot Draft Database Readiness",
+      description:
+        "Checks saved invoice assessments, human holds and existing draft attempts. Read-only. Does not access Xero or create bills.",
+      inputSchema: {
+        review_id: z.string().regex(/^[0-9]{1,30}$/),
+      },
+    },
+    async ({ review_id }) => {
+      if (
+        process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
+        process.env.XERO_PILOT_TENANT_ID !==
+          "45a1074b-b172-4f49-a192-f0a8e293b54d" ||
+        !process.env.DATABASE_URL
+      ) {
+        return toolFailure("Pilot configuration is invalid");
+      }
+
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 1,
+        connectionTimeoutMillis: 5000,
+      });
+
+      try {
+        const result = await getPilotDraftReadiness(
+          pool,
+          review_id
+        );
+
+        return toolResult({
+          ...result,
+          xero_api_called: false,
+          draft_created: false,
+        });
+      } catch (error) {
+        return safeError(
+          "Pilot draft database readiness check failed",
+          error
+        );
+      } finally {
+        await pool.end();
+      }
+    }
+  );
   // --------------------------------------------------
   // PILOT REVIEW REGISTER: CHECK EXISTING ASSESSMENT
   // --------------------------------------------------
@@ -2077,7 +2130,9 @@ const httpServer =
             "test_pilot_xero_invoice_history",
             "search_pilot_xero_invoice_history",
             "get_pilot_coding_policies",
-            "check_pilot_invoice_review",
+"check_pilot_xero_draft_readiness",
+"check_pilot_draft_database_readiness",
+"check_pilot_invoice_review",
             "record_pilot_invoice_assessment",
             "prepare_pilot_review_batch",
             "check_pilot_invoice_totals",
