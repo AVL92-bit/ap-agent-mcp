@@ -41,12 +41,26 @@ export async function assertPilotDraftAllowed(
 
   const review = result.rows[0];
 
-  if (
+if (
     HELD_ATTACHMENTS.has(
       `${review.front_message_id}:${review.attachment_id}`
     )
   ) {
     throw new Error("Invoice is subject to a human hold");
+  }
+
+  // Check the full saved invoice assessment before
+  // permitting any draft-writing operation.
+  const readiness = await getPilotDraftReadiness(
+    pool,
+    reviewId
+  );
+
+  if (readiness.status !== "ready_for_further_checks") {
+    throw new Error(
+      "Invoice failed mandatory draft readiness checks: " +
+      readiness.reasons.join("; ")
+    );
   }
 
   if (review.review_status !== "awaiting_review") {
