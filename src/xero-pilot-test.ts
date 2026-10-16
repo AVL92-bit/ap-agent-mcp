@@ -902,7 +902,215 @@ async function verifyPilotConnection(
     await pool.end();
   }
 }
+// Separate, explicitly guarded session for Xero DRAFT writes.
+// Existing read-only verification functions remain unchanged.
 
+export type PilotXeroWriteSession = {
+  tenantId: string;
+  accessToken: string;
+};
+
+export async function getPilotXeroWriteSession():
+  Promise<PilotXeroWriteSession> {
+
+  const expectedTenantId =
+    "45a1074b-b172-4f49-a192-f0a8e293b54d";
+
+  if (
+    process.env.XERO_DRAFT_WRITES_ENABLED !== "true" ||
+    process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID ||
+    process.env.XERO_PILOT_TENANT_ID !== expectedTenantId ||
+    !process.env.DATABASE_URL ||
+    !process.env.XERO_CLIENT_ID ||
+    !process.env.XERO_CLIENT_SECRET
+  ) {
+    throw new Error("Xero draft-writing access is disabled");
+  }
+
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    max: 1,
+    connectionTimeoutMillis: 5000,
+  });
+
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const result = await client.query<ConnectionRow>(
+      `
+        SELECT connection_id, tenant_id, tenant_name,
+               tenant_type, encrypted_tokens, enabled
+        FROM xero_oauth_connections
+        WHERE tenant_id = $1
+        FOR UPDATE
+      `,
+      [expectedTenantId]
+    );
+
+    const connection = result.rows[0];
+
+    if (
+      result.rows.length !== 1 ||
+      connection.tenant_id !== expectedTenantId ||
+      connection.tenant_name !== EXPECTED_TENANT_NAME ||
+      connection.tenant_type !== "ORGANISATION" ||
+      connection.enabled !== true ||
+      !connection.connection_id
+    ) {
+      throw new Error("Xero write connection is not authorised");
+    }
+
+    let tokens = decrypt(connection.encrypted_tokens);
+
+    const expiresAt =
+      tokens.obtained_at +
+      (typeof tokens.expires_in === "number"
+        ? tokens.expires_in
+        : 0) * 1000;
+
+    if (Date.now() >= expiresAt - 5 * 60 * 1000) {
+      const credentials = Buffer.from(
+        `${process.env.XERO_CLIENT_ID}:${process.env.XERO_CLIENT_SECRET}`
+      ).toString("base64");
+
+      const response = await fetch(
+        "https://identity.xero.com/connect/token",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Basic ${credentials}`,
+            "Content-Type": "application/x-www-form-urlencoded",
+            Accept: "application/json",
+          },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: tokens.refresh_token,
+          }),
+          signal: AbortSignal.timeout(20000),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Xero token refresh failed (HTTP ${response.status})`
+        );
+      }
+
+      const refreshed = await response.json() as {
+        access_token?: string;
+        refresh_token?: string;
+        expires_in?: number;
+      };
+
+      if (
+        !refreshed.access_token ||
+        !refreshed.refresh_token ||
+        typeof refreshed.expires_in !== "number" ||
+        refreshed.expires_in <= 0
+      ) {
+        throw new Error("Xero token refresh was incomplete");
+      }
+
+      tokens = {
+        ...tokens,
+        ...refreshed,
+        access_token: refreshed.access_token,
+        refresh_token: refreshed.refresh_token,
+        expires_in: refreshed.expires_in,
+        obtained_at: Date.now(),
+      };
+
+      await client.query(
+        `
+          UPDATE xero_oauth_connections
+          SET encrypted_tokens = $1
+          WHERE connection_id = $2
+        `,
+        [encrypt(tokens), connection.connection_id]
+      );
+    }
+
+    await client.query("COMMIT");
+
+    // Verify the live tenant and connection before
+    // returning credentials to the server-side writer.
+    const connectionsResponse = await fetch(
+      "https://api.xero.com/connections",
+      {
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(20000),
+      }
+    );
+
+    if (!connectionsResponse.ok) {
+      throw new Error("Unable to verify Xero write connection");
+    }
+
+    const connections = await connectionsResponse.json() as
+      Array<{
+        id?: string;
+        tenantId?: string;
+        tenantName?: string;
+        tenantType?: string;
+      }>;
+
+    if (
+      !Array.isArray(connections) ||
+      connections.filter(
+        (item) =>
+          item.id === connection.connection_id &&
+          item.tenantId === expectedTenantId &&
+          item.tenantName === EXPECTED_TENANT_NAME &&
+          item.tenantType === "ORGANISATION"
+      ).length !== 1
+    ) {
+      throw new Error("Xero write tenant verification failed");
+    }
+
+    const organisationResponse = await fetch(
+      "https://api.xero.com/api.xro/2.0/Organisation",
+      {
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          "xero-tenant-id": expectedTenantId,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(20000),
+      }
+    );
+
+    if (!organisationResponse.ok) {
+      throw new Error("Unable to verify Xero organisation");
+    }
+
+    const organisation = await organisationResponse.json() as {
+      Organisations?: Array<{ Name?: string }>;
+    };
+
+    if (
+      organisation.Organisations?.length !== 1 ||
+      organisation.Organisations[0].Name !== EXPECTED_TENANT_NAME
+    ) {
+      throw new Error("Xero organisation verification failed");
+    }
+
+    return {
+      tenantId: expectedTenantId,
+      accessToken: tokens.access_token,
+    };
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
 export async function testPilotXeroConnection() {
   return verifyPilotConnection("connection");
 }
