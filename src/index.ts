@@ -1207,7 +1207,280 @@ server.registerTool(
       );
     }
   }
+// --------------------------------------------------
+  // XERO DRAFT: CONTROLLED PRE-FLIGHT CHECK
+  // No Xero writes are performed by this tool.
+  // --------------------------------------------------
 
+  server.registerTool(
+    "check_pilot_xero_draft_readiness",
+    {
+      title: "Check Pilot Xero Draft Readiness",
+      description:
+        "Checks a recorded invoice against the permitted Front PDF, " +
+        "human holds, recorded assessment, supplier and duplicate " +
+        "checks. Read-only. Does not create or approve a Xero bill.",
+      inputSchema: {
+        review_id: z.string().regex(/^[0-9]+$/).max(30),
+      },
+    },
+    async ({ review_id }) => {
+      if (
+        process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
+        process.env.XERO_PILOT_TENANT_ID !==
+          "45a1074b-b172-4f49-a192-f0a8e293b54d" ||
+        !process.env.DATABASE_URL
+      ) {
+        return toolFailure("Pilot configuration is invalid");
+      }
+
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 1,
+        connectionTimeoutMillis: 5000,
+      });
+
+      try {
+        const result = await pool.query(
+          `
+            SELECT
+              id::text,
+              front_conversation_id,
+              front_message_id,
+              attachment_id,
+              supplier_name,
+              invoice_number,
+              document_type,
+              assessment_json,
+              review_status,
+              xero_draft_id,
+              xero_draft_status
+            FROM pilot_invoice_reviews
+            WHERE id = $1
+          `,
+          [review_id]
+        );
+
+        if (result.rows.length !== 1) {
+          return toolFailure("Invoice assessment not found");
+        }
+
+        const review = result.rows[0];
+
+        const reasons: string[] = [];
+
+        // Preserve both existing Google Sheet holds,
+        // even if database status is accidentally changed.
+        const heldDocuments = new Set([
+          "msg_2ighxw0m:fil_4za3pfva",
+          "msg_2ihh8owm:fil_4ze0zmvq",
+        ]);
+
+        const documentKey =
+          `${review.front_message_id}:${review.attachment_id}`;
+
+        if (heldDocuments.has(documentKey)) {
+          reasons.push("Existing human hold");
+        }
+
+        if (review.review_status !== "awaiting_review") {
+          reasons.push("Review status does not permit drafting");
+        }
+
+        if (review.document_type !== "invoice") {
+          reasons.push("Document is not a supplier invoice");
+        }
+
+        if (
+          review.xero_draft_id !== null ||
+          review.xero_draft_status !== null
+        ) {
+          reasons.push(
+            "Existing draft or previous draft-creation attempt"
+          );
+        }
+
+        const assessment =
+          review.assessment_json as Record<string, unknown>;
+
+        if (
+          !assessment ||
+          typeof assessment !== "object" ||
+          Array.isArray(assessment)
+        ) {
+          reasons.push("Assessment data is invalid");
+        }
+
+        const details =
+          assessment &&
+          typeof assessment === "object" &&
+          !Array.isArray(assessment)
+            ? assessment
+            : {};
+
+        if (
+          details.billed_to !== "St George's Road Surgery"
+        ) {
+          reasons.push(
+            "Invoice billing entity is not exactly verified"
+          );
+        }
+
+        if (
+          !Array.isArray(details.exceptions) ||
+          details.exceptions.length > 0
+        ) {
+          reasons.push(
+            "Assessment has exceptions or missing exception data"
+          );
+        }
+
+        const amounts = [
+          details.net_gbp,
+          details.vat_gbp,
+          details.gross_gbp,
+        ];
+
+        const validAmounts = amounts.every(
+          (amount) =>
+            typeof amount === "number" &&
+            Number.isFinite(amount) &&
+            amount >= 0 &&
+            Math.abs(amount * 100 - Math.round(amount * 100)) <
+              0.000001
+        );
+
+        if (!validAmounts) {
+          reasons.push("Invoice amounts are invalid");
+        } else {
+          const [net, vat, gross] = amounts as number[];
+
+          if (
+            Math.round(net * 100) +
+              Math.round(vat * 100) !==
+            Math.round(gross * 100)
+          ) {
+            reasons.push("Net, VAT and gross do not reconcile");
+          }
+
+          if (gross <= 0) {
+            reasons.push("Invoice gross amount must be positive");
+          }
+        }
+
+        const validDate = (value: unknown): boolean => {
+          if (
+            typeof value !== "string" ||
+            !/^\d{4}-\d{2}-\d{2}$/.test(value)
+          ) {
+            return false;
+          }
+
+          const date = new Date(`${value}T00:00:00Z`);
+
+          return (
+            !Number.isNaN(date.getTime()) &&
+            date.toISOString().slice(0, 10) === value
+          );
+        };
+
+        if (
+          !validDate(details.invoice_date) ||
+          !validDate(details.due_date)
+        ) {
+          reasons.push(
+            "Invoice date or due date requires verification"
+          );
+        }
+
+        if (
+          typeof review.supplier_name !== "string" ||
+          !review.supplier_name.trim() ||
+          typeof review.invoice_number !== "string" ||
+          !review.invoice_number.trim()
+        ) {
+          reasons.push(
+            "Supplier name or invoice number is missing"
+          );
+        }
+
+        // Stop before external API calls if the local
+        // assessment already fails a mandatory condition.
+        if (reasons.length > 0) {
+          return toolResult({
+            status: "blocked",
+            review_id,
+            reasons,
+            xero_checks_performed: false,
+            draft_created: false,
+          });
+        }
+
+        // Reverify the original Front attachment.
+        await verifyPilotReviewAttachment(
+          review.front_conversation_id,
+          review.front_message_id,
+          review.attachment_id
+        );
+
+        // Reuse the established Xero read-only checks.
+        // These require the pilot connection to remain disabled.
+        const xero = await assessPilotXeroInvoice({
+          supplier_name: review.supplier_name,
+          invoice_number: review.invoice_number,
+        });
+
+        if (
+          xero.status !== "xero_checks_clear" ||
+          xero.supplier_verified !== true ||
+          xero.duplicate_search_complete !== true ||
+          xero.duplicate_found_for_supplier !== false ||
+          xero.matching_supplier_bill_count !== 0 ||
+          xero.same_number_other_supplier_bill_count !== 0
+        ) {
+          return toolResult({
+            status: "blocked",
+            review_id,
+            reasons: [
+              "Xero supplier or duplicate checks did not clear",
+            ],
+            xero_check_status: xero.status,
+            draft_created: false,
+          });
+        }
+
+        // Passing these checks does NOT authorise creation.
+        // Account code, VAT treatment and original PDF bytes
+        // still require validation by the write module.
+        return toolResult({
+          status: "preflight_checks_clear",
+          review_id,
+          supplier_name: review.supplier_name,
+          invoice_number: review.invoice_number,
+          front_pdf_membership_verified: true,
+          xero_supplier_verified: true,
+          xero_duplicate_search_complete: true,
+          outstanding_requirements: [
+            "Approved account code",
+            "Verified Xero VAT tax type",
+            "Original PDF download and integrity check",
+            "Atomic draft claim",
+            "Xero DRAFT creation",
+            "Original PDF upload and attachment verification",
+          ],
+          invoice_ready_for_draft: false,
+          draft_created: false,
+        });
+      } catch (error) {
+        return safeError(
+          "Pilot Xero draft preflight failed",
+          error
+        );
+      } finally {
+        await pool.end();
+      }
+    }
+  );
   // --------------------------------------------------
   // PILOT REVIEW REGISTER: CHECK EXISTING ASSESSMENT
   // --------------------------------------------------
