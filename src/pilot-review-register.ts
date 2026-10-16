@@ -50,6 +50,26 @@ export async function ensurePilotReviewRegister(
           )
         )
     )
+`);
+
+  // Add draft-tracking fields to existing pilot databases.
+  // Existing assessments and review statuses are preserved.
+  await pool.query(`
+    ALTER TABLE pilot_invoice_reviews
+      ADD COLUMN IF NOT EXISTS xero_draft_id TEXT,
+      ADD COLUMN IF NOT EXISTS xero_draft_status TEXT,
+      ADD COLUMN IF NOT EXISTS xero_attachment_verified BOOLEAN
+        NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS xero_draft_error TEXT,
+      ADD COLUMN IF NOT EXISTS xero_draft_updated_at TIMESTAMPTZ
+  `);
+
+  // One Xero draft must never be linked to multiple assessments.
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      pilot_invoice_reviews_xero_draft_unique
+    ON pilot_invoice_reviews (xero_draft_id)
+    WHERE xero_draft_id IS NOT NULL
   `);
 }
 
