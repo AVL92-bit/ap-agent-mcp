@@ -12,6 +12,7 @@ import {
 import { handleXeroOAuth } from "./xero-oauth.js";
 import {
   getPilotDraftReadiness,
+  createPilotDraftWithPdf,
 } from "./xero-draft-bills.js";
 import {
   testPilotXeroConnection,
@@ -1645,6 +1646,77 @@ server.registerTool(
       } catch (error) {
         return safeError(
           "Pilot draft database readiness check failed",
+          error
+        );
+      } finally {
+        await pool.end();
+      }
+    }
+  );
+   // --------------------------------------------------
+  // XERO: SUPERVISED PILOT DRAFT CREATION
+  // --------------------------------------------------
+
+  server.registerTool(
+    "create_pilot_xero_draft_with_pdf",
+    {
+      title: "Create Pilot Xero Draft With Original PDF",
+      description:
+        "Creates a DRAFT purchase bill only for an eligible " +
+        "St George's Road Surgery pilot invoice with an approved " +
+        "coding rule, verified supplier, no Xero duplicate, and " +
+        "original Front PDF. Attaches and verifies the PDF. " +
+        "Never submits, approves or pays bills. " +
+        "Disabled unless XERO_DRAFT_WRITES_ENABLED is true.",
+      inputSchema: {
+        review_id: z.string().regex(/^[0-9]{1,30}$/),
+      },
+    },
+    async ({ review_id }) => {
+      if (
+        process.env.XERO_DRAFT_WRITES_ENABLED !== "true"
+      ) {
+        return toolFailure(
+          "Xero draft writes are disabled"
+        );
+      }
+
+      if (
+        process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
+        process.env.XERO_PILOT_TENANT_ID !==
+          "45a1074b-b172-4f49-a192-f0a8e293b54d" ||
+        !process.env.DATABASE_URL
+      ) {
+        return toolFailure(
+          "Pilot configuration is invalid"
+        );
+      }
+
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 1,
+        connectionTimeoutMillis: 5000,
+      });
+
+      try {
+        // Account 449 is the sole approved pilot coding rule.
+        // No account code or VAT type is accepted from the agent.
+        const result = await createPilotDraftWithPdf(
+          pool,
+          review_id,
+          "449",
+          "NONE"
+        );
+
+        return toolResult({
+          ...result,
+          submitted_for_approval: false,
+          approved: false,
+          payment_initiated: false,
+        });
+      } catch (error) {
+        return safeError(
+          "Pilot Xero draft creation failed",
           error
         );
       } finally {
