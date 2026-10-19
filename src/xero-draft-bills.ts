@@ -19,7 +19,13 @@ export async function assertPilotDraftAllowed(
   if (process.env.XERO_PILOT_TENANT_ID !== PILOT_TENANT_ID) {
     throw new Error("Unexpected Xero pilot tenant");
   }
+  if (process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q") {
+    throw new Error("Unexpected Front pilot inbox");
+  }
 
+  if (!/^[0-9]{1,30}$/.test(reviewId)) {
+    throw new Error("Invalid pilot review ID");
+  }
   const result = await pool.query(
     `
       SELECT
