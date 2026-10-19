@@ -535,8 +535,6 @@ export async function createPilotXeroDraftBill(
     !contactId ||
     !accountCode ||
     taxType !== "NONE" ||
-    invoice.vat !== 0 ||
-    invoice.net !== invoice.gross ||
     !validDate(invoice.invoiceDate) ||
     !validDate(invoice.dueDate)
   ) {
@@ -571,7 +569,7 @@ export async function createPilotXeroDraftBill(
                 Description:
                   `Supplier invoice ${invoice.invoiceNumber}`,
                 Quantity: 1,
-                UnitAmount: invoice.net,
+                UnitAmount: invoice.gross,
                 AccountCode: accountCode,
                 TaxType: taxType,
               },
@@ -690,7 +688,6 @@ export async function createPilotDraftWithPdf(
     invoice.supplierName !== "AMS Accountants (DD)" ||
     accountCode !== "449" ||
     taxType !== "NONE" ||
-    invoice.vat !== 0
   ) {
     throw new Error(
       "No approved automatic coding/VAT rule for this invoice"
