@@ -956,7 +956,7 @@ export async function getPilotXeroWriteSession():
       connection.tenant_id !== expectedTenantId ||
       connection.tenant_name !== EXPECTED_TENANT_NAME ||
       connection.tenant_type !== "ORGANISATION" ||
-      connection.enabled !== true ||
+      connection.enabled !== false ||
       !connection.connection_id
     ) {
       throw new Error("Xero write connection is not authorised");
