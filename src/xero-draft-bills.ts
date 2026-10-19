@@ -228,3 +228,75 @@ export async function getPilotDraftReadiness(
     reasons,
   };
 }
+
+invoiceDate: string;
+  dueDate: string;
+  net: number;
+  vat: number;
+  gross: number;
+}> {
+  const readiness = await getPilotDraftReadiness(
+    pool,
+    reviewId
+  );
+
+  if (readiness.status !== "ready_for_further_checks") {
+    throw new Error(
+      "Invoice is not ready for drafting: " +
+      readiness.reasons.join("; ")
+    );
+  }
+
+  const result = await pool.query(
+    `
+      SELECT
+        front_conversation_id,
+        front_message_id,
+        attachment_id,
+        supplier_name,
+        invoice_number,
+        assessment_json
+      FROM pilot_invoice_reviews
+      WHERE id = $1
+    `,
+    [reviewId]
+  );
+
+  if (result.rows.length !== 1) {
+    throw new Error("Pilot invoice review not found");
+  }
+
+  const row = result.rows[0];
+  const assessment = row.assessment_json as Record<
+    string,
+    unknown
+  >;
+
+  const invoiceDate = assessment.invoice_date;
+  const dueDate = assessment.due_date;
+
+  if (
+    typeof invoiceDate !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(invoiceDate) ||
+    typeof dueDate !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)
+  ) {
+    throw new Error(
+      "Invoice date or due date requires verification"
+    );
+  }
+
+  return {
+    reviewId,
+    conversationId: row.front_conversation_id,
+    messageId: row.front_message_id,
+    attachmentId: row.attachment_id,
+    supplierName: row.supplier_name,
+    invoiceNumber: row.invoice_number,
+    invoiceDate,
+    dueDate,
+    net: assessment.net_gbp as number,
+    vat: assessment.vat_gbp as number,
+    gross: assessment.gross_gbp as number,
+  };
+}
