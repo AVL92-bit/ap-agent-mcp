@@ -229,7 +229,17 @@ export async function getPilotDraftReadiness(
   };
 }
 
-invoiceDate: string;
+export async function loadPilotDraftInvoice(
+  pool: Pool,
+  reviewId: string
+): Promise<{
+  reviewId: string;
+  conversationId: string;
+  messageId: string;
+  attachmentId: string;
+  supplierName: string;
+  invoiceNumber: string;
+  invoiceDate: string;
   dueDate: string;
   net: number;
   vat: number;
