@@ -310,3 +310,95 @@ export async function loadPilotDraftInvoice(
     gross: assessment.gross_gbp as number,
   };
 }
+export async function createPilotXeroDraftBill(
+  tenantId: string,
+  accessToken: string,
+  contactId: string,
+  invoice: Awaited<ReturnType<typeof loadPilotDraftInvoice>>,
+  accountCode: string,
+  taxType: string
+): Promise<string> {
+  if (
+    process.env.XERO_DRAFT_WRITES_ENABLED !== "true" ||
+    tenantId !== PILOT_TENANT_ID
+  ) {
+    throw new Error("Xero draft creation is disabled");
+  }
+
+  if (
+    !contactId ||
+    !accountCode ||
+    !taxType ||
+    !invoice.invoiceNumber ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(invoice.invoiceDate) ||
+    !/^\d{4}-\d{2}-\d{2}$/.test(invoice.dueDate)
+  ) {
+    throw new Error("Draft invoice data is incomplete");
+  }
+
+  const response = await fetch(
+    "https://api.xero.com/api.xro/2.0/Invoices",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "xero-tenant-id": tenantId,
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        Invoices: [
+          {
+            Type: "ACCPAY",
+            Status: "DRAFT",
+            Contact: { ContactID: contactId },
+            InvoiceNumber: invoice.invoiceNumber,
+            Date: invoice.invoiceDate,
+            DueDate: invoice.dueDate,
+            CurrencyCode: "GBP",
+            LineAmountTypes: "Exclusive",
+            LineItems: [
+              {
+                Description: `Supplier invoice ${invoice.invoiceNumber}`,
+                Quantity: 1,
+                UnitAmount: invoice.net,
+                AccountCode: accountCode,
+                TaxType: taxType,
+              },
+            ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(20000),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Xero draft creation failed (HTTP ${response.status})`
+    );
+  }
+
+  const result = (await response.json()) as {
+    Invoices?: Array<{
+      InvoiceID?: string;
+      Status?: string;
+      Type?: string;
+    }>;
+  };
+
+  const created = result.Invoices?.[0];
+
+  if (
+    result.Invoices?.length !== 1 ||
+    !created?.InvoiceID ||
+    created.Status !== "DRAFT" ||
+    created.Type !== "ACCPAY"
+  ) {
+    throw new Error(
+      "Xero did not confirm a single DRAFT purchase bill"
+    );
+  }
+
+  return created.InvoiceID;
+}
