@@ -687,7 +687,7 @@ export async function createPilotDraftWithPdf(
   if (
     invoice.supplierName !== "AMS Accountants (DD)" ||
     accountCode !== "449" ||
-    taxType !== "NONE" ||
+    taxType !== "NONE"
   ) {
     throw new Error(
       "No approved automatic coding/VAT rule for this invoice"
