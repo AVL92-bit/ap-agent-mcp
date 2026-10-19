@@ -218,7 +218,125 @@ function safeError(
     `${label}. Check Railway logs.`
   );
 }
+export async function downloadVerifiedPilotPdf(
+  conversationId: string,
+  messageId: string,
+  fileId: string
+): Promise<{
+  filename: string;
+  bytes: Buffer;
+}> {
+  if (
+    process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
+    !/^cnv_[A-Za-z0-9_-]+$/.test(conversationId) ||
+    !/^msg_[A-Za-z0-9_-]+$/.test(messageId) ||
+    !/^fil_[A-Za-z0-9_-]+$/.test(fileId)
+  ) {
+    throw new Error("Front pilot PDF request is not permitted");
+  }
 
+  const membership = await verifyConversationInbox(conversationId);
+
+  if (!membership.allowed) {
+    throw new Error("Front conversation inbox not verified");
+  }
+
+  const listing = await getConversationMessages(conversationId, 100);
+
+  if (listing.hasMore) {
+    throw new Error("Front message listing is incomplete");
+  }
+
+  const messages = listing.messages.filter(
+    (message) => message.id === messageId
+  );
+
+  if (messages.length !== 1) {
+    throw new Error("Front message membership not verified");
+  }
+
+  const attachments = (messages[0].attachments ?? []).filter(
+    (attachment) => attachmentId(attachment) === fileId
+  );
+
+  if (
+    attachments.length !== 1 ||
+    attachments[0].content_type !== "application/pdf"
+  ) {
+    throw new Error("Original PDF attachment not verified");
+  }
+
+  const maximumBytes = 10 * 1024 * 1024;
+
+  if (
+    typeof attachments[0].size === "number" &&
+    attachments[0].size > maximumBytes
+  ) {
+    throw new Error("Original PDF exceeds size limit");
+  }
+
+  const { token } = frontConfig();
+
+  const response = await fetch(
+    `https://api2.frontapp.com/messages/${encodeURIComponent(
+      messageId
+    )}/download/${encodeURIComponent(fileId)}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/pdf",
+      },
+      signal: AbortSignal.timeout(20000),
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Original Front PDF download failed (HTTP ${response.status})`
+    );
+  }
+
+  if (
+    response.headers.get("content-type")?.split(";")[0].trim() !==
+    "application/pdf"
+  ) {
+    throw new Error("Front download did not return a PDF");
+  }
+
+  const contentLength = response.headers.get("content-length");
+
+  if (
+    contentLength !== null &&
+    Number(contentLength) > maximumBytes
+  ) {
+    throw new Error("Original PDF exceeds size limit");
+  }
+
+  const bytes = Buffer.from(await response.arrayBuffer());
+
+  if (
+    bytes.length < 8 ||
+    bytes.length > maximumBytes ||
+    bytes.subarray(0, 5).toString("ascii") !== "%PDF-"
+  ) {
+    throw new Error("Downloaded original PDF is invalid");
+  }
+
+  const originalName = attachments[0].filename ?? "invoice.pdf";
+
+  const filename = originalName
+    .replace(/[^A-Za-z0-9._ -]/g, "_")
+    .slice(0, 150);
+
+  return {
+    filename:
+      filename.toLowerCase().endsWith(".pdf")
+        ? filename
+        : `${filename}.pdf`,
+    bytes,
+  };
+}
 function buildMcpServer() {
   const server = new McpServer(
     {
