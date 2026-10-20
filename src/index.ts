@@ -4,6 +4,7 @@ import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
 import { PDFParse } from "pdf-parse";
+import mammoth from "mammoth";
 import { Pool } from "pg";
 import {
   findExistingPilotReview,
@@ -553,8 +554,8 @@ function buildMcpServer() {
     "get_invoice_attachment",
     {
       title: "Get Invoice Attachment",
-      description:
-        "Retrieves and extracts PDF text only after verifying the conversation, message and attachment belong to the enabled AP inbox. Read-only. Never creates bills.",
+            description:
+        "Retrieves and extracts PDF or DOCX invoice text after verifying the conversation, message and attachment belong to the enabled AP inbox. Read-only. Never creates bills.",
       inputSchema: z.object({
         conversation_id: z
           .string()
@@ -658,34 +659,43 @@ function buildMcpServer() {
         const attachment =
           matchingAttachments[0];
 
-        if (
-          attachment.content_type !==
-          "application/pdf"
-        ) {
-          return toolResult({
-            status: "review_required",
-            reason:
-              "Attachment requires non-PDF document extraction",
-            conversation_id,
-            message_id,
-            attachment_id,
-            original_filename:
-              attachment.filename ?? null,
-            original_content_type:
-              attachment.content_type ?? null,
-            invoice_ready_for_draft: false,
-            bills_created: false,
-          });
-        }
+       const isPdf =
+  attachment.content_type ===
+  "application/pdf";
 
-        if (
-          typeof attachment.size ===
-            "number" &&
-          attachment.size >
-            MAX_PDF_BYTES
+const isDocx =
+  attachment.filename
+    ?.toLowerCase()
+    .endsWith(".docx") === true &&
+  [
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/octet-stream",
+  ].includes(
+    attachment.content_type ?? ""
+  );
+
+if (!isPdf && !isDocx) {
+  return toolResult({
+    status: "review_required",
+    reason:
+      "Unsupported attachment format; human review required",
+    conversation_id,
+    message_id,
+    attachment_id,
+    original_filename:
+      attachment.filename ?? null,
+    original_content_type:
+      attachment.content_type ?? null,
+    invoice_ready_for_draft: false,
+    bills_created: false,
+  });
+}
+ if (
+          typeof attachment.size === "number" &&
+          attachment.size > MAX_PDF_BYTES
         ) {
           return toolFailure(
-            "PDF exceeds the maximum allowed size"
+            "Attachment exceeds the maximum allowed size"
           );
         }
 
@@ -705,8 +715,9 @@ function buildMcpServer() {
               headers: {
                 Authorization:
                   `Bearer ${token}`,
-                Accept:
-                  "application/pdf",
+Accept: isPdf
+  ? "application/pdf"
+  : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
               },
               signal:
                 AbortSignal.timeout(20000),
@@ -727,12 +738,19 @@ function buildMcpServer() {
             .trim() ?? "";
 
         if (
-          contentType !==
-          "application/pdf"
+          (isPdf && contentType !== "application/pdf") ||
+          (isDocx &&
+            ![
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              "application/octet-stream",
+            ].includes(contentType))
         ) {
-          return toolFailure(
-            "Downloaded attachment is not a PDF"
-          );
+          return toolResult({
+            status: "review_required",
+            reason: "Downloaded attachment has an unexpected content type",
+            invoice_ready_for_draft: false,
+            bills_created: false,
+          });
         }
 
         // Check the declared size before
@@ -765,7 +783,59 @@ function buildMcpServer() {
             "Downloaded PDF exceeds the maximum allowed size"
           );
         }
+ if (isDocx) {
+          if (
+            pdfBuffer.length < 4 ||
+            pdfBuffer[0] !== 0x50 ||
+            pdfBuffer[1] !== 0x4b
+          ) {
+            return toolResult({
+              status: "review_required",
+              reason:
+                "Word document failed file-signature verification",
+              invoice_ready_for_draft: false,
+              bills_created: false,
+            });
+          }
 
+          const extracted = await mammoth.extractRawText({
+            buffer: pdfBuffer,
+          });
+
+          const invoiceText = extracted.value?.trim() ?? "";
+
+          if (
+            invoiceText.length < 50 ||
+            invoiceText.length > MAX_EXTRACTED_CHARACTERS
+          ) {
+            return toolResult({
+              status: "review_required",
+              reason:
+                "Word document text is missing or exceeds the extraction limit",
+              extracted_characters: invoiceText.length,
+              invoice_ready_for_draft: false,
+              bills_created: false,
+            });
+          }
+
+          return toolResult({
+            status: "ok",
+            conversation_id,
+            message_id,
+            attachment_id,
+            verified_inbox_id: inboxId,
+            original_filename: attachment.filename,
+            original_content_type: attachment.content_type,
+            original_size: pdfBuffer.length,
+            extraction_method: "docx_text",
+            extracted_characters: invoiceText.length,
+            invoice_text: invoiceText,
+            requires_field_verification: true,
+            invoice_ready_for_draft: false,
+            bills_created: false,
+          });
+        }
+        
         parser = new PDFParse({
           data: new Uint8Array(
             pdfBuffer
