@@ -380,12 +380,13 @@ function buildMcpServer() {
   // FRONT: SCAN ENABLED PILOT INBOX
   // --------------------------------------------------
 
+ 
   server.registerTool(
     "scan_enabled_ap_inboxes",
     {
       title: "Scan Enabled AP Inboxes",
       description:
-        "Lists conversations from the configured enabled AP inbox only. Read-only. The agent cannot select another inbox.",
+        "Lists conversations in the permitted AP inbox, prioritising active conversations without previous invoice assessments. Previously reviewed conversations are identified separately because they may contain new attachments. Read-only.",
     },
     async () => {
       try {
@@ -423,27 +424,92 @@ function buildMcpServer() {
           );
         }
 
-        const conversations = data._results.map(
-          (conversation) => ({
-            id: conversation.id ?? null,
+        const pool = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          max: 1,
+          connectionTimeoutMillis: 5000,
+        });
+
+        let reviewedIds: Set<string>;
+
+        try {
+          const result = await pool.query<{
+            front_conversation_id: string;
+          }>(
+            `SELECT DISTINCT front_conversation_id
+             FROM pilot_invoice_reviews
+             WHERE front_conversation_id IS NOT NULL`
+          );
+
+          reviewedIds = new Set(
+            result.rows.map(
+              (row) => row.front_conversation_id
+            )
+          );
+        } finally {
+          await pool.end();
+        }
+
+        const conversations = data._results
+          .filter(
+            (conversation) =>
+              typeof conversation.id === "string"
+          )
+          .map((conversation) => ({
+            id: conversation.id as string,
             subject: conversation.subject ?? null,
             status: conversation.status ?? null,
             created_at:
               conversation.created_at ?? null,
             updated_at:
               conversation.updated_at ?? null,
-          })
-        );
+            has_previous_assessment:
+              reviewedIds.has(conversation.id as string),
+          }));
+
+        // Prioritise active conversations with no previous
+        // assessment, without hiding existing conversations.
+        const priorityConversations =
+          conversations.filter(
+            (conversation) =>
+              conversation.status !== "archived" &&
+              !conversation.has_previous_assessment
+          );
+
+        const previouslyReviewedConversations =
+          conversations.filter(
+            (conversation) =>
+              conversation.has_previous_assessment
+          );
+
+        const otherConversations =
+          conversations.filter(
+            (conversation) =>
+              conversation.status === "archived" &&
+              !conversation.has_previous_assessment
+          );
 
         return toolResult({
           status: "ok",
           enabled_inbox_id: inboxId,
-          conversation_count:
-            conversations.length,
-          conversations,
-          has_more: Boolean(
-            data._pagination?.next
-          ),
+          conversation_count: conversations.length,
+          priority_conversations:
+            priorityConversations,
+          previously_reviewed_conversations:
+            previouslyReviewedConversations,
+          other_conversations:
+            otherConversations,
+          has_more: Boolean(data._pagination?.next),
+          selection_guidance:
+            "Inspect priority_conversations first. " +
+            "Use prepare_pilot_review_batch before extracting. " +
+            "Previously reviewed conversations may contain " +
+            "new attachments and must not be treated as " +
+            "permanently completed. Never discard payment " +
+            "reminders or finance correspondence solely " +
+            "because no attachment is visible.",
+          read_only: true,
+          bills_created: false,
         });
       } catch (error) {
         return safeError(
