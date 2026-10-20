@@ -367,10 +367,11 @@ async function verifiedSupplierContactId(
   return data.Contacts[0].ContactID;
 }
 
-async function originalFrontPdf(
+async function originalFrontDocument(
   invoice: DraftInvoice
 ): Promise<{
   filename: string;
+  contentType: string;
   bytes: Buffer;
 }> {
   const token = process.env.FRONT_API_TOKEN;
@@ -379,16 +380,18 @@ async function originalFrontPdf(
     throw new Error("Front token missing");
   }
 
-  // Verify that the conversation belongs to the pilot inbox.
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
+
+  // Verify the conversation belongs to the pilot inbox.
   const inboxResponse = await fetch(
     `https://api2.frontapp.com/conversations/${
       encodeURIComponent(invoice.conversationId)
     }/inboxes`,
     {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
+      headers,
       signal: AbortSignal.timeout(20000),
     }
   );
@@ -412,15 +415,13 @@ async function originalFrontPdf(
     throw new Error("Conversation is outside pilot inbox");
   }
 
+  // Verify the message and original attachment.
   const messagesResponse = await fetch(
     `https://api2.frontapp.com/conversations/${
       encodeURIComponent(invoice.conversationId)
     }/messages?limit=100`,
     {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
+      headers,
       signal: AbortSignal.timeout(20000),
     }
   );
@@ -459,19 +460,66 @@ async function originalFrontPdf(
 
   const attachments = (
     messages[0].attachments ?? []
-  ).filter(
-    (item) =>
-      item.url?.includes(
-        `/download/${invoice.attachmentId}`
-      )
+  ).filter((item) =>
+    item.url?.includes(
+      `/download/${invoice.attachmentId}`
+    )
   );
 
+  if (attachments.length !== 1) {
+    throw new Error("Original Front attachment not verified");
+  }
+
+  const attachment = attachments[0];
+  const maximumBytes = 10 * 1024 * 1024;
+
+  const filename = attachment.filename;
+
   if (
-    attachments.length !== 1 ||
-    attachments[0].content_type !== "application/pdf" ||
-    (attachments[0].size ?? 0) > 10 * 1024 * 1024
+    !filename ||
+    filename.length > 150 ||
+    filename === "." ||
+    filename === ".." ||
+    !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(filename)
   ) {
-    throw new Error("Original PDF not verified");
+    throw new Error(
+      "Original attachment filename requires human review"
+    );
+  }
+
+  const extension = filename
+    .split(".")
+    .pop()
+    ?.toLowerCase();
+
+  const permittedTypes: Record<string, string> = {
+    pdf: "application/pdf",
+    doc: "application/msword",
+    docx:
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx:
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    txt: "text/plain",
+    csv: "text/csv",
+  };
+
+  const contentType = extension
+    ? permittedTypes[extension]
+    : undefined;
+
+  if (
+    !contentType ||
+    attachment.content_type !== contentType ||
+    (typeof attachment.size === "number" &&
+      attachment.size > maximumBytes)
+  ) {
+    throw new Error(
+      "Original attachment format or size requires human review"
+    );
   }
 
   const response = await fetch(
@@ -481,40 +529,64 @@ async function originalFrontPdf(
     {
       headers: {
         Authorization: `Bearer ${token}`,
-        Accept: "application/pdf",
+        Accept: contentType,
       },
       signal: AbortSignal.timeout(20000),
     }
   );
 
-  if (
-    !response.ok ||
-    response.headers.get("content-type")
-      ?.split(";")[0].trim() !== "application/pdf"
-  ) {
-    throw new Error("Original PDF download failed");
+  if (!response.ok) {
+    throw new Error(
+      `Original Front attachment download failed (HTTP ${response.status})`
+    );
   }
 
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const downloadedType = response.headers
+    .get("content-type")
+    ?.split(";")[0]
+    .trim();
+
+  if (downloadedType !== contentType) {
+    throw new Error(
+      "Downloaded attachment content type is not verified"
+    );
+  }
+
+  const declaredLength = response.headers.get(
+    "content-length"
+  );
 
   if (
-    bytes.length < 8 ||
-    bytes.length > 10 * 1024 * 1024 ||
+    declaredLength !== null &&
+    Number(declaredLength) > maximumBytes
+  ) {
+    throw new Error("Original attachment exceeds size limit");
+  }
+
+  const bytes = Buffer.from(
+    await response.arrayBuffer()
+  );
+
+  if (
+    bytes.length === 0 ||
+    bytes.length > maximumBytes
+  ) {
+    throw new Error(
+      "Original attachment is empty or exceeds size limit"
+    );
+  }
+
+  // Check PDF signature when applicable.
+  if (
+    contentType === "application/pdf" &&
     bytes.subarray(0, 5).toString("ascii") !== "%PDF-"
   ) {
-    throw new Error("Original PDF is invalid");
+    throw new Error("Original PDF signature is invalid");
   }
 
-  const filename = (
-    attachments[0].filename || "invoice.pdf"
-  )
-    .replace(/[^A-Za-z0-9._ -]/g, "_")
-    .slice(0, 150);
-
   return {
-    filename: filename.toLowerCase().endsWith(".pdf")
-      ? filename
-      : `${filename}.pdf`,
+    filename,
+    contentType,
     bytes,
   };
 }
@@ -619,11 +691,12 @@ export async function createPilotXeroDraftBill(
   return created.InvoiceID;
 }
 
-async function attachAndVerifyPdf(
+async function attachAndVerifyOriginal(
   tenantId: string,
   accessToken: string,
   draftId: string,
   filename: string,
+  contentType: string,
   bytes: Buffer
 ): Promise<void> {
   const attachmentUrl =
@@ -636,7 +709,7 @@ async function attachAndVerifyPdf(
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "xero-tenant-id": tenantId,
-      "Content-Type": "application/pdf",
+      "Content-Type": contentType,
       Accept: "application/json",
     },
     body: new Uint8Array(bytes),
@@ -645,7 +718,7 @@ async function attachAndVerifyPdf(
 
   if (!upload.ok) {
     throw new Error(
-      `Xero PDF upload failed (HTTP ${upload.status})`
+      `Xero original attachment upload failed (HTTP ${upload.status})`
     );
   }
 
@@ -660,12 +733,12 @@ async function attachAndVerifyPdf(
   ).filter(
     (item: { FileName?: string; MimeType?: string }) =>
       item.FileName === filename &&
-      item.MimeType === "application/pdf"
+      item.MimeType?.toLowerCase() === contentType.toLowerCase()
   );
 
   if (matches.length !== 1) {
     throw new Error(
-      "Original PDF attachment not confirmed by Xero"
+      "Original attachment not confirmed by Xero"
     );
   }
 }
@@ -719,8 +792,8 @@ export async function createPilotDraftWithPdf(
     invoice.supplierName
   );
 
-  // Retrieve and verify the PDF BEFORE creating the bill.
-  const pdf = await originalFrontPdf(invoice);
+  // Retrieve and verify the original document BEFORE creating the bill.
+  const original = await originalFrontDocument(invoice);
 
   // Claim the record once. Any uncertain Xero outcome
   // remains recorded and cannot create a second bill.
@@ -795,12 +868,13 @@ export async function createPilotDraftWithPdf(
   );
 
   try {
-    await attachAndVerifyPdf(
+   await attachAndVerifyOriginal(
       session.tenantId,
       session.accessToken,
       draftId,
-      pdf.filename,
-      pdf.bytes
+      original.filename,
+      original.contentType,
+      original.bytes
     );
 
     await pool.query(
