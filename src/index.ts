@@ -510,11 +510,9 @@ function buildMcpServer() {
             subject:
               message.subject ?? null,
             blurb:
-              message.blurb ?? null,
-            body:
-              message.body ?? null,
+              message.blurb?.slice(0, 300) ?? null,
             text:
-              message.text ?? null,
+              message.text?.slice(0, 1200) ?? null,
             attachments: (
               message.attachments ?? []
             ).map((attachment) => ({
