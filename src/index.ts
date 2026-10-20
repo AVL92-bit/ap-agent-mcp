@@ -450,11 +450,12 @@ function buildMcpServer() {
           await pool.end();
         }
 
-        const conversations = data._results
-          .filter(
-            (conversation) =>
-              typeof conversation.id === "string"
-          )
+const conversations = data._results
+  .filter(
+    (conversation) =>
+      typeof conversation.id === "string" &&
+      conversation.status !== "archived"
+  )
           .map((conversation) => ({
             id: conversation.id as string,
             subject: conversation.subject ?? null,
@@ -482,13 +483,6 @@ function buildMcpServer() {
               conversation.has_previous_assessment
           );
 
-        const otherConversations =
-          conversations.filter(
-            (conversation) =>
-              conversation.status === "archived" &&
-              !conversation.has_previous_assessment
-          );
-
         return toolResult({
           status: "ok",
           enabled_inbox_id: inboxId,
@@ -497,8 +491,6 @@ function buildMcpServer() {
             priorityConversations,
           previously_reviewed_conversations:
             previouslyReviewedConversations,
-          other_conversations:
-            otherConversations,
           has_more: Boolean(data._pagination?.next),
           selection_guidance:
             "Inspect priority_conversations first. " +
