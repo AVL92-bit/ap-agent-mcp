@@ -1318,15 +1318,6 @@ server.registerTool(
         "Attachment does not uniquely belong to message"
       );
     }
-
-    if (
-      matchingAttachments[0].content_type !==
-      "application/pdf"
-    ) {
-      throw new Error(
-        "Attachment is not a verified PDF"
-      );
-    }
   }
 // --------------------------------------------------
   // XERO DRAFT: CONTROLLED PRE-FLIGHT CHECK
