@@ -224,6 +224,116 @@ async function frontWrite(
     signal: AbortSignal.timeout(20000),
   });
 }
+const AP_FRONT_TAGS = {
+  reviewed: "AP agent reviewed",
+  human_review: "Human Review",
+  no_attachment: "No attachment - Human review",
+} as const;
+
+type ApFrontTag = keyof typeof AP_FRONT_TAGS;
+
+async function findApFrontTagId(
+  tagName: string
+): Promise<string> {
+  const response = await frontGet("/tags?limit=100");
+
+  if (!response.ok) {
+    throw new Error(
+      `Front tag lookup failed (HTTP ${response.status})`
+    );
+  }
+
+  const data = (await response.json()) as {
+    _results?: Array<{
+      id?: string;
+      name?: string;
+    }>;
+    _pagination?: { next?: string };
+  };
+
+  if (
+    !Array.isArray(data._results) ||
+    Boolean(data._pagination?.next)
+  ) {
+    throw new Error(
+      "Front tag listing is incomplete"
+    );
+  }
+
+  const matches = data._results.filter(
+    (tag) => tag.name === tagName
+  );
+
+  if (
+    matches.length !== 1 ||
+    !matches[0].id
+  ) {
+    throw new Error(
+      `Front tag not uniquely found: ${tagName}`
+    );
+  }
+
+  return matches[0].id;
+}
+
+async function applyApFrontTag(
+  conversationId: string,
+  tag: ApFrontTag
+): Promise<void> {
+  const membership =
+    await verifyConversationInbox(conversationId);
+
+  if (!membership.allowed) {
+    throw new Error(
+      "Front conversation is outside the permitted AP inbox"
+    );
+  }
+
+  const tagId = await findApFrontTagId(
+    AP_FRONT_TAGS[tag]
+  );
+
+  const response = await frontWrite(
+    `/conversations/${encodeURIComponent(
+      conversationId
+    )}/tags`,
+    "POST",
+    { tag_ids: [tagId] }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Front tagging failed (HTTP ${response.status})`
+    );
+  }
+}
+
+async function archiveApFrontConversation(
+  conversationId: string
+): Promise<void> {
+  const membership =
+    await verifyConversationInbox(conversationId);
+
+  if (!membership.allowed) {
+    throw new Error(
+      "Front conversation is outside the permitted AP inbox"
+    );
+  }
+
+  const response = await frontWrite(
+    `/conversations/${encodeURIComponent(
+      conversationId
+    )}`,
+    "PATCH",
+    { status: "archived" }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `Front archiving failed (HTTP ${response.status})`
+    );
+  }
+}
 function safeError(
   label: string,
   error: unknown
