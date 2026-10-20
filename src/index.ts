@@ -662,9 +662,20 @@ function buildMcpServer() {
           attachment.content_type !==
           "application/pdf"
         ) {
-          return toolFailure(
-            "Attachment is not an allowed PDF"
-          );
+          return toolResult({
+            status: "review_required",
+            reason:
+              "Attachment requires non-PDF document extraction",
+            conversation_id,
+            message_id,
+            attachment_id,
+            original_filename:
+              attachment.filename ?? null,
+            original_content_type:
+              attachment.content_type ?? null,
+            invoice_ready_for_draft: false,
+            bills_created: false,
+          });
         }
 
         if (
