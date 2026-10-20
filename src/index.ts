@@ -202,7 +202,28 @@ async function getConversationMessages(
     hasMore: Boolean(data._pagination?.next),
   };
 }
+async function frontWrite(
+  path: string,
+  method: "POST" | "PATCH",
+  body?: unknown
+): Promise<Response> {
+  const { token } = frontConfig();
 
+  return fetch(`https://api2.frontapp.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+      ...(body === undefined
+        ? {}
+        : { "Content-Type": "application/json" }),
+    },
+    ...(body === undefined
+      ? {}
+      : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(20000),
+  });
+}
 function safeError(
   label: string,
   error: unknown
