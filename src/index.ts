@@ -639,29 +639,15 @@ const conversations = data._results
   // FRONT: GET VERIFIED PDF INVOICE ATTACHMENT
   // --------------------------------------------------
 
-  server.registerTool(
-    "get_invoice_attachment",
-    {
-      title: "Get Invoice Attachment",
-            description:
-        "Retrieves and extracts PDF or DOCX invoice text after verifying the conversation, message and attachment belong to the enabled AP inbox. Read-only. Never creates bills.",
-      inputSchema: z.object({
-        conversation_id: z
-          .string()
-          .startsWith("cnv_"),
-        message_id: z
-          .string()
-          .startsWith("msg_"),
-        attachment_id: z
-          .string()
-          .startsWith("fil_"),
-      }),
-    },
-    async ({
-      conversation_id,
-      message_id,
-      attachment_id,
-    }) => {
+  async function extractVerifiedInvoiceAttachment({
+    conversation_id,
+    message_id,
+    attachment_id,
+  }: {
+    conversation_id: string;
+    message_id: string;
+    attachment_id: string;
+  }) {
       const MAX_PDF_BYTES =
         10 * 1024 * 1024;
 
@@ -1034,7 +1020,21 @@ Accept: isPdf
             .catch(() => {});
         }
       }
-    }
+  }
+
+  server.registerTool(
+    "get_invoice_attachment",
+    {
+      title: "Get Invoice Attachment",
+      description:
+        "Retrieves and extracts PDF or DOCX invoice text after verifying the conversation, message and attachment belong to the enabled AP inbox. Read-only. Never creates bills.",
+      inputSchema: z.object({
+        conversation_id: z.string().startsWith("cnv_"),
+        message_id: z.string().startsWith("msg_"),
+        attachment_id: z.string().startsWith("fil_"),
+      }),
+    },
+    extractVerifiedInvoiceAttachment
   );
 
   // --------------------------------------------------
