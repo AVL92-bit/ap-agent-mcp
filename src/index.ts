@@ -555,34 +555,67 @@ const conversations = data._results
             25
           );
 
-        const messages = result.messages.map(
-          (message) => ({
-            id: message.id ?? null,
-            type: message.type ?? null,
-            is_inbound:
-              message.is_inbound ?? null,
-            is_draft:
-              message.is_draft ?? null,
-            created_at:
-              message.created_at ?? null,
-            subject:
-              message.subject ?? null,
-            blurb:
-              message.blurb?.slice(0, 300) ?? null,
-            text:
-              message.text?.slice(0, 1200) ?? null,
-            attachments: (
+   const messages = result.messages.map(
+          (message) => {
+            const documentAttachments = (
               message.attachments ?? []
-            ).map((attachment) => ({
-              id: attachmentId(attachment),
-              filename:
-                attachment.filename ?? null,
-              content_type:
-                attachment.content_type ?? null,
-              size:
-                attachment.size ?? null,
-            })),
-          })
+            )
+              .filter((attachment) => {
+                const filename = (
+                  attachment.filename ?? ""
+                ).toLowerCase();
+
+                const contentType = (
+                  attachment.content_type ?? ""
+                ).toLowerCase();
+
+                return (
+                  /\.(pdf|docx)$/i.test(filename) ||
+                  contentType === "application/pdf" ||
+                  contentType ===
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                );
+              })
+              .map((attachment) => ({
+                id: attachmentId(attachment),
+                filename:
+                  attachment.filename ?? null,
+                content_type:
+                  attachment.content_type ?? null,
+                size:
+                  attachment.size ?? null,
+              }));
+
+            const plainText = (
+              message.text ??
+              message.blurb ??
+              ""
+            )
+              .replace(
+                /[\u200B-\u200F\u2060\uFEFF\u00AD]/g,
+                ""
+              )
+              .replace(/[ \t]{2,}/g, " ")
+              .trim();
+
+            return {
+              id: message.id ?? null,
+              type: message.type ?? null,
+              is_inbound:
+                message.is_inbound ?? null,
+              is_draft:
+                message.is_draft ?? null,
+              created_at:
+                message.created_at ?? null,
+              subject:
+                message.subject ?? null,
+              text: plainText.slice(0, 500),
+              attachments: documentAttachments,
+              other_attachment_count:
+                (message.attachments ?? []).length -
+                documentAttachments.length,
+            };
+          }
         );
 
         return toolResult({
