@@ -647,6 +647,118 @@ const conversations = data._results
   // FRONT: GET VERIFIED CONVERSATION MESSAGES
   // --------------------------------------------------
 
+  // --------------------------------------------------
+  // FRONT: APPLY SUPERVISED AP TRIAGE
+  // --------------------------------------------------
+
+  server.registerTool(
+    "apply_ap_front_triage",
+    {
+      title: "Apply AP Front Triage",
+      description:
+        "Applies the agreed human-review Front tags to conversations " +
+        "in the permitted AP inbox. Does not archive conversations, " +
+        "mark invoices as processed, or modify Xero. " +
+        "Routine non-finance archiving and completed-draft tagging " +
+        "are unavailable until independently verified.",
+      inputSchema: {
+        conversation_id: z
+          .string()
+          .regex(/^cnv_[A-Za-z0-9_-]+$/)
+          .max(100),
+        outcome: z.enum([
+          "no_attachment_human_review",
+          "human_review",
+          "routine_non_finance",
+          "draft_verified",
+        ]),
+        reason: z.string().min(10).max(500),
+      },
+    },
+    async ({ conversation_id, outcome, reason }) => {
+      try {
+        const membership =
+          await verifyConversationInbox(conversation_id);
+
+        if (!membership.allowed) {
+          return toolFailure(
+            "Conversation is outside the permitted AP inbox " +
+            "or its inbox membership could not be verified",
+            membership.httpStatus
+          );
+        }
+
+        if (
+          outcome === "routine_non_finance" ||
+          outcome === "draft_verified"
+        ) {
+          return toolFailure(
+            "This outcome requires independent verification " +
+            "and is not enabled for Front changes"
+          );
+        }
+
+        const messageListing =
+          await getConversationMessages(conversation_id, 100);
+
+        if (messageListing.hasMore) {
+          return toolFailure(
+            "Conversation message listing is incomplete; " +
+            "human review is required before triage"
+          );
+        }
+
+        if (messageListing.messages.length === 0) {
+          return toolFailure(
+            "Conversation has no verifiable messages"
+          );
+        }
+
+        const attachmentCount =
+          messageListing.messages.reduce(
+            (count, message) =>
+              count + (message.attachments ?? []).length,
+            0
+          );
+
+        if (
+          outcome === "no_attachment_human_review" &&
+          attachmentCount !== 0
+        ) {
+          return toolFailure(
+            "Conversation contains an attachment; " +
+            "use human_review instead"
+          );
+        }
+
+        const tag =
+          outcome === "no_attachment_human_review"
+            ? "no_attachment"
+            : "human_review";
+
+        await applyApFrontTag(conversation_id, tag);
+
+        return toolResult({
+          status: "ok",
+          conversation_id,
+          outcome,
+          reason,
+          tag_applied: AP_FRONT_TAGS[tag],
+          attachment_count: attachmentCount,
+          conversation_archived: false,
+          xero_accessed: false,
+          bills_created: false,
+        });
+      } catch (error) {
+        return safeError(
+          "Front AP triage failed",
+          error
+        );
+      }
+    }
+  );
+
+
   server.registerTool(
     "get_front_message",
     {
