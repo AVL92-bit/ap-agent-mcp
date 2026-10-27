@@ -573,7 +573,20 @@ function buildMcpServer() {
           allConversations.push(...data._results);
 
           const next = data._pagination?.next;
+          if (next) {
+            const paginationUrl = new URL(
+              next,
+              "https://api2.frontapp.com"
+            );
 
+            console.log("Front pagination format", {
+              is_absolute: /^https?:\/\//i.test(next),
+              protocol: paginationUrl.protocol,
+              hostname: paginationUrl.hostname,
+              pathname: paginationUrl.pathname,
+              has_query: Boolean(paginationUrl.search),
+            });
+          }
           if (!next) {
             nextPath = null;
             continue;
