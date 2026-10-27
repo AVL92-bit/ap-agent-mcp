@@ -585,12 +585,13 @@ function buildMcpServer() {
           );
 
           if (
-            nextUrl.origin !== "https://api2.frontapp.com" ||
-            nextUrl.pathname !==
-              `/inboxes/${encodeURIComponent(inboxId)}/conversations`
+            nextUrl.protocol !== "https:" ||
+            nextUrl.hostname !== "api2.frontapp.com" ||
+            nextUrl.username !== "" ||
+            nextUrl.password !== ""
           ) {
             return toolFailure(
-              "Front returned an unexpected pagination URL"
+              "Front returned an unsafe pagination URL"
             );
           }
 
