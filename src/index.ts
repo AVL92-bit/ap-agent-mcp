@@ -523,37 +523,80 @@ function buildMcpServer() {
       try {
         const { inboxId } = frontConfig();
 
-        const response = await frontGet(
-          `/inboxes/${encodeURIComponent(
-            inboxId
-          )}/conversations`
-        );
-
-        if (!response.ok) {
-          return toolFailure(
-            "Front API request failed",
-            response.status
-          );
-        }
-
-        const data = (await response.json()) as {
-          _results?: Array<{
-            id?: string;
-            subject?: string;
-            status?: string;
-            created_at?: number;
-            updated_at?: number;
-          }>;
-          _pagination?: {
-            next?: string;
-          };
+ type ScannedConversation = {
+          id?: string;
+          subject?: string;
+          status?: string;
+          created_at?: number;
+          updated_at?: number;
         };
 
-        if (!Array.isArray(data._results)) {
-          return toolFailure(
-            "Front returned an unexpected conversations response"
+        const allConversations: ScannedConversation[] = [];
+        const visitedPages = new Set<string>();
+        const maxPages = 20;
+
+        let nextPath: string | null =
+          `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
+
+        while (nextPath !== null) {
+          if (
+            visitedPages.has(nextPath) ||
+            visitedPages.size >= maxPages
+          ) {
+            return toolFailure(
+              "Front inbox pagination is incomplete or repeating"
+            );
+          }
+
+          visitedPages.add(nextPath);
+
+          const response = await frontGet(nextPath);
+
+          if (!response.ok) {
+            return toolFailure(
+              "Front inbox page request failed",
+              response.status
+            );
+          }
+
+          const data = (await response.json()) as {
+            _results?: ScannedConversation[];
+            _pagination?: { next?: string | null };
+          };
+
+          if (!Array.isArray(data._results)) {
+            return toolFailure(
+              "Front returned an unexpected conversations response"
+            );
+          }
+
+          allConversations.push(...data._results);
+
+          const next = data._pagination?.next;
+
+          if (!next) {
+            nextPath = null;
+            continue;
+          }
+
+          const nextUrl = new URL(
+            next,
+            "https://api2.frontapp.com"
           );
+
+          if (
+            nextUrl.origin !== "https://api2.frontapp.com" ||
+            nextUrl.pathname !==
+              `/inboxes/${encodeURIComponent(inboxId)}/conversations`
+          ) {
+            return toolFailure(
+              "Front returned an unexpected pagination URL"
+            );
+          }
+
+          nextPath = nextUrl.pathname + nextUrl.search;
         }
+
 
         const pool = new Pool({
           connectionString: process.env.DATABASE_URL,
@@ -581,7 +624,7 @@ function buildMcpServer() {
           await pool.end();
         }
 
-const conversations = data._results
+const conversations = allConversations
   .filter(
     (conversation) =>
       typeof conversation.id === "string" &&
@@ -622,7 +665,8 @@ const conversations = data._results
             priorityConversations,
           previously_reviewed_conversations:
             previouslyReviewedConversations,
-          has_more: Boolean(data._pagination?.next),
+          has_more: false,
+pages_scanned: visitedPages.size,
           selection_guidance:
             "Inspect priority_conversations first. " +
             "Use prepare_pilot_review_batch before extracting. " +
