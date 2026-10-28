@@ -87,7 +87,9 @@ async function frontGet(
   const { headers } = frontConfig();
 
   return fetch(
-    `https://api2.frontapp.com${path}`,
+    path.startsWith("https://")
+      ? path
+      : `https://api2.frontapp.com${path}`,
     {
       method: "GET",
       headers,
@@ -573,21 +575,8 @@ function buildMcpServer() {
           allConversations.push(...data._results);
 
           const next = data._pagination?.next;
-          if (next) {
-            const paginationUrl = new URL(
-              next,
-              "https://api2.frontapp.com"
-            );
-
-            console.log("Front pagination format", {
-              is_absolute: /^https?:\/\//i.test(next),
-              protocol: paginationUrl.protocol,
-              hostname: paginationUrl.hostname,
-              pathname: paginationUrl.pathname,
-              has_query: Boolean(paginationUrl.search),
-            });
-          }
           if (!next) {
+
             nextPath = null;
             continue;
           }
@@ -599,7 +588,12 @@ function buildMcpServer() {
 
           if (
             nextUrl.protocol !== "https:" ||
-            nextUrl.hostname !== "api2.frontapp.com" ||
+            ![
+              "api2.frontapp.com",
+              "medicspot-limited.api.frontapp.com",
+            ].includes(nextUrl.hostname) ||
+            nextUrl.pathname !==
+              `/inboxes/${encodeURIComponent(inboxId)}/conversations` ||
             nextUrl.username !== "" ||
             nextUrl.password !== ""
           ) {
@@ -608,7 +602,7 @@ function buildMcpServer() {
             );
           }
 
-          nextPath = nextUrl.pathname + nextUrl.search;
+          nextPath = nextUrl.href;
         }
 
 
