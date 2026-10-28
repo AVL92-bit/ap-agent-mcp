@@ -535,20 +535,26 @@ function buildMcpServer() {
 
         const allConversations: ScannedConversation[] = [];
         const visitedPages = new Set<string>();
-        const maxPages = 20;
+        const maxPages = 5;
 
         let nextPath: string | null =
           `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
-
+let scanTruncated = false;
         while (nextPath !== null) {
-          if (
-            visitedPages.has(nextPath) ||
-            visitedPages.size >= maxPages
-          ) {
+          if (visitedPages.has(nextPath)) {
             return toolFailure(
-              "Front inbox pagination is incomplete or repeating"
+              `Front pagination repeated a page after ${visitedPages.size} pages`
             );
           }
+
+if (visitedPages.has(nextPath)) {
+  return toolFailure("Front pagination repeated a page");
+}
+
+if (visitedPages.size >= maxPages) {
+  scanTruncated = true;
+  break;
+}
 
           visitedPages.add(nextPath);
 
@@ -673,7 +679,7 @@ const conversations = allConversations
             priorityConversations,
           previously_reviewed_conversations:
             previouslyReviewedConversations,
-          has_more: false,
+          has_more: scanTruncated,
 pages_scanned: visitedPages.size,
           selection_guidance:
             "Inspect priority_conversations first. " +
