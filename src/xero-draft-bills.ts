@@ -386,7 +386,13 @@ async function verifiedSupplierContactId(
     );
   }
 
-  return exactMatches[0].ContactID;
+  const contactId = exactMatches[0].ContactID;
+
+  if (typeof contactId !== "string" || !contactId) {
+    throw new Error("Verified Xero supplier has no ContactID");
+  }
+
+  return contactId;
 }
 
 async function originalFrontDocument(
