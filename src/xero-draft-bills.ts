@@ -1,8 +1,10 @@
 import type { Pool } from "pg";
 import { readFile } from "node:fs/promises";
+import { PDFParse } from "pdf-parse";
 import {
   assessPilotXeroInvoice,
   getPilotXeroWriteSession,
+  getPilotXeroReadSession,
 } from "./xero-pilot-test.js";
 
 const PILOT_TENANT_ID =
@@ -193,6 +195,326 @@ function hasResolvedOriginalExceptions(
       resolved.has(exception)
   );
 }
+type BillingPrecedent = {
+  matched: boolean;
+  historical_invoice_id?: string;
+};
+
+function normaliseBillingLine(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function billingAddressFromText(
+  text: string,
+  billedTo: string
+): string[] | null {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const target = normaliseBillingLine(billedTo);
+
+  if (target.length < 5) {
+    return null;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    if (normaliseBillingLine(lines[i]) !== target) {
+      continue;
+    }
+
+    const following = lines.slice(i + 1, i + 8);
+
+    const postcodeIndex = following.findIndex((line) =>
+      /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/i.test(line)
+    );
+
+    if (postcodeIndex < 1) {
+      continue;
+    }
+
+    const address = following
+      .slice(0, postcodeIndex + 1)
+      .map(normaliseBillingLine)
+      .filter(Boolean);
+
+    if (address.length >= 2) {
+      return address;
+    }
+  }
+
+  return null;
+}
+
+async function pdfText(bytes: Buffer): Promise<string | null> {
+  if (
+    bytes.length < 5 ||
+    bytes.length > 10 * 1024 * 1024 ||
+    bytes.subarray(0, 5).toString("ascii") !== "%PDF-"
+  ) {
+    return null;
+  }
+
+  const parser = new PDFParse({
+    data: new Uint8Array(bytes),
+  });
+
+  try {
+    const info = await parser.getInfo();
+
+    if (
+      !Number.isInteger(info.total) ||
+      info.total < 1 ||
+      info.total > 20
+    ) {
+      return null;
+    }
+
+    const result = await parser.getText();
+    return typeof result.text === "string"
+      ? result.text
+      : null;
+  } catch {
+    return null;
+  } finally {
+    await parser.destroy();
+  }
+}
+
+async function historicalBillingPrecedent(
+  pool: Pool,
+  review: {
+    front_conversation_id: string;
+    front_message_id: string;
+    attachment_id: string;
+    supplier_name: string;
+    invoice_number: string;
+  },
+  billedTo: string
+): Promise<BillingPrecedent> {
+  if (
+    !billedTo.trim() ||
+    !review.supplier_name?.trim() ||
+    !review.invoice_number?.trim()
+  ) {
+    return { matched: false };
+  }
+
+  // Obtain the current original supplier PDF from Front.
+  const current = await originalFrontDocument({
+    conversationId: review.front_conversation_id,
+    messageId: review.front_message_id,
+    attachmentId: review.attachment_id,
+  });
+
+  if (current.contentType !== "application/pdf") {
+    return { matched: false };
+  }
+
+  const currentText = await pdfText(current.bytes);
+
+  if (!currentText) {
+    return { matched: false };
+  }
+
+  const currentAddress = billingAddressFromText(
+    currentText,
+    billedTo
+  );
+
+  if (!currentAddress) {
+    return { matched: false };
+  }
+
+  const session = await getPilotXeroReadSession();
+
+  if (session.tenantId !== PILOT_TENANT_ID) {
+    throw new Error("Unexpected Xero tenant");
+  }
+
+  // Resolve the exact supplier contact, rather than
+  // using a partial supplier-name match.
+  const contactsUrl = new URL(
+    "https://api.xero.com/api.xro/2.0/Contacts"
+  );
+
+  contactsUrl.searchParams.set(
+    "where",
+    `Name=="${review.supplier_name.replace(/"/g, '\\"')}"`
+  );
+
+  const headers = {
+    Authorization: `Bearer ${session.accessToken}`,
+    "xero-tenant-id": session.tenantId,
+    Accept: "application/json",
+  };
+
+  const contactsResponse = await fetch(contactsUrl, {
+    headers,
+    signal: AbortSignal.timeout(20000),
+  });
+
+  if (!contactsResponse.ok) {
+    throw new Error(
+      `Historical supplier lookup failed: HTTP ${contactsResponse.status}`
+    );
+  }
+
+  const contactsData = await contactsResponse.json() as {
+    Contacts?: Array<{
+      ContactID?: string;
+      Name?: string;
+      IsSupplier?: boolean;
+    }>;
+  };
+
+  const matches = (contactsData.Contacts ?? []).filter(
+    (contact) =>
+      contact.Name === review.supplier_name &&
+      contact.IsSupplier === true &&
+      typeof contact.ContactID === "string"
+  );
+
+  if (matches.length !== 1) {
+    return { matched: false };
+  }
+
+  const contactId = matches[0].ContactID!;
+
+  const invoicesUrl = new URL(
+    "https://api.xero.com/api.xro/2.0/Invoices"
+  );
+
+  invoicesUrl.searchParams.set(
+    "where",
+    `Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`
+  );
+  invoicesUrl.searchParams.set("order", "Date DESC");
+  invoicesUrl.searchParams.set("page", "1");
+
+  const invoicesResponse = await fetch(invoicesUrl, {
+    headers,
+    signal: AbortSignal.timeout(20000),
+  });
+
+  if (!invoicesResponse.ok) {
+    throw new Error(
+      `Historical bill lookup failed: HTTP ${invoicesResponse.status}`
+    );
+  }
+
+  const invoicesData = await invoicesResponse.json() as {
+    Invoices?: Array<{
+      InvoiceID?: string;
+      InvoiceNumber?: string;
+      Type?: string;
+      Status?: string;
+      Contact?: { ContactID?: string };
+    }>;
+  };
+  if (!Array.isArray(invoicesData.Invoices)) {
+    return { matched: false };
+  }
+  const candidates = (invoicesData.Invoices ?? [])
+    .filter(
+      (invoice) =>
+        invoice.Type === "ACCPAY" &&
+        invoice.Contact?.ContactID === contactId &&
+        (invoice.Status === "AUTHORISED" ||
+          invoice.Status === "PAID") &&
+        invoice.InvoiceNumber !== review.invoice_number &&
+        typeof invoice.InvoiceID === "string"
+    )
+    .slice(0, 5);
+
+  for (const invoice of candidates) {
+    const invoiceId = invoice.InvoiceID!;
+
+    const attachmentUrl =
+      `https://api.xero.com/api.xro/2.0/Invoices/` +
+      `${encodeURIComponent(invoiceId)}/Attachments`;
+
+    const listingResponse = await fetch(attachmentUrl, {
+      headers,
+      signal: AbortSignal.timeout(20000),
+    });
+
+    if (!listingResponse.ok) {
+      continue;
+    }
+
+    const listing = await listingResponse.json() as {
+      Attachments?: Array<{
+        FileName?: string;
+        MimeType?: string;
+      }>;
+    };
+
+    for (const attachment of listing.Attachments ?? []) {
+      if (
+        attachment.MimeType !== "application/pdf" ||
+        !attachment.FileName
+      ) {
+        continue;
+      }
+
+      const pdfResponse = await fetch(
+        `${attachmentUrl}/${encodeURIComponent(attachment.FileName)}`,
+        {
+          headers: {
+            ...headers,
+            Accept: "application/pdf",
+          },
+          signal: AbortSignal.timeout(20000),
+        }
+      );
+
+      if (!pdfResponse.ok) {
+        continue;
+      }
+
+      const declaredSize = Number(
+        pdfResponse.headers.get("content-length") ?? "0"
+      );
+
+      if (declaredSize > 10 * 1024 * 1024) {
+        continue;
+      }
+
+      const historicalBytes = Buffer.from(
+        await pdfResponse.arrayBuffer()
+      );
+
+      const historicalText = await pdfText(historicalBytes);
+
+      if (!historicalText) {
+        continue;
+      }
+
+      const historicalAddress = billingAddressFromText(
+        historicalText,
+        billedTo
+      );
+
+      if (
+        historicalAddress &&
+        historicalAddress.join("|") ===
+          currentAddress.join("|")
+      ) {
+        return {
+          matched: true,
+          historical_invoice_id: invoiceId,
+        };
+      }
+    }
+  }
+
+  return { matched: false };
+}
 export async function getPilotDraftReadiness(
   pool: Pool,
   reviewId: string
@@ -207,7 +529,8 @@ export async function getPilotDraftReadiness(
 
   const result = await pool.query(
     `
-      SELECT front_message_id, attachment_id,
+   SELECT front_conversation_id,
+       front_message_id, attachment_id,
              document_type, review_status,
              supplier_name, invoice_number,
              assessment_json, xero_draft_id,
@@ -261,16 +584,57 @@ export async function getPilotDraftReadiness(
   ) {
     reasons.push("Assessment is invalid");
   } else {
+     let billingPrecedentMatched = false;
+
     if (
       assessment.billed_to !== PILOT_NAME &&
       !hasVerifiedResolution(verifications, "billing_entity")
     ) {
-      reasons.push("Billing entity not verified");
+      try {
+        const precedent = await historicalBillingPrecedent(
+          pool,
+          review,
+          typeof assessment.billed_to === "string"
+            ? assessment.billed_to
+            : ""
+        );
+
+        billingPrecedentMatched = precedent.matched;
+      } catch {
+        // An unavailable or inconclusive historical check
+        // must never approve a billing arrangement.
+        billingPrecedentMatched = false;
+      }
+
+      if (!billingPrecedentMatched) {
+        reasons.push("Billing entity not verified");
+      }
     }
+
+   const originalExceptions = assessment.exceptions;
+
+    const remainingExceptions =
+      Array.isArray(originalExceptions)
+        ? originalExceptions.filter((exception: unknown) => {
+            if (
+              !billingPrecedentMatched ||
+              typeof exception !== "string"
+            ) {
+              return true;
+            }
+
+            // Only remove exceptions specifically about
+            // the billed-to entity or billing address.
+            // Supplier, duplicate, coding, amount and
+            // other exceptions remain untouched.
+            return !/\b(billed[\s-]*to|billing entity|billing address)\b/i
+              .test(exception);
+          })
+        : originalExceptions;
 
     if (
       !hasResolvedOriginalExceptions(
-        assessment.exceptions,
+        remainingExceptions,
         verifications
       )
     ) {
@@ -508,7 +872,10 @@ async function verifiedSupplierContactId(
 }
 
 async function originalFrontDocument(
-  invoice: DraftInvoice
+  invoice: Pick<
+    DraftInvoice,
+    "conversationId" | "messageId" | "attachmentId"
+  >
 ): Promise<{
   filename: string;
   contentType: string;
