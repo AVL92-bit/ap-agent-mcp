@@ -901,14 +901,16 @@ export type PilotXeroWriteSession = {
   accessToken: string;
 };
 
-export async function getPilotXeroWriteSession():
-  Promise<PilotXeroWriteSession> {
+async function getPilotXeroSession(
+  readOnly: boolean
+): Promise<PilotXeroWriteSession> {
 
   const expectedTenantId =
     "45a1074b-b172-4f49-a192-f0a8e293b54d";
 
   if (
-    process.env.XERO_DRAFT_WRITES_ENABLED !== "true" ||
+ (!readOnly &&
+  process.env.XERO_DRAFT_WRITES_ENABLED !== "true") ||
     process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID ||
     process.env.XERO_PILOT_TENANT_ID !== expectedTenantId ||
     !process.env.DATABASE_URL ||
@@ -1101,6 +1103,15 @@ export async function getPilotXeroWriteSession():
     client.release();
     await pool.end();
   }
+}
+export async function getPilotXeroReadSession():
+  Promise<PilotXeroWriteSession> {
+  return getPilotXeroSession(true);
+}
+
+export async function getPilotXeroWriteSession():
+  Promise<PilotXeroWriteSession> {
+  return getPilotXeroSession(false);
 }
 export async function testPilotXeroConnection() {
   return verifyPilotConnection("connection");
