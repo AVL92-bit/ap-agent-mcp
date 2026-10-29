@@ -341,13 +341,40 @@ async function historicalBillingPrecedent(
 
   // Resolve the exact supplier contact, rather than
   // using a partial supplier-name match.
+
+    const policyFile = JSON.parse(
+    await readFile(
+      new URL("../config/coding-policies.json", import.meta.url),
+      "utf8"
+    )
+  ) as CodingPolicyFile;
+
+  const matchingPolicies = policyFile.policies.filter(
+    (policy) =>
+      policy.organisation_name === PILOT_NAME &&
+      policy.status === "approved" &&
+      policy.automatic_bill_creation_allowed === true &&
+      policy.automatic_coding_allowed === true &&
+      policy.human_review_required === false &&
+      (
+        policy.supplier_name === review.supplier_name ||
+        policy.xero_supplier_name === review.supplier_name
+      )
+  );
+
+  if (matchingPolicies.length !== 1) {
+    return { matched: false };
+  }
+
+  const xeroSupplierName =
+    matchingPolicies[0].xero_supplier_name;
   const contactsUrl = new URL(
     "https://api.xero.com/api.xro/2.0/Contacts"
   );
 
   contactsUrl.searchParams.set(
     "where",
-    `Name=="${review.supplier_name.replace(/"/g, '\\"')}"`
+     `Name=="${xeroSupplierName.replace(/"/g, '\\"')}"`
   );
 
   const headers = {
@@ -377,7 +404,7 @@ async function historicalBillingPrecedent(
 
   const matches = (contactsData.Contacts ?? []).filter(
     (contact) =>
-      contact.Name === review.supplier_name &&
+      contact.Name === xeroSupplierName &&
       contact.IsSupplier === true &&
       typeof contact.ContactID === "string"
   );
