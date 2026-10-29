@@ -10,6 +10,7 @@ import { Pool } from "pg";
 import {
   findExistingPilotReview,
   recordPilotAssessment,
+  getLatestPilotVerifications,
 } from "./pilot-review-register.js";
 import { handleXeroOAuth } from "./xero-oauth.js";
 import {
@@ -1850,151 +1851,30 @@ server.registerTool(
         }
 
         const review = result.rows[0];
-
-        const reasons: string[] = [];
-
-        // Preserve both existing Google Sheet holds,
-        // even if database status is accidentally changed.
-        const heldDocuments = new Set([
-          "msg_2ighxw0m:fil_4za3pfva",
-          "msg_2ihh8owm:fil_4ze0zmvq",
-        ]);
-
-        const documentKey =
-          `${review.front_message_id}:${review.attachment_id}`;
-
-        if (heldDocuments.has(documentKey)) {
-          reasons.push("Existing human hold");
-        }
-
-        if (review.review_status !== "awaiting_review") {
-          reasons.push("Review status does not permit drafting");
-        }
-
-        if (review.document_type !== "invoice") {
-          reasons.push("Document is not a supplier invoice");
-        }
-
-        if (
-          review.xero_draft_id !== null ||
-          review.xero_draft_status !== null
-        ) {
-          reasons.push(
-            "Existing draft or previous draft-creation attempt"
-          );
-        }
-
-        const assessment =
-          review.assessment_json as Record<string, unknown>;
-
-        if (
-          !assessment ||
-          typeof assessment !== "object" ||
-          Array.isArray(assessment)
-        ) {
-          reasons.push("Assessment data is invalid");
-        }
-
-        const details =
-          assessment &&
-          typeof assessment === "object" &&
-          !Array.isArray(assessment)
-            ? assessment
-            : {};
-
-        if (
-          details.billed_to !== "St George's Road Surgery"
-        ) {
-          reasons.push(
-            "Invoice billing entity is not exactly verified"
-          );
-        }
-
-        if (
-          !Array.isArray(details.exceptions) ||
-          details.exceptions.length > 0
-        ) {
-          reasons.push(
-            "Assessment has exceptions or missing exception data"
-          );
-        }
-
-        const amounts = [
-          details.net_gbp,
-          details.vat_gbp,
-          details.gross_gbp,
-        ];
-
-        const validAmounts = amounts.every(
-          (amount) =>
-            typeof amount === "number" &&
-            Number.isFinite(amount) &&
-            amount >= 0 &&
-            Math.abs(amount * 100 - Math.round(amount * 100)) <
-              0.000001
+        const readiness = await getPilotDraftReadiness(
+          pool,
+          review_id
         );
 
-        if (!validAmounts) {
-          reasons.push("Invoice amounts are invalid");
-        } else {
-          const [net, vat, gross] = amounts as number[];
-
-          if (
-            Math.round(net * 100) +
-              Math.round(vat * 100) !==
-            Math.round(gross * 100)
-          ) {
-            reasons.push("Net, VAT and gross do not reconcile");
-          }
-
-          if (gross <= 0) {
-            reasons.push("Invoice gross amount must be positive");
-          }
-        }
-
-        const validDate = (value: unknown): boolean => {
-          if (
-            typeof value !== "string" ||
-            !/^\d{4}-\d{2}-\d{2}$/.test(value)
-          ) {
-            return false;
-          }
-
-          const date = new Date(`${value}T00:00:00Z`);
-
-          return (
-            !Number.isNaN(date.getTime()) &&
-            date.toISOString().slice(0, 10) === value
-          );
-        };
-
-        if (
-          !validDate(details.invoice_date) ||
-          !validDate(details.due_date)
-        ) {
-          reasons.push(
-            "Invoice date or due date requires verification"
-          );
-        }
-
-        if (
-          typeof review.supplier_name !== "string" ||
-          !review.supplier_name.trim() ||
-          typeof review.invoice_number !== "string" ||
-          !review.invoice_number.trim()
-        ) {
-          reasons.push(
-            "Supplier name or invoice number is missing"
-          );
-        }
-
+        const reasons = [...readiness.reasons];
         // Stop before external API calls if the local
         // assessment already fails a mandatory condition.
         if (reasons.length > 0) {
+          const verifications =
+            await getLatestPilotVerifications(pool, review_id);
+
           return toolResult({
             status: "blocked",
             review_id,
+            supplier_name: review.supplier_name,
+            invoice_number: review.invoice_number,
             reasons,
+            verification_types: verifications.map(
+              (verification) => ({
+                type: verification.verification_type,
+                outcome: verification.outcome,
+              })
+            ),
             xero_checks_performed: false,
             draft_created: false,
           });
