@@ -90,7 +90,109 @@ function amountInPence(value: unknown): number | null {
     ? pence
     : null;
 }
+type ReadinessVerification = {
+  verification_type: string;
+  outcome: string;
+  evidence_json: unknown;
+  verified_by: string;
+};
 
+async function getReadinessVerifications(
+  pool: Pool,
+  reviewId: string
+): Promise<ReadinessVerification[]> {
+  const result = await pool.query<ReadinessVerification>(
+    `
+      SELECT DISTINCT ON (verification_type)
+        verification_type,
+        outcome,
+        evidence_json,
+        verified_by
+      FROM pilot_invoice_verifications
+      WHERE review_id = $1
+      ORDER BY
+        verification_type,
+        verified_at DESC,
+        id DESC
+    `,
+    [reviewId]
+  );
+
+  return result.rows;
+}
+
+function hasVerifiedResolution(
+  verifications: ReadinessVerification[],
+  type: string
+): boolean {
+  return verifications.some(
+    (verification) =>
+      verification.verification_type === type &&
+      verification.outcome === "verified" &&
+      typeof verification.verified_by === "string" &&
+      verification.verified_by.trim().length > 0 &&
+      verification.evidence_json !== null &&
+      typeof verification.evidence_json === "object" &&
+      !Array.isArray(verification.evidence_json) &&
+      Object.keys(verification.evidence_json).length > 0
+  );
+}
+
+function hasResolvedOriginalExceptions(
+  exceptions: unknown,
+  verifications: ReadinessVerification[]
+): boolean {
+  if (!Array.isArray(exceptions)) {
+    return false;
+  }
+
+  if (exceptions.length === 0) {
+    return true;
+  }
+
+  const resolved = new Set<string>();
+
+  for (const verification of verifications) {
+    if (
+      !hasVerifiedResolution(
+        verifications,
+        verification.verification_type
+      )
+    ) {
+      continue;
+    }
+
+    const evidence = verification.evidence_json;
+
+    if (
+      !evidence ||
+      typeof evidence !== "object" ||
+      Array.isArray(evidence)
+    ) {
+      continue;
+    }
+
+    const items = (
+      evidence as Record<string, unknown>
+    ).resolved_exceptions;
+
+    if (!Array.isArray(items)) {
+      continue;
+    }
+
+    for (const item of items) {
+      if (typeof item === "string") {
+        resolved.add(item);
+      }
+    }
+  }
+
+  return exceptions.every(
+    (exception) =>
+      typeof exception === "string" &&
+      resolved.has(exception)
+  );
+}
 export async function getPilotDraftReadiness(
   pool: Pool,
   reviewId: string
@@ -124,6 +226,11 @@ export async function getPilotDraftReadiness(
   const assessment = review.assessment_json;
   const reasons: string[] = [];
 
+  const verifications = await getReadinessVerifications(
+    pool,
+    reviewId
+  );
+
   if (
     HELD_ATTACHMENTS.has(
       `${review.front_message_id}:${review.attachment_id}`
@@ -154,13 +261,18 @@ export async function getPilotDraftReadiness(
   ) {
     reasons.push("Assessment is invalid");
   } else {
-    if (assessment.billed_to !== PILOT_NAME) {
+    if (
+      assessment.billed_to !== PILOT_NAME &&
+      !hasVerifiedResolution(verifications, "billing_entity")
+    ) {
       reasons.push("Billing entity not verified");
     }
 
     if (
-      !Array.isArray(assessment.exceptions) ||
-      assessment.exceptions.length !== 0
+      !hasResolvedOriginalExceptions(
+        assessment.exceptions,
+        verifications
+      )
     ) {
       reasons.push("Assessment has unresolved exceptions");
     }
