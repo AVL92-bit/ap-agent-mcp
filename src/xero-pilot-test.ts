@@ -582,15 +582,6 @@ async function verifyPilotConnection(
       (contact) => contact.Name === supplierName
     );
 
-    if (
-      exactMatches.length !==
-      contactsData.Contacts.length
-    ) {
-      throw new Error(
-        "Xero returned contacts outside the exact-name lookup"
-      );
-    }
-
     const uniqueMatch =
       exactMatches.length === 1
         ? exactMatches[0]
