@@ -1,5 +1,19 @@
 {
-  "version": 1,
+  "version": 2,
+  "organisation_name": "St George's Road Surgery",
+  "practice_rules": {
+    "vat_recovery": "none",
+    "xero_purchase_tax_type": "NONE",
+    "expense_amount_basis": "gross_invoice_amount",
+    "missing_due_date_days": 30,
+    "automatic_draft_creation_allowed": true,
+    "automatic_submission_allowed": false,
+    "automatic_approval_allowed": false,
+    "automatic_payment_allowed": false,
+    "original_supplier_attachment_required": true,
+    "duplicate_check_required": true,
+    "supplier_verification_required": true
+  },
   "policies": [
     {
       "organisation_name": "St George's Road Surgery",
@@ -10,18 +24,37 @@
       "account_name": "Accounting & Audit",
       "status": "approved",
       "approved_date": "2026-10-14",
-      "approval_scope": "Account-code recommendation only",
+      "approval_scope": "Routine payroll-processing expense coding",
       "excluded_services": [
         "P11D work",
         "Annual accounts",
         "Advisory services",
         "Other non-payroll services"
       ],
-      "human_review_required": true,
-      "vat_review_required": true,
-      "automatic_bill_creation_allowed": false,
-      "automatic_coding_allowed": false,
-      "notes": "Recommend account 449 only for routine monthly payroll-processing invoices from AMS Accountants in St George's Road Surgery. Verify the invoice and VAT treatment independently. Never automatically apply coding."
+      "human_review_required": false,
+      "automatic_bill_creation_allowed": true,
+      "automatic_coding_allowed": true,
+      "notes": "Apply account 449 only when the invoice clearly relates to routine monthly payroll processing. Escalate excluded or ambiguous services. Practice-wide VAT rule applies."
+    },
+    {
+      "organisation_name": "St George's Road Surgery",
+      "supplier_name": "Henry Schein Medical",
+      "xero_supplier_name": "Henry Schein",
+      "service": "Clinical supplies purchased for the practice",
+      "account_code": "470",
+      "account_name": "Clinical items and Equipments",
+      "status": "approved",
+      "approved_date": "2026-10-29",
+      "approval_scope": "Clinical supplies for St George's Road Surgery",
+      "excluded_services": [
+        "Personal purchases",
+        "Non-clinical goods",
+        "Invoices delivered to a different address"
+      ],
+      "human_review_required": false,
+      "automatic_bill_creation_allowed": true,
+      "automatic_coding_allowed": true,
+      "notes": "Invoices addressed to Dr M Dadhania at the surgery's premises are accepted as practice purchases when the goods are for the practice. Verify supplier identity against Xero evidence, invoice amounts and duplicates. Practice-wide VAT rule applies."
     }
   ]
 }
