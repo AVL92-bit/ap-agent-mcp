@@ -84,6 +84,42 @@ export async function ensurePilotReviewRegister(
     ON pilot_invoice_reviews (xero_draft_id)
     WHERE xero_draft_id IS NOT NULL
   `);
+  // Store subsequent verification separately from the original
+  // assessment. Never overwrite the original evidence or decisions.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS pilot_invoice_verifications (
+      id BIGSERIAL PRIMARY KEY,
+      review_id BIGINT NOT NULL
+        REFERENCES pilot_invoice_reviews(id),
+      verification_type TEXT NOT NULL
+        CHECK (
+          verification_type IN (
+            'supplier',
+            'duplicate',
+            'billing_entity',
+            'invoice_dates',
+            'amounts',
+            'coding'
+          )
+        ),
+      outcome TEXT NOT NULL
+        CHECK (outcome IN ('verified', 'blocked')),
+      evidence_json JSONB NOT NULL,
+      verified_by TEXT NOT NULL,
+      verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS
+      pilot_invoice_verifications_review_idx
+    ON pilot_invoice_verifications (
+      review_id,
+      verification_type,
+      verified_at DESC,
+      id DESC
+    )
+  `);
 }
 
 export async function findExistingPilotReview(
