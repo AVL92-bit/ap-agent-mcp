@@ -239,3 +239,49 @@ export async function claimPilotDraft(
 
   return result.rowCount === 1;
 }
+export type PilotVerificationType =
+  | "supplier"
+  | "duplicate"
+  | "billing_entity"
+  | "invoice_dates"
+  | "amounts"
+  | "coding";
+
+export interface PilotVerification {
+  id: string;
+  verification_type: PilotVerificationType;
+  outcome: "verified" | "blocked";
+  evidence_json: Record<string, unknown>;
+  verified_by: string;
+  verified_at: Date;
+}
+
+export async function getLatestPilotVerifications(
+  pool: Pool,
+  reviewId: string
+): Promise<PilotVerification[]> {
+  if (!/^[0-9]{1,30}$/.test(reviewId)) {
+    throw new Error("Invalid review ID");
+  }
+
+  const result = await pool.query<PilotVerification>(
+    `
+      SELECT DISTINCT ON (verification_type)
+        id::text AS id,
+        verification_type,
+        outcome,
+        evidence_json,
+        verified_by,
+        verified_at
+      FROM pilot_invoice_verifications
+      WHERE review_id = $1
+      ORDER BY
+        verification_type,
+        verified_at DESC,
+        id DESC
+    `,
+    [reviewId]
+  );
+
+  return result.rows;
+}
