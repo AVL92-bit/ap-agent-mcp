@@ -2162,13 +2162,9 @@ server.registerTool(
       });
 
       try {
-        // Account 449 is the sole approved pilot coding rule.
-        // No account code or VAT type is accepted from the agent.
         const result = await createPilotDraftWithPdf(
           pool,
-          review_id,
-          "449",
-          "NONE"
+          review_id
         );
 
         return toolResult({
