@@ -321,12 +321,15 @@ async function historicalBillingPrecedent(
     return { matched: false };
   }
 
-  const currentAddress = billingAddressFromText(
-    currentText,
-    billedTo
-  );
+ const currentAddresseeFound = currentText
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        normaliseBillingLine(line.trim()) ===
+        normaliseBillingLine(billedTo)
+    );
 
-  if (!currentAddress) {
+  if (!currentAddresseeFound) {
     return { matched: false };
   }
 
@@ -495,16 +498,15 @@ async function historicalBillingPrecedent(
         continue;
       }
 
-      const historicalAddress = billingAddressFromText(
-        historicalText,
-        billedTo
-      );
+      const historicalAddresseeFound = historicalText
+        .split(/\r?\n/)
+        .some(
+          (line) =>
+            normaliseBillingLine(line.trim()) ===
+            normaliseBillingLine(billedTo)
+        );
 
-      if (
-        historicalAddress &&
-        historicalAddress.join("|") ===
-          currentAddress.join("|")
-      ) {
+      if (historicalAddresseeFound) {
         return {
           matched: true,
           historical_invoice_id: invoiceId,
@@ -600,10 +602,19 @@ export async function getPilotDraftReadiness(
         );
 
         billingPrecedentMatched = precedent.matched;
-      } catch {
-        // An unavailable or inconclusive historical check
-        // must never approve a billing arrangement.
+      } catch (error) {
         billingPrecedentMatched = false;
+
+        console.error(
+          "Historical Xero billing precedent check failed",
+          {
+            review_id: reviewId,
+            error:
+              error instanceof Error
+                ? error.message
+                : String(error),
+          }
+        );
       }
 
       if (!billingPrecedentMatched) {
