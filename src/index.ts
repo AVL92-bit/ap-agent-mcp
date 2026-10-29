@@ -1,4 +1,5 @@
 import http from "node:http";
+import { syncPilotReviewExceptions } from "./google-sheets-review.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -2256,6 +2257,51 @@ server.registerTool(
           "Pilot invoice review check failed",
           error
         );
+      }
+    }
+  );
+
+  server.registerTool(
+    "sync_pilot_review_exceptions_to_sheet",
+    {
+      title: "Sync Pilot Review Exceptions to Google Sheets",
+      description:
+        "Adds missing human-review invoice exceptions from PostgreSQL " +
+        "to the existing AP Pilot Review Register Google Sheet. " +
+        "Matches by Review ID, skips existing rows and never overwrites " +
+        "human decisions. Does not modify Xero or Front.",
+      inputSchema: {
+        review_ids: z.array(
+          z.string().regex(/^[1-9]\d{0,17}$/)
+        ).min(1).max(20),
+      },
+    },
+    async ({ review_ids }) => {
+      const pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        max: 1,
+        connectionTimeoutMillis: 5000,
+      });
+
+      try {
+        const result = await syncPilotReviewExceptions(
+          pool,
+          review_ids
+        );
+
+        return toolResult({
+          status: "ok",
+          ...result,
+          xero_modified: false,
+          front_modified: false,
+        });
+      } catch (error) {
+        return safeError(
+          "Google Sheets exception sync failed",
+          error
+        );
+      } finally {
+        await pool.end();
       }
     }
   );
