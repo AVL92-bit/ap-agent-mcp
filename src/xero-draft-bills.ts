@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { readFile } from "node:fs/promises";
 import {
   assessPilotXeroInvoice,
   getPilotXeroWriteSession,
@@ -742,7 +743,76 @@ async function attachAndVerifyOriginal(
     );
   }
 }
+type CodingPolicy = {
+  organisation_name: string;
+  supplier_name: string;
+  xero_supplier_name: string;
+  service: string;
+  account_code: string;
+  status: string;
+  human_review_required: boolean;
+  automatic_bill_creation_allowed: boolean;
+  automatic_coding_allowed: boolean;
+  excluded_services: string[];
+};
 
+type CodingPolicyFile = {
+  version: number;
+  organisation_name: string;
+  practice_rules: {
+    xero_purchase_tax_type: string;
+    expense_amount_basis: string;
+    automatic_draft_creation_allowed: boolean;
+  };
+  policies: CodingPolicy[];
+};
+
+async function loadApprovedCodingPolicy(
+  supplierName: string,
+  accountCode: string,
+  taxType: string
+): Promise<CodingPolicy> {
+  const raw = await readFile(
+    new URL("../config/coding-policies.json", import.meta.url),
+    "utf8"
+  );
+
+  const config = JSON.parse(raw) as CodingPolicyFile;
+
+  if (
+    config.version !== 2 ||
+    config.organisation_name !== PILOT_NAME ||
+    config.practice_rules?.xero_purchase_tax_type !== "NONE" ||
+    config.practice_rules?.expense_amount_basis !==
+      "gross_invoice_amount" ||
+    config.practice_rules?.automatic_draft_creation_allowed !== true ||
+    taxType !== "NONE"
+  ) {
+    throw new Error("Approved practice coding configuration is invalid");
+  }
+
+  const matchingPolicies = config.policies.filter(
+    (policy) =>
+      policy.organisation_name === PILOT_NAME &&
+      policy.status === "approved" &&
+      policy.automatic_bill_creation_allowed === true &&
+      policy.automatic_coding_allowed === true &&
+      policy.human_review_required === false &&
+      policy.account_code === accountCode &&
+      (
+        policy.supplier_name === supplierName ||
+        policy.xero_supplier_name === supplierName
+      )
+  );
+
+  if (matchingPolicies.length !== 1) {
+    throw new Error(
+      "No unique approved automatic coding policy for this supplier and account"
+    );
+  }
+
+  return matchingPolicies[0];
+}
 export async function createPilotDraftWithPdf(
   pool: Pool,
   reviewId: string,
@@ -756,20 +826,14 @@ export async function createPilotDraftWithPdf(
     reviewId
   );
 
-// Practice-wide rule: supplier VAT is never reclaimed.
-// Supplier-specific account codes must be verified against
-// an approved coding policy before draft creation.
-if (taxType !== "NONE") {
-  throw new Error(
-    "Practice-wide VAT rule requires tax type NONE"
+ // Validate the proposed account against the approved policy.
+  // This does not yet establish that the invoice's service matches
+  // the policy; that separate check remains mandatory before writes.
+  await loadApprovedCodingPolicy(
+    invoice.supplierName,
+    accountCode,
+    taxType
   );
-}
-
-if (!/^[0-9]{3,10}$/.test(accountCode)) {
-  throw new Error(
-    "A valid expense account code is required"
-  );
-}
 
   const assessment = await assessPilotXeroInvoice({
     supplier_name: invoice.supplierName,
