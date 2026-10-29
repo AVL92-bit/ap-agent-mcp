@@ -66,7 +66,16 @@ function validDate(value: unknown): value is string {
     date.toISOString().slice(0, 10) === value
   );
 }
+function defaultDueDate(invoiceDate: string): string {
+  if (!validDate(invoiceDate)) {
+    throw new Error("Invalid invoice date");
+  }
 
+  const date = new Date(`${invoiceDate}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 30);
+
+  return date.toISOString().slice(0, 10);
+}
 function amountInPence(value: unknown): number | null {
   if (
     typeof value !== "number" ||
@@ -170,11 +179,17 @@ export async function getPilotDraftReadiness(
       reasons.push("Invoice amounts do not reconcile");
     }
 
+    if (!validDate(assessment.invoice_date)) {
+      reasons.push("Invoice date requires verification");
+    }
+
     if (
-      !validDate(assessment.invoice_date) ||
+      assessment.due_date !== null &&
+      assessment.due_date !== undefined &&
+      assessment.due_date !== "" &&
       !validDate(assessment.due_date)
     ) {
-      reasons.push("Invoice dates require verification");
+      reasons.push("Supplied due date is invalid");
     }
   }
 
@@ -277,7 +292,9 @@ export async function loadPilotDraftInvoice(
     supplierName: row.supplier_name,
     invoiceNumber: row.invoice_number,
     invoiceDate: assessment.invoice_date,
-    dueDate: assessment.due_date,
+        dueDate: validDate(assessment.due_date)
+      ? assessment.due_date
+      : defaultDueDate(assessment.invoice_date),
     net: assessment.net_gbp,
     vat: assessment.vat_gbp,
     gross: assessment.gross_gbp,
@@ -353,19 +370,23 @@ async function verifiedSupplierContactId(
     }>;
   };
 
-  if (
-    !Array.isArray(data.Contacts) ||
-    data.Contacts.length !== 1 ||
-    data.Contacts[0].Name !== supplierName ||
-    data.Contacts[0].IsSupplier !== true ||
-    !data.Contacts[0].ContactID
-  ) {
+  const exactMatches = Array.isArray(data.Contacts)
+    ? data.Contacts.filter(
+        (contact) =>
+          contact.Name === supplierName &&
+          contact.IsSupplier === true &&
+          typeof contact.ContactID === "string" &&
+          contact.ContactID.length > 0
+      )
+    : [];
+
+  if (exactMatches.length !== 1) {
     throw new Error(
       "Existing Xero supplier not uniquely verified"
     );
   }
 
-  return data.Contacts[0].ContactID;
+  return exactMatches[0].ContactID;
 }
 
 async function originalFrontDocument(
@@ -769,7 +790,7 @@ type CodingPolicyFile = {
 
 async function loadApprovedCodingPolicy(
   supplierName: string,
-  accountCode: string,
+  proposedAccount: string,
   taxType: string
 ): Promise<CodingPolicy> {
   const raw = await readFile(
@@ -788,36 +809,36 @@ async function loadApprovedCodingPolicy(
     config.practice_rules?.automatic_draft_creation_allowed !== true ||
     taxType !== "NONE"
   ) {
-    throw new Error("Approved practice coding configuration is invalid");
+    throw new Error("Practice coding configuration is invalid");
   }
 
-  const matchingPolicies = config.policies.filter(
+  const matches = config.policies.filter(
     (policy) =>
       policy.organisation_name === PILOT_NAME &&
       policy.status === "approved" &&
       policy.automatic_bill_creation_allowed === true &&
       policy.automatic_coding_allowed === true &&
       policy.human_review_required === false &&
-      policy.account_code === accountCode &&
+      policy.account_code === proposedAccount &&
       (
         policy.supplier_name === supplierName ||
         policy.xero_supplier_name === supplierName
       )
   );
 
-  if (matchingPolicies.length !== 1) {
+  if (matches.length !== 1) {
     throw new Error(
-      "No unique approved automatic coding policy for this supplier and account"
+      "No unique approved coding policy for supplier and account"
     );
   }
 
-  return matchingPolicies[0];
+  return matches[0];
 }
 export async function createPilotDraftWithPdf(
   pool: Pool,
   reviewId: string,
-  accountCode: string,
-  taxType: string
+  _legacyAccountCode?: string,
+  _legacyTaxType?: string
 ): Promise<DraftResult> {
   await assertPilotDraftAllowed(pool, reviewId);
 
@@ -826,17 +847,42 @@ export async function createPilotDraftWithPdf(
     reviewId
   );
 
- // Validate the proposed account against the approved policy.
-  // This does not yet establish that the invoice's service matches
-  // the policy; that separate check remains mandatory before writes.
-  await loadApprovedCodingPolicy(
-    invoice.supplierName,
-    accountCode,
-    taxType
+  const reviewResult = await pool.query(
+    `
+      SELECT assessment_json
+      FROM pilot_invoice_reviews
+      WHERE id = $1
+    `,
+    [reviewId]
   );
 
+  if (reviewResult.rows.length !== 1) {
+    throw new Error("Invoice review not found");
+  }
+
+  const proposedAccount =
+    reviewResult.rows[0].assessment_json?.proposed_account;
+
+  if (
+    typeof proposedAccount !== "string" ||
+    !/^[0-9]{3,10}$/.test(proposedAccount)
+  ) {
+    throw new Error(
+      "Invoice has no valid proposed expense account"
+    );
+  }
+
+  const policy = await loadApprovedCodingPolicy(
+    invoice.supplierName,
+    proposedAccount,
+    "NONE"
+  );
+
+  const accountCode = policy.account_code;
+  const taxType = "NONE";
+
   const assessment = await assessPilotXeroInvoice({
-    supplier_name: invoice.supplierName,
+    supplier_name: policy.xero_supplier_name,
     invoice_number: invoice.invoiceNumber,
   });
 
@@ -857,7 +903,7 @@ export async function createPilotDraftWithPdf(
   const contactId = await verifiedSupplierContactId(
     session.tenantId,
     session.accessToken,
-    invoice.supplierName
+    policy.xero_supplier_name
   );
 
   // Retrieve and verify the original document BEFORE creating the bill.
