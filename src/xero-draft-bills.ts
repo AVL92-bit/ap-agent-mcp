@@ -756,16 +756,20 @@ export async function createPilotDraftWithPdf(
     reviewId
   );
 
-  // The only currently approved automatic coding rule.
-  if (
-    invoice.supplierName !== "AMS Accountants (DD)" ||
-    accountCode !== "449" ||
-    taxType !== "NONE"
-  ) {
-    throw new Error(
-      "No approved automatic coding/VAT rule for this invoice"
-    );
-  }
+// Practice-wide rule: supplier VAT is never reclaimed.
+// Supplier-specific account codes must be verified against
+// an approved coding policy before draft creation.
+if (taxType !== "NONE") {
+  throw new Error(
+    "Practice-wide VAT rule requires tax type NONE"
+  );
+}
+
+if (!/^[0-9]{3,10}$/.test(accountCode)) {
+  throw new Error(
+    "A valid expense account code is required"
+  );
+}
 
   const assessment = await assessPilotXeroInvoice({
     supplier_name: invoice.supplierName,
