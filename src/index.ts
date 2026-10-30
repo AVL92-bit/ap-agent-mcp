@@ -1,4 +1,5 @@
 import http from "node:http";
+import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
@@ -1889,10 +1890,47 @@ server.registerTool(
 
         // Reuse the established Xero read-only checks.
         // These require the pilot connection to remain disabled.
-        const xero = await assessPilotXeroInvoice({
-          supplier_name: review.supplier_name,
-          invoice_number: review.invoice_number,
-        });
+const policyFile = JSON.parse(
+  await readFile(
+    new URL("../config/coding-policies.json", import.meta.url),
+    "utf8"
+  )
+) as {
+  policies: Array<{
+    organisation_name: string;
+    supplier_name: string;
+    xero_supplier_name: string;
+    status: string;
+    automatic_bill_creation_allowed: boolean;
+    automatic_coding_allowed: boolean;
+    human_review_required: boolean;
+  }>;
+};
+
+const supplierPolicies = policyFile.policies.filter(
+  (policy) =>
+    policy.organisation_name === "St George's Road Surgery" &&
+    policy.status === "approved" &&
+    policy.automatic_bill_creation_allowed === true &&
+    policy.automatic_coding_allowed === true &&
+    policy.human_review_required === false &&
+    (policy.supplier_name === review.supplier_name ||
+      policy.xero_supplier_name === review.supplier_name)
+);
+
+if (supplierPolicies.length !== 1) {
+  return toolResult({
+    status: "blocked",
+    review_id,
+    reasons: ["No unique approved Xero supplier mapping"],
+    draft_created: false,
+  });
+}
+
+const xero = await assessPilotXeroInvoice({
+  supplier_name: supplierPolicies[0].xero_supplier_name,
+  invoice_number: review.invoice_number,
+});
 
         if (
           xero.status !== "xero_checks_clear" ||
