@@ -571,6 +571,10 @@ async function historicalBillingPrecedent(
       const historicalText = await pdfText(historicalBytes);
 
       if (!historicalText) {
+        console.info("Historical Xero PDF comparison", {
+          invoice_id: invoiceId,
+          result: "text_extraction_failed",
+        });
         continue;
       }
 
@@ -578,7 +582,12 @@ async function historicalBillingPrecedent(
         historicalText,
         billedTo
       );
-
+      console.info("Historical Xero PDF comparison", {
+        invoice_id: invoiceId,
+        result: historicalAddresseeFound
+          ? "addressee_matched"
+          : "addressee_not_matched",
+      });
       if (historicalAddresseeFound) {
         return {
           matched: true,
