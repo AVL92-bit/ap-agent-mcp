@@ -206,7 +206,29 @@ function normaliseBillingLine(value: string): string {
     .replace(/&/g, "and")
     .replace(/[^a-z0-9]/g, "");
 }
+function billingAddressee(billedTo: string): string {
+  return normaliseBillingLine(
+    billedTo.split(",")[0].trim()
+  );
+}
 
+function pdfHasBillingAddressee(
+  text: string,
+  billedTo: string
+): boolean {
+  const addressee = billingAddressee(billedTo);
+
+  if (addressee.length < 5) {
+    return false;
+  }
+
+  return text
+    .split(/\r?\n/)
+    .some(
+      (line) =>
+        normaliseBillingLine(line.trim()) === addressee
+    );
+}
 function billingAddressFromText(
   text: string,
   billedTo: string
@@ -328,13 +350,10 @@ async function historicalBillingPrecedent(
     return { matched: false };
   }
 
-  const currentAddresseeFound = currentText
-    .split(/\r?\n/)
-    .some(
-      (line) =>
-        normaliseBillingLine(line.trim()) ===
-        normaliseBillingLine(billedTo)
-    );
+  const currentAddresseeFound = pdfHasBillingAddressee(
+    currentText,
+    billedTo
+  );
 
   console.info("Historical Xero current PDF check", {
     result: currentAddresseeFound
@@ -555,13 +574,10 @@ async function historicalBillingPrecedent(
         continue;
       }
 
-      const historicalAddresseeFound = historicalText
-        .split(/\r?\n/)
-        .some(
-          (line) =>
-            normaliseBillingLine(line.trim()) ===
-            normaliseBillingLine(billedTo)
-        );
+      const historicalAddresseeFound = pdfHasBillingAddressee(
+        historicalText,
+        billedTo
+      );
 
       if (historicalAddresseeFound) {
         return {
