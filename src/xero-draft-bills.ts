@@ -1464,7 +1464,11 @@ async function loadApprovedCodingPolicy(
       policy.automatic_bill_creation_allowed === true &&
       policy.automatic_coding_allowed === true &&
       policy.human_review_required === false &&
-      policy.account_code === proposedAccount &&
+            /^[0-9]{3,10}$/.test(policy.account_code) &&
+      (
+        proposedAccount === "" ||
+        policy.account_code === proposedAccount
+      ) &&
       (
         policy.supplier_name === supplierName ||
         policy.xero_supplier_name === supplierName
@@ -1487,23 +1491,17 @@ export async function createPilotDraftWithPdf(
 ): Promise<DraftResult> {
   await assertPilotDraftAllowed(pool, reviewId);
 
-  const invoice = await loadPilotDraftInvoice(
-    pool,
-    reviewId
-  );
+   const proposedAccount =
+    reviewResult.rows[0].assessment_json?.proposed_account;
 
-  const reviewResult = await pool.query(
-    `
-      SELECT assessment_json
-      FROM pilot_invoice_reviews
-      WHERE id = $1
-    `,
-    [reviewId]
+  const policy = await loadApprovedCodingPolicy(
+    invoice.supplierName,
+    typeof proposedAccount === "string" &&
+      /^[0-9]{3,10}$/.test(proposedAccount)
+      ? proposedAccount
+      : "",
+    "NONE"
   );
-
-  if (reviewResult.rows.length !== 1) {
-    throw new Error("Invoice review not found");
-  }
 
   const proposedAccount =
     reviewResult.rows[0].assessment_json?.proposed_account;
