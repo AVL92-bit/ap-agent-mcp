@@ -751,25 +751,42 @@ export async function getPilotDraftReadiness(
 
    const originalExceptions = assessment.exceptions;
 
-    const remainingExceptions =
+       const remainingExceptions =
       Array.isArray(originalExceptions)
         ? originalExceptions.filter((exception: unknown) => {
-            if (
-              !billingPrecedentMatched ||
-              typeof exception !== "string"
-            ) {
+            if (typeof exception !== "string") {
               return true;
             }
 
-            // Only remove exceptions specifically about
-            // the billed-to entity or billing address.
-            // Supplier, duplicate, coding, amount and
-            // other exceptions remain untouched.
-            return !/\b(billed[\s-]*to|billing entity|billing address)\b/i
-              .test(exception);
+            // Supplier identity and duplicate status are
+            // checked against live Xero data before drafting.
+            if (
+              /^Supplier not uniquely matched in Xero:/i.test(exception) ||
+              /^Duplicate check incomplete:/i.test(exception)
+            ) {
+              return false;
+            }
+
+            // VAT treatment is governed by the approved
+            // practice-wide policy: gross expense, no VAT reclaimed.
+            if (/^VAT review required:/i.test(exception)) {
+              return false;
+            }
+
+            // Historical paid or authorised Xero bills
+            // establish the billing addressee precedent.
+            if (
+              billingPrecedentMatched &&
+              /\b(billed[\s-]*to|billing entity|billing address)\b/i.test(
+                exception
+              )
+            ) {
+              return false;
+            }
+
+            return true;
           })
         : originalExceptions;
-
     if (
       !hasResolvedOriginalExceptions(
         remainingExceptions,
