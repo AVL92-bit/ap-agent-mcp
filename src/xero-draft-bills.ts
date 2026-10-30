@@ -776,6 +776,11 @@ export async function getPilotDraftReadiness(
         verifications
       )
     ) {
+      console.info("Unresolved assessment exceptions", {
+        review_id: reviewId,
+        billing_precedent_matched: billingPrecedentMatched,
+        remaining_exceptions: remainingExceptions,
+      });
       reasons.push("Assessment has unresolved exceptions");
     }
 
