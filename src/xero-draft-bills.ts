@@ -1491,33 +1491,36 @@ export async function createPilotDraftWithPdf(
 ): Promise<DraftResult> {
   await assertPilotDraftAllowed(pool, reviewId);
 
-   const proposedAccount =
-    reviewResult.rows[0].assessment_json?.proposed_account;
-
-  const policy = await loadApprovedCodingPolicy(
-    invoice.supplierName,
-    typeof proposedAccount === "string" &&
-      /^[0-9]{3,10}$/.test(proposedAccount)
-      ? proposedAccount
-      : "",
-    "NONE"
+  const invoice = await loadPilotDraftInvoice(
+    pool,
+    reviewId
   );
+
+  const reviewResult = await pool.query(
+    `
+      SELECT assessment_json
+      FROM pilot_invoice_reviews
+      WHERE id = $1
+    `,
+    [reviewId]
+  );
+
+  if (reviewResult.rows.length !== 1) {
+    throw new Error("Invoice review not found");
+  }
 
   const proposedAccount =
     reviewResult.rows[0].assessment_json?.proposed_account;
 
-  if (
-    typeof proposedAccount !== "string" ||
-    !/^[0-9]{3,10}$/.test(proposedAccount)
-  ) {
-    throw new Error(
-      "Invoice has no valid proposed expense account"
-    );
-  }
+  const accountForPolicy =
+    typeof proposedAccount === "string" &&
+    /^[0-9]{3,10}$/.test(proposedAccount)
+      ? proposedAccount
+      : "";
 
   const policy = await loadApprovedCodingPolicy(
     invoice.supplierName,
-    proposedAccount,
+    accountForPolicy,
     "NONE"
   );
 
