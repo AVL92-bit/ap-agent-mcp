@@ -410,6 +410,13 @@ async function historicalBillingPrecedent(
   );
 
   if (matches.length !== 1) {
+    console.info(
+      "Historical Xero supplier contact result",
+      {
+        supplier_found: matches.length,
+        xero_supplier_name: xeroSupplierName,
+      }
+    );
     return { matched: false };
   }
 
@@ -460,7 +467,16 @@ async function historicalBillingPrecedent(
         typeof invoice.InvoiceID === "string"
     )
     .slice(0, 5);
-
+  
+  console.info(
+    "Historical Xero bill candidates",
+    {
+      supplier: xeroSupplierName,
+      invoices_returned: invoicesData.Invoices.length,
+      eligible_candidates: candidates.length,
+    }
+  );
+  
   for (const invoice of candidates) {
     const invoiceId = invoice.InvoiceID!;
 
@@ -629,6 +645,15 @@ export async function getPilotDraftReadiness(
         );
 
         billingPrecedentMatched = precedent.matched;
+                console.info(
+          "Historical Xero billing precedent result",
+          {
+            review_id: reviewId,
+            matched: precedent.matched,
+            historical_invoice_id:
+              precedent.historical_invoice_id ?? null,
+          }
+        );
       } catch (error) {
         billingPrecedentMatched = false;
 
