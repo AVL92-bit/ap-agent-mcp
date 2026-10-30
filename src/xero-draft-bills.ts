@@ -311,23 +311,37 @@ async function historicalBillingPrecedent(
     attachmentId: review.attachment_id,
   });
 
-  if (current.contentType !== "application/pdf") {
+   if (current.contentType !== "application/pdf") {
+    console.info("Historical Xero current PDF check", {
+      result: "not_pdf",
+      content_type: current.contentType,
+    });
     return { matched: false };
   }
 
   const currentText = await pdfText(current.bytes);
 
   if (!currentText) {
+    console.info("Historical Xero current PDF check", {
+      result: "text_extraction_failed",
+    });
     return { matched: false };
   }
 
- const currentAddresseeFound = currentText
+  const currentAddresseeFound = currentText
     .split(/\r?\n/)
     .some(
       (line) =>
         normaliseBillingLine(line.trim()) ===
         normaliseBillingLine(billedTo)
     );
+
+  console.info("Historical Xero current PDF check", {
+    result: currentAddresseeFound
+      ? "addressee_found"
+      : "addressee_not_found",
+    billed_to: billedTo,
+  });
 
   if (!currentAddresseeFound) {
     return { matched: false };
