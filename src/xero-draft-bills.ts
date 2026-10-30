@@ -517,12 +517,17 @@ async function historicalBillingPrecedent(
       `https://api.xero.com/api.xro/2.0/Invoices/` +
       `${encodeURIComponent(invoiceId)}/Attachments`;
 
-    const listingResponse = await fetch(attachmentUrl, {
+   const listingResponse = await fetch(attachmentUrl, {
       headers,
       signal: AbortSignal.timeout(20000),
     });
 
     if (!listingResponse.ok) {
+      console.error("Historical Xero attachment", {
+        invoice_id: invoiceId,
+        stage: "listing",
+        http_status: listingResponse.status,
+      });
       continue;
     }
 
@@ -533,10 +538,26 @@ async function historicalBillingPrecedent(
       }>;
     };
 
-    for (const attachment of listing.Attachments ?? []) {
+    const attachments = listing.Attachments ?? [];
+
+    console.info("Historical Xero attachment", {
+      invoice_id: invoiceId,
+      stage: "listing_received",
+      attachment_count: attachments.length,
+      pdf_candidates: attachments.filter(
+        (item) =>
+          item.FileName?.toLowerCase().endsWith(".pdf") ||
+          item.MimeType?.toLowerCase() === "application/pdf"
+      ).length,
+    });
+
+    for (const attachment of attachments) {
       if (
-        attachment.MimeType !== "application/pdf" ||
-        !attachment.FileName
+        !attachment.FileName ||
+        !(
+          attachment.FileName.toLowerCase().endsWith(".pdf") ||
+          attachment.MimeType?.toLowerCase() === "application/pdf"
+        )
       ) {
         continue;
       }
@@ -553,6 +574,11 @@ async function historicalBillingPrecedent(
       );
 
       if (!pdfResponse.ok) {
+        console.error("Historical Xero attachment", {
+          invoice_id: invoiceId,
+          stage: "download",
+          http_status: pdfResponse.status,
+        });
         continue;
       }
 
@@ -561,6 +587,10 @@ async function historicalBillingPrecedent(
       );
 
       if (declaredSize > 10 * 1024 * 1024) {
+        console.info("Historical Xero attachment", {
+          invoice_id: invoiceId,
+          stage: "oversized",
+        });
         continue;
       }
 
@@ -571,9 +601,13 @@ async function historicalBillingPrecedent(
       const historicalText = await pdfText(historicalBytes);
 
       if (!historicalText) {
-        console.info("Historical Xero PDF comparison", {
+        console.info("Historical Xero attachment", {
           invoice_id: invoiceId,
-          result: "text_extraction_failed",
+          stage: "pdf_text_unavailable",
+          bytes: historicalBytes.length,
+          pdf_signature:
+            historicalBytes.subarray(0, 5).toString("ascii") ===
+            "%PDF-",
         });
         continue;
       }
@@ -582,12 +616,14 @@ async function historicalBillingPrecedent(
         historicalText,
         billedTo
       );
-      console.info("Historical Xero PDF comparison", {
+
+      console.info("Historical Xero attachment", {
         invoice_id: invoiceId,
-        result: historicalAddresseeFound
+        stage: historicalAddresseeFound
           ? "addressee_matched"
           : "addressee_not_matched",
       });
+
       if (historicalAddresseeFound) {
         return {
           matched: true,
