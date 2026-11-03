@@ -252,8 +252,8 @@ export async function syncPilotReviewExceptions(
     }
 
     if (
-      review.assessment_json.requires_human_review !== true ||
-      !["awaiting_review", "on_hold"].includes(review.review_status)
+      (!review.xero_draft_id && review.assessment_json.requires_human_review !== true) ||
+      (!review.xero_draft_id && !["awaiting_review", "on_hold"].includes(review.review_status))
     ) {
       skipped.push(review.id);
       continue;
