@@ -15,7 +15,7 @@ const due30 = (s: string) => { const d = new Date(`${s}T00:00:00Z`); d.setUTCDat
 const money = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0 && Math.abs(n*100-Math.round(n*100)) < 0.00001;
 const idOk = (s: string) => /^[1-9]\d{0,17}$/.test(s);
 export function pilotDraftWriteState() {
-  const configured = process.env.XERO_DRAFT_WRITES_ENABLED === 'true';
+  const configured = process.env.XERO_DRAFT_WRITES_ENABLED?.trim().toLowerCase() === 'true';
   const pilotScope = process.env.FRONT_ENABLED_INBOX_ID === INBOX && process.env.XERO_PILOT_TENANT_ID === TENANT;
   return {draft_writes_enabled: configured && pilotScope, draft_write_switch_configured: configured,
     pilot_scope_verified: pilotScope, connection_enabled_is_oauth_metadata: true};
@@ -147,7 +147,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
       const matchedContactName = String(first.Contact?.Name ?? '').trim().toLowerCase();
       if (existing.length === 1 && matchedContactName === supplier.toLowerCase() && first[`${kind === 'Invoices' ? 'Invoice' : 'CreditNote'}ID`]) {
         const existingId = first[kind === 'Invoices' ? 'InvoiceID' : 'CreditNoteID'];
-        await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_id=$2,xero_draft_status='existing_in_xero',xero_draft_updated_at=NOW() WHERE id=$1`,[reviewId,existingId]);
+        await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_id=$2,xero_draft_status='existing_in_xero',xero_draft_updated_at=NOW(),updated_at=NOW() WHERE id=$1`,[reviewId,existingId]);
         let sheetStatus = 'synced';
         try { await syncPilotReviewExceptions(pool,[reviewId]); } catch { sheetStatus = 'sync_failed'; }
         return {status:'existing_in_xero',review_id:reviewId,xero_draft_id:existingId,review_required:true,sheet_status:sheetStatus};
