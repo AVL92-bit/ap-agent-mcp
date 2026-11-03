@@ -524,7 +524,7 @@ function buildMcpServer() {
     {
       title: "Scan Enabled AP Inboxes",
       description:
-        "Fast routine Front inbox discovery. Hard-capped at 6 pages server-side, even when a larger max_pages value is requested. Results are not a complete historical inbox audit. Previously assessed items are not assumed processed in Xero. Read-only.",
+        "Read-only discovery of ONLY unassigned, open conversations in the configured Front inbox. Front filters status before pagination. Hard-capped at 6 pages. Previously assessed conversations are not assumed processed in Xero.",
       inputSchema: { max_pages: z.number().int().min(1).max(40).default(6).describe("Requested pages for routine discovery. The server enforces a hard maximum of 6 pages regardless of the requested value; use a separate deliberate audit for deep history.") },
     },
     async ({ max_pages }) => {
@@ -537,14 +537,20 @@ function buildMcpServer() {
           status?: string;
           created_at?: number;
           updated_at?: number;
+          assignee?: unknown;
         };
 
         const allConversations: ScannedConversation[] = [];
         const visitedPages = new Set<string>();
         const maxPages = Math.min(max_pages, 6);
 
+        // Front's inbox-list endpoint supports server-side status filtering.
+        // Filtering BEFORE pagination prevents archived/assigned conversations
+        // from consuming the six-page routine AP discovery budget.
+        const inboxPath = `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
+        const frontQuery = JSON.stringify({ statuses: ["unassigned"] });
         let nextPath: string | null =
-          `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
+          `${inboxPath}?${new URLSearchParams({ q: frontQuery, limit: "100" })}`;
 let scanTruncated = false;
         while (nextPath !== null) {
           if (visitedPages.has(nextPath)) {
@@ -601,7 +607,7 @@ if (visitedPages.size >= maxPages) {
               "medicspot-limited.api.frontapp.com",
             ].includes(nextUrl.hostname) ||
             nextUrl.pathname !==
-              `/inboxes/${encodeURIComponent(inboxId)}/conversations` ||
+              inboxPath ||
             nextUrl.username !== "" ||
             nextUrl.password !== ""
           ) {
@@ -610,6 +616,12 @@ if (visitedPages.size >= maxPages) {
             );
           }
 
+          // Never continue pagination if Front drops the unassigned filter.
+          // Fail closed instead of accidentally scanning the full inbox.
+          const continuedQuery = nextUrl.searchParams.get("q");
+          if (continuedQuery !== frontQuery) {
+            return toolFailure("Front pagination did not preserve the unassigned filter");
+          }
           nextPath = nextUrl.href;
         }
 
@@ -644,7 +656,8 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
   .filter(
     (conversation) =>
       typeof conversation.id === "string" &&
-      conversation.status !== "archived"
+      conversation.status === "unassigned" &&
+      (conversation.assignee === null || conversation.assignee === undefined)
   )
           .sort((a, b) => (b.updated_at ?? b.created_at ?? 0) - (a.updated_at ?? a.created_at ?? 0))
           .map((conversation) => ({
@@ -665,7 +678,6 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
         const priorityConversations =
           conversations.filter(
             (conversation) =>
-              conversation.status !== "archived" &&
               !conversation.has_previous_assessment
           );
 
@@ -687,18 +699,20 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           requested_max_pages: max_pages,
           effective_max_pages: maxPages,
           server_page_cap_applied: max_pages > maxPages,
-          scan_mode: "routine_bounded_discovery",
+          scan_mode: "unassigned_open_inbox_only", 
+          front_filter_applied_before_pagination: true,
+          excluded_statuses: ["assigned", "archived", "deleted"],
           search_complete: !scanTruncated,
           ordering: "updated_at_desc_within_fetched_pages",
           latest_in_inbox_guaranteed: false,
           ordering_verified_by_front: false,
-          ordering_limitation: "Sorted by updated_at only after retrieval; Front API pagination order is not verified. Do not claim these are the latest conversations.",
-          coverage_note: scanTruncated ? "Front has further pages; newer conversations may exist outside this fetched set. Do not claim latest-inbox coverage." : "All paginated results fetched; sorted by update time. API ordering not independently verified.",
+          ordering_limitation: "Only unassigned Front conversations are requested. Local updated_at sorting applies to fetched pages; ordering is not guaranteed if the six-page cap is reached.",
+          coverage_note: scanTruncated ? "More UNASSIGNED conversations exist beyond six pages; queue coverage incomplete." : "All unassigned inbox conversations returned by Front were fetched.",
           assessed_does_not_mean_xero_processed: true,
           xero_status_reconciliation: "not_performed; previous assessment is not a Xero status check",
 pages_scanned: visitedPages.size,
           selection_guidance:
-            "This is a bounded routine discovery scan, not a full inbox audit. Do not request more pages to make routine review comprehensive. Inspect a small number of candidates, then stop. " +
+            "Only open, unassigned conversations from the enabled inbox are returned. Discover all eligible invoice candidates in the returned queue; assess in manageable batches without silently discarding remaining candidates. " +
             "Use prepare_pilot_review_batch before extracting. " +
             "Previously reviewed conversations may contain " +
             "new attachments and must not be treated as " +
@@ -1400,8 +1414,9 @@ Accept: isPdf
       conversation_id: z.string().startsWith("cnv_"),
       invoice_number: z.string().min(1).max(100),
       supplier_name: z.string().min(1).max(150),
+      xero_contact_id: z.string().uuid().optional().describe("Verified Xero ContactID, if already resolved; takes precedence over supplier-name matching."),
     }),
-  }, async ({conversation_id, invoice_number, supplier_name}) => {
+  }, async ({conversation_id, invoice_number, supplier_name, xero_contact_id}) => {
     try {
       if (/["\\\r\n]/.test(invoice_number) || /["\\\r\n]/.test(supplier_name)) {
         return toolFailure("Invoice number or supplier contains unsupported Xero query characters");
@@ -1419,7 +1434,7 @@ Accept: isPdf
       const session = await getPilotXeroReadSession();
       const url = new URL("https://api.xero.com/api.xro/2.0/Invoices");
       url.searchParams.set("where", `Type=="ACCPAY"&&InvoiceNumber=="${invoice_number}"`);
-      const matches: Array<{InvoiceID?: string; InvoiceNumber?: string; Status?: string; AmountDue?: number; AmountPaid?: number; Contact?: {Name?: string}}> = [];
+      const matches: Array<{InvoiceID?: string; InvoiceNumber?: string; Status?: string; AmountDue?: number; AmountPaid?: number; Contact?: {Name?: string; ContactID?: string}}> = [];
       let searchComplete = false;
       for (let page=1; page<=20; page++) {
         url.searchParams.set("page", String(page));
@@ -1434,16 +1449,25 @@ Accept: isPdf
         if (data.Invoices.length < 100) {searchComplete=true;break;}
       }
       if (!searchComplete) return toolResult({status: "review_required", reason: "xero_search_page_limit", xero_processing_status: "unknown", bills_created: false});
-      const supplierMatches = matches.filter(b => b.Contact?.Name?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
+      // Match by verified Xero ContactID when provided, not the supplier's
+      // free-text display name. Preserve other-contact invoice-number matches
+      // for duplicate review rather than declaring the invoice clear.
+      const supplierMatches = matches.filter(b => xero_contact_id
+        ? b.Contact?.ContactID?.toLowerCase() === xero_contact_id.toLowerCase()
+        : b.Contact?.Name?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
       const otherSupplierMatches = matches.length - supplierMatches.length;
+      const identityNeedsReview = !xero_contact_id && otherSupplierMatches > 0 && supplierMatches.length === 0;
       return toolResult({status: "ok", conversation_id, supplier_name, invoice_number,
         postgres_review_count: matchingReviews.length,
         postgres_reviews: matchingReviews.map(r=>({review_id:r.id, review_status:r.review_status, xero_draft_id:r.xero_draft_id})),
         xero_search_complete: true, matching_xero_bill_count: supplierMatches.length,
+        xero_contact_id_used: xero_contact_id ?? null,
+        supplier_identity_requires_review: identityNeedsReview,
         same_number_other_supplier_count: otherSupplierMatches,
+        same_number_other_supplier_bills: matches.filter(b => !supplierMatches.includes(b)).map(b => ({ invoice_id: b.InvoiceID, contact_id: b.Contact?.ContactID ?? null, contact_name: b.Contact?.Name ?? null, status: b.Status ?? "UNKNOWN" })),
         xero_bills: supplierMatches.map(b=>({invoice_id:b.InvoiceID, status:b.Status ?? "UNKNOWN", amount_due:b.AmountDue ?? null, amount_paid:b.AmountPaid ?? null})),
-        xero_processing_status: supplierMatches.length===0 ? "no_matching_bill_found" : supplierMatches.length===1 ? (supplierMatches[0].Status ?? "unknown") : "multiple_matching_bills_review_required",
-        note: "Xero status is authoritative only for returned matching bills. No match does not prove invoice is new; review records and supplier identity may be incomplete.",
+        xero_processing_status: identityNeedsReview ? "supplier_identity_unresolved_same_number_exists" : supplierMatches.length===0 ? "no_matching_bill_found" : supplierMatches.length===1 ? (supplierMatches[0].Status ?? "unknown") : "multiple_matching_bills_review_required",
+        note: "Prefer verified Xero ContactID. When only a name is provided, a name mismatch does not clear a possible duplicate; other-contact invoice-number matches are returned for review. No match does not prove an invoice is new.",
         read_only: true, bills_created: false, bills_modified: false});
     } catch (error) {return safeError("Invoice Xero reconciliation failed", error);}
   });
