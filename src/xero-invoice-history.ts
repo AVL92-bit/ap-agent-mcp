@@ -386,6 +386,8 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
     }> = [];
 
     let scannedBills = 0;
+    let matchingBills = 0;
+    let hitLineLimit = false;
     let reachedEnd = false;
 
     for (let page = 1; page <= PAGE_LIMIT; page++) {
@@ -447,6 +449,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
           continue;
         }
 
+        let matchedThisBill = false;
         for (const line of invoice.LineItems ?? []) {
           // For targeted searches, match invoice descriptions.
           if (
@@ -466,8 +469,10 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
           }
 
           if (examples.length >= MAX_EXAMPLES) {
+            hitLineLimit = true;
             break;
           }
+          matchedThisBill = true;
           examples.push({
             supplier: (invoice.Contact?.Name ?? "").slice(
               0,
@@ -486,6 +491,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
             historical_tax_type: line.TaxType ?? null,
           });
         }
+        if (matchedThisBill) matchingBills++;
       }
 
       if (data.Invoices.length < PAGE_SIZE) {
@@ -515,6 +521,10 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
       organisation_name_verified: true,
       token_refreshed: tokenResult.refreshed,
       historical_bills_scanned: scannedBills,
+      matching_bills_in_returned_lines: matchingBills,
+      max_returned_lines: MAX_EXAMPLES,
+      max_pages_scanned: PAGE_LIMIT,
+      stopped_at_line_limit: hitLineLimit,
       historical_examples: examples,
       sample_limited:
         !reachedEnd || examples.length >= MAX_EXAMPLES,
