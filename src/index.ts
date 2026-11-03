@@ -558,9 +558,10 @@ function buildMcpServer() {
         // Filtering BEFORE pagination prevents archived/assigned conversations
         // from consuming the six-page routine AP discovery budget.
         const inboxPath = `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
-        const frontQuery = JSON.stringify({ statuses: ["unassigned"] });
+        const statusFilterKey = "q[statuses]";
+        const statusFilterValue = "unassigned";
         let nextPath: string | null =
-          `${inboxPath}?${new URLSearchParams({ q: frontQuery, limit: "100" })}`;
+          `${inboxPath}?${new URLSearchParams({ [statusFilterKey]: statusFilterValue, limit: "100" })}`;
 let scanTruncated = false;
         while (nextPath !== null) {
           if (visitedPages.has(nextPath)) {
@@ -649,10 +650,17 @@ if (visitedPages.size >= maxPages) {
 
           // Never continue pagination if Front drops the unassigned filter.
           // Fail closed instead of accidentally scanning the full inbox.
-          const continuedQuery = nextUrl.searchParams.get("q");
-          if (continuedQuery !== frontQuery) {
-            return toolFailure("Front pagination did not preserve the unassigned filter");
+          // Front may return a page-token URL without repeating the original
+          // filter. Explicitly carry forward the documented bracketed q syntax.
+          // Reject any conflicting filters rather than broadening the queue.
+          const continuedStatuses = nextUrl.searchParams.getAll(statusFilterKey);
+          if (continuedStatuses.some(value => value !== statusFilterValue) ||
+              nextUrl.searchParams.has("q") ||
+              nextUrl.searchParams.has("q[status_categories]") ||
+              nextUrl.searchParams.has("q[status_ids]")) {
+            return toolFailure("Front pagination returned a conflicting status filter");
           }
+          nextUrl.searchParams.set(statusFilterKey, statusFilterValue);
           nextPath = nextUrl.href;
         }
 
@@ -729,8 +737,8 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           front_page_size_observed: pageDiagnostics.map(page => page.returned),
           queue_incomplete: scanTruncated,
           queue_next_action: scanTruncated
-            ? "The six-page safety cap was reached. This is a partial queue: do not claim all unassigned conversations were reviewed. Investigate Front page sizing and queue backlog before expanding the cap."
-            : "Front returned no additional page; all eligible conversations in this scan were returned.",
+            ? "The six-page safety cap was reached. This is a partial queue; do not claim all unassigned conversations were reviewed."
+            : "Front returned no additional page; eligible inbox queue traversal completed.",
           priority_conversations:
             priorityConversations,
           previously_reviewed_conversations:
@@ -741,13 +749,15 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           server_page_cap_applied: max_pages > maxPages,
           scan_mode: "unassigned_open_inbox_only", 
           front_filter_applied_before_pagination: true,
+          front_filter_parameter: "q[statuses]=unassigned",
+          front_filter_verified_by_response: pageDiagnostics.every(page => page.assigned_or_other_status === 0),
           excluded_statuses: ["assigned", "archived", "deleted"],
           search_complete: !scanTruncated,
           ordering: "updated_at_desc_within_fetched_pages",
           latest_in_inbox_guaranteed: false,
           ordering_verified_by_front: false,
           ordering_limitation: "Only unassigned Front conversations are requested. Local updated_at sorting applies to fetched pages; ordering is not guaranteed if the six-page cap is reached.",
-          coverage_note: scanTruncated ? "More UNASSIGNED conversations exist beyond six pages; queue coverage incomplete." : "All unassigned inbox conversations returned by Front were fetched.",
+          coverage_note: scanTruncated ? "Front returned another pagination link after six pages; eligibility of conversations beyond the cap is unknown. Queue coverage incomplete." : "All unassigned inbox conversations returned by Front were fetched.",
           assessed_does_not_mean_xero_processed: true,
           xero_status_reconciliation: "not_performed; previous assessment is not a Xero status check",
 pages_scanned: visitedPages.size,
