@@ -538,7 +538,7 @@ function buildMcpServer() {
 
         const allConversations: ScannedConversation[] = [];
         const visitedPages = new Set<string>();
-        const maxPages = 5;
+        const maxPages = 8;
 
         let nextPath: string | null =
           `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
