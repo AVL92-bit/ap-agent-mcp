@@ -28,6 +28,7 @@ import {
   testPilotXeroInvoiceHistory,
 } from "./xero-invoice-history.js";
 import { assessPilotHistoricalCoding } from "./historical-coding-assessment.js";
+import { investigatePilotHistoricalCodingException } from "./historical-comparables.js";
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
 // in xero-pilot-test.ts.
@@ -1657,6 +1658,27 @@ server.registerTool(
     }
   );
   server.registerTool(
+    "investigate_pilot_historical_coding_exception",
+    {
+      title: "Investigate Pilot Historical Coding Exception",
+      description: "Read-only comparison of a specific historical invoice line with reviewer-specified description terms from the same supplier. Flags possible anomalies for human review; never corrects invoices or selects a code.",
+      inputSchema: {
+        supplier_name: z.string().min(1).max(150),
+        invoice_number: z.string().min(1).max(150),
+        comparison_terms: z.array(z.string().min(3).max(150)).min(1).max(5),
+      },
+    },
+    async ({ supplier_name, invoice_number, comparison_terms }) => {
+      try {
+        return toolResult(await investigatePilotHistoricalCodingException({
+          supplier_name, invoice_number, comparison_terms,
+        }));
+      } catch (error) {
+        return safeError("Historical coding exception investigation failed", error);
+      }
+    }
+  );
+  server.registerTool(
     "get_pilot_coding_policies",
     {
       title: "Get Pilot Practice Configuration",
@@ -2677,6 +2699,8 @@ const httpServer =
             "test_pilot_xero_accounting_settings",
             "test_pilot_xero_invoice_history",
             "search_pilot_xero_invoice_history",
+            "assess_pilot_historical_coding",
+            "investigate_pilot_historical_coding_exception",
             "get_pilot_coding_policies",
 "check_pilot_xero_draft_readiness",
 "check_pilot_draft_database_readiness",
