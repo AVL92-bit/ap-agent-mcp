@@ -21,8 +21,6 @@ import {
 import {
   testPilotXeroConnection,
   testPilotXeroOrganisation,
-  testPilotXeroSupplier,
-  testPilotXeroDuplicateInvoice,
   assessPilotXeroInvoice,
   testPilotXeroAccountingSettings,
 } from "./xero-pilot-test.js";
@@ -1495,58 +1493,12 @@ Accept: isPdf
   );
 
   server.registerTool(
-    "test_pilot_xero_supplier",
-    {
-      title:
-        "Test Pilot Xero Supplier Lookup",
-      description:
-        "Manually performs a read-only exact-name lookup for Aquacool Limited in the disabled pilot organisation.",
-      inputSchema: {},
-    },
-    async () => {
-      try {
-        return toolResult(
-          await testPilotXeroSupplier()
-        );
-      } catch (error) {
-        return safeError(
-          "Pilot Xero supplier test failed",
-          error
-        );
-      }
-    }
-  );
-
-  server.registerTool(
-    "test_pilot_xero_duplicate_invoice",
-    {
-      title:
-        "Test Pilot Xero Duplicate Invoice Lookup",
-      description:
-        "Manually performs a read-only duplicate check for invoice 504694a and Aquacool Limited in the disabled pilot organisation.",
-      inputSchema: {},
-    },
-    async () => {
-      try {
-        return toolResult(
-          await testPilotXeroDuplicateInvoice()
-        );
-      } catch (error) {
-        return safeError(
-          "Pilot Xero duplicate invoice test failed",
-          error
-        );
-      }
-    }
-  );
-
-  server.registerTool(
     "assess_pilot_xero_invoice",
     {
       title:
         "Assess Pilot Xero Invoice",
       description:
-        "Read-only exact supplier verification and duplicate-invoice checking in the disabled pilot organisation. Never creates bills or modifies records.",
+        "Read-only verification of existing Xero suppliers and duplicate-invoice checking in the pilot organisation. Never creates suppliers, bills or modifies records.",
       inputSchema: {
         supplier_name: z
           .string()
