@@ -1,3 +1,4 @@
+import { inspectApprovedSupplierCoding } from './xero-review-drafts.js';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
@@ -2250,10 +2251,11 @@ const xero = await assessPilotXeroInvoice({
         // Failure to check is a hard failure, never a fresh draft candidate.
         const identity=await inspectIntakeIdentity(pool,{conversationId:conversation_id,messageId:message_id,
           attachmentId:attachment_id,supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type});
+        const historicalCoding=await inspectApprovedSupplierCoding(supplier_name,assessment.evidence_notes??'');
         if(mode==='preview') {
           const base=previewDirectDraft(candidate);
           const existing=identity.existing_xero_document || !!identity.review_id && !!identity.prior_draft_attempt;
-          return toolResult({...base,mode,attachment_verified:true,...identity,
+          return toolResult({...base,mode,attachment_verified:true,...identity,historical_coding:historicalCoding,
             status:identity.existing_xero_document?'existing_xero_document':existing?'requires_source_data_or_reconciliation':base.status,
             creates_draft:false,review_issues:[...((base.review_issues as string[])??[]),...((identity.identity_review_issues as string[])??[])],
             note:'Read-only PostgreSQL review lookup and Xero document-number duplicate check completed. Create repeats Xero checks before posting.'});
@@ -2263,10 +2265,14 @@ const xero = await assessPilotXeroInvoice({
           throw new Error('Existing Xero document found without PostgreSQL review; reconcile/link before creating another');
         if(identity.review_id && identity.review_match==='conversation_invoice')
           throw new Error('Invoice already assessed under a different Front attachment; reconcile the existing review before creating');
+        const codingAssessment={...assessment,
+          proposed_account:historicalCoding.account_code ? String(historicalCoding.account_code) : assessment.proposed_account,
+          exceptions:[...assessment.exceptions,...((historicalCoding.issues as string[])??[])],
+          evidence_notes:[assessment.evidence_notes??'',`Approved Xero supplier history: ${JSON.stringify(historicalCoding).slice(0,1500)}`].filter(Boolean).join(' | ').slice(0,3000)};
         const record=await recordPilotAssessment(pool,{
           frontConversationId:conversation_id,frontMessageId:message_id,attachmentId:attachment_id,
           supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type,
-          assessmentJson:assessment
+          assessmentJson:codingAssessment
         });
         // A previous assessment is immutable: use its stored evidence, not newly supplied values.
         const draft=await createReviewDraft(pool,record.id);
