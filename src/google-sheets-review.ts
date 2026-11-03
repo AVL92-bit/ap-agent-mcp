@@ -220,26 +220,47 @@ export async function syncPilotReviewExceptions(
   const present = new Set(
     values.slice(1).map(row => text(row[0])).filter(Boolean)
   );
+  // Legacy rows sometimes use TEST-001 instead of the PostgreSQL review ID.
+  // Match them only by BOTH conversation and document number, uniquely.
+  // Never change human-entered review status, decisions, holds or notes.
+  function sheetRowIndex(review: Review): number {
+    const exact = values.findIndex((row,i)=>i>0 && text(row[0])===review.id);
+    if (exact>0) return exact;
+    const matches = values.map((row,i)=>({row,i})).filter(({row,i})=>i>0 &&
+      text(row[2])===review.front_conversation_id &&
+      text(row[8]).trim().toLowerCase()===text(review.invoice_number).trim().toLowerCase() &&
+      !!text(review.invoice_number).trim());
+    return matches.length===1 ? matches[0].i : -1;
+  }
 
   const appended: string[] = [];
   const already_present: string[] = [];
   const skipped: string[] = [];
 
   for (const review of records.rows) {
-    if (present.has(review.id)) {
+    const rowIndex = sheetRowIndex(review);
+    if (rowIndex > 0) {
       // Update only draft-tracking cells on an existing row; never overwrite
       // a colleague's review status, decision, notes or hold.
-      const rowIndex = values.findIndex((row, index) => index > 0 && text(row[0]) === review.id);
-      if (rowIndex > 0 && review.xero_draft_id) {
+      if (review.xero_draft_id) {
         const rowNumber = rowIndex + 1;
         const current = values[rowIndex] ?? [];
+        // Correct a known document-type mislabel, never touch review decisions.
+        if (review.document_type === 'invoice' && text(current[7]).trim().toLowerCase() === 'sales invoice') {
+          await sheetsRequest(token,
+            `/values/${encodeURIComponent(`'${SHEET_NAME}'!H${rowNumber}`)}?valueInputOption=RAW`,
+            "PUT", { values: [["invoice"]] });
+        }
         const desired = ["Yes", text(review.xero_draft_id), text(review.xero_draft_status)];
         if (desired.some((v,i) => v !== text(current[23+i]))) {
           await sheetsRequest(token,
             `/values/${encodeURIComponent(`'${SHEET_NAME}'!X${rowNumber}:Z${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [desired] });
         }
-        const issueNote = review.xero_draft_error ? `Draft review: ${review.xero_draft_error}` : '';
+        const xeroUrl = review.document_type === 'credit_note'
+          ? `https://go.xero.com/AccountsPayable/ViewCreditNote.aspx?creditNoteID=${encodeURIComponent(review.xero_draft_id)}`
+          : `https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${encodeURIComponent(review.xero_draft_id)}`;
+        const issueNote = [review.xero_draft_error ? `Draft review: ${review.xero_draft_error}` : '',`Xero document: ${xeroUrl}`].filter(Boolean).join(' | ');
         if (issueNote && !text(current[18]).includes(issueNote)) {
           const updatedNotes = [text(current[18]), issueNote].filter(Boolean).join(' | ');
           await sheetsRequest(token,
