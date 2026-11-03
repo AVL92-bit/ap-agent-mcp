@@ -2208,6 +2208,57 @@ const xero = await assessPilotXeroInvoice({
     finally{await pool.end();}
   });
   // --------------------------------------------------
+  // DRAFT-FIRST INTAKE: ONE VERIFIED ATTACHMENT -> REVIEW -> XERO DRAFT
+  // --------------------------------------------------
+  server.registerTool('process_pilot_invoice_to_draft', {
+    title:'Record And Draft A Supplier Invoice Or Credit Note',
+    description:'Single supervised intake-to-draft operation. In preview mode it performs no writes. In create mode it verifies the Front attachment, records or reuses its PostgreSQL review, then creates or reconciles the Xero DRAFT and syncs the review Sheet. Human holds and coding uncertainty do not block drafting. Create mode requires XERO_DRAFT_WRITES_ENABLED=true and pilot tenant/inbox scope. Never approves or pays.',
+    inputSchema:{
+      mode:z.enum(['preview','create']).default('preview'),
+      conversation_id:z.string().startsWith('cnv_').max(100),
+      message_id:z.string().startsWith('msg_').max(100),
+      attachment_id:z.string().startsWith('fil_').max(100),
+      supplier_name:z.string().min(1).max(150),
+      invoice_number:z.string().min(1).max(100),
+      document_type:z.enum(['invoice','credit_note']),
+      assessment:z.object({
+        invoice_date:z.string().max(30),due_date:z.string().max(30).nullable(),
+        billed_to:z.string().max(200).nullable(),
+        net_gbp:z.number().finite().nullable(),vat_gbp:z.number().finite().nullable(),
+        gross_gbp:z.number().finite(),xero_supplier:z.string().max(150).nullable(),
+        duplicate_check:z.string().max(500).nullable(),
+        proposed_account:z.string().max(100).nullable(),
+        proposed_vat_treatment:z.string().max(200).nullable(),
+        exceptions:z.array(z.string().max(500)).max(20),
+        evidence_notes:z.string().max(3000).nullable(),
+        requires_human_review:z.literal(true)
+      }).strict()
+    }
+  }, async ({mode,conversation_id,message_id,attachment_id,supplier_name,invoice_number,document_type,assessment})=>{
+    try {
+      await verifyPilotReviewAttachment(conversation_id,message_id,attachment_id);
+      const candidate={document_type,supplier_name,invoice_number,
+        invoice_date:assessment.invoice_date,gross_gbp:assessment.gross_gbp,
+        due_date:assessment.due_date??undefined,proposed_account:assessment.proposed_account??undefined,
+        billed_to:assessment.billed_to??undefined,exceptions:assessment.exceptions,
+        front_conversation_id:conversation_id};
+      if(mode==='preview') return toolResult({mode,attachment_verified:true,...previewDirectDraft(candidate)});
+      if(!pilotDraftWriteState().draft_writes_enabled) return toolFailure('Draft writes disabled; set XERO_DRAFT_WRITES_ENABLED=true only after staging validation');
+      const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+      try {
+        const record=await recordPilotAssessment(pool,{
+          frontConversationId:conversation_id,frontMessageId:message_id,attachmentId:attachment_id,
+          supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type,
+          assessmentJson:assessment
+        });
+        // A previous assessment is immutable: use its stored evidence, not newly supplied values.
+        const draft=await createReviewDraft(pool,record.id);
+        return toolResult({mode,review_id:record.id,assessment_created:record.created,
+          existing_assessment_preserved:!record.created,...draft});
+      } finally {await pool.end();}
+    } catch(error){return safeError('Draft-first intake failed; reconcile Xero before retrying',error);}
+  });
+  // --------------------------------------------------
   // XERO: SUPERVISED PILOT DRAFTS — INVOICES AND CREDIT NOTES
   // --------------------------------------------------
   server.registerTool(
@@ -2886,6 +2937,10 @@ const httpServer =
 "check_pilot_draft_database_readiness",
 "check_pilot_invoice_review",
             "record_pilot_invoice_assessment",
+            "process_pilot_invoice_to_draft",
+            "preview_pilot_review_draft",
+            "create_pilot_xero_draft_with_pdf",
+            "link_existing_pilot_xero_draft",
             "prepare_pilot_review_batch",
             "check_pilot_invoice_totals",
           ];
