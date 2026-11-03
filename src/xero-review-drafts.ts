@@ -107,14 +107,24 @@ export async function inspectApprovedSupplierCoding(supplierName:string, descrip
   for(const line of valid) groups.set(line.code,[...(groups.get(line.code)??[]),line]);
   const ranked=[...groups].map(([code,examples])=>({code,count:examples.length,distinct_bills:new Set(examples.map(x=>x.invoice)).size,examples:examples.slice(0,4).map(x=>({invoice:x.invoice,description:x.description}))})).sort((a,b)=>b.distinct_bills-a.distinct_bills||b.count-a.count);
   const dominant=ranked[0];
-  // Only auto-select when the entire bounded history is available and all valid
-  // historical expense lines agree. Mixed coding requires review, not a guess.
-  const selected=complete && ranked.length===1 && dominant?.distinct_bills>=1 ? dominant.code : null;
+  // Approved supplier history is authorised coding precedent. Select the account
+  // used on strictly more than half of ACTIVE-coded historical lines. One
+  // anomalous line must not veto a clear majority; ties/no majority remain
+  // unresolved rather than being decided by incidental sort order.
+  // A truncated search is not sufficient evidence for automatic selection.
+  const majorityCount = Math.floor(valid.length / 2) + 1;
+  const hasMajority = !!dominant && dominant.count >= majorityCount;
+  const selected = complete && hasMajority ? dominant.code : null;
+  const minorityLines = selected ? valid.length - dominant.count : 0;
   return {status:selected?'approved_history_selected':ranked.length?'ambiguous_history':'no_approved_history',
     contact_id:contactId,account_code:selected,history_complete:complete,
+    selection_method:selected?'approved_line_majority':null,
+    selected_line_count:selected?dominant.count:0,
+    total_valid_line_count:valid.length,
     approved_lines:lines.length,valid_lines:valid.length,account_codes:ranked,
     issues:[...(!complete?['Supplier historical search exceeded five pages; no automatic coding']:[]),
-      ...(ranked.length>1?['Approved supplier bills use multiple nominal codes; match purchase descriptions before selecting']:[]),
+      ...(ranked.length>1 && selected?[`Historical minority coding differs on ${minorityLines} of ${valid.length} active-coded lines; majority ${selected} selected for draft review`]:[]),
+      ...(ranked.length>1 && !selected?['No majority account code in approved supplier history; coding needs review']:[]),
       ...(lines.length>valid.length?['Some historical account codes are inactive or unavailable']:[])],
     matching_description:description.slice(0,200),tax_type:'NONE'};
 }
