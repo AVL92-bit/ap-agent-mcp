@@ -1639,9 +1639,9 @@ server.registerTool(
   server.registerTool(
     "get_pilot_coding_policies",
     {
-      title: "Get Pilot Coding Policies",
+      title: "Get Pilot Practice Configuration",
       description:
-        "Reads the approved coding-policy configuration for the pilot organisation. Returns recommendations and mandatory review conditions only. Does not modify Xero, create bills, or approve coding.",
+        "Reads practice-wide constraints without supplier coding policies. Does not select account codes or modify Xero.",
       inputSchema: {},
     },
     async () => {
@@ -1842,45 +1842,9 @@ server.registerTool(
 
         // Reuse the established Xero read-only checks.
         // These require the pilot connection to remain disabled.
-const policyFile = JSON.parse(
-  await readFile(
-    new URL("../config/coding-policies.json", import.meta.url),
-    "utf8"
-  )
-) as {
-  policies: Array<{
-    organisation_name: string;
-    supplier_name: string;
-    xero_supplier_name: string;
-    status: string;
-    automatic_bill_creation_allowed: boolean;
-    automatic_coding_allowed: boolean;
-    human_review_required: boolean;
-  }>;
-};
-
-const supplierPolicies = policyFile.policies.filter(
-  (policy) =>
-    policy.organisation_name === "St George's Road Surgery" &&
-    policy.status === "approved" &&
-    policy.automatic_bill_creation_allowed === true &&
-    policy.automatic_coding_allowed === true &&
-    policy.human_review_required === false &&
-    (policy.supplier_name === review.supplier_name ||
-      policy.xero_supplier_name === review.supplier_name)
-);
-
-if (supplierPolicies.length !== 1) {
-  return toolResult({
-    status: "blocked",
-    review_id,
-    reasons: ["No unique approved Xero supplier mapping"],
-    draft_created: false,
-  });
-}
-
+// Verify the actual invoice supplier, not a policy-derived alias.
 const xero = await assessPilotXeroInvoice({
-  supplier_name: supplierPolicies[0].xero_supplier_name,
+  supplier_name: review.supplier_name,
   invoice_number: review.invoice_number,
 });
 
@@ -1915,7 +1879,7 @@ const xero = await assessPilotXeroInvoice({
           xero_supplier_verified: true,
           xero_duplicate_search_complete: true,
           outstanding_requirements: [
-            "Approved account code",
+            "Historically supported account code requires validation",
             "Verified Xero VAT tax type",
             "Original PDF download and integrity check",
             "Atomic draft claim",
