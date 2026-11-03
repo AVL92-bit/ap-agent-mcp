@@ -34,6 +34,9 @@ type Review = {
   document_type: string | null;
   assessment_json: Assessment;
   review_status: string;
+  xero_draft_id: string | null;
+  xero_draft_status: string | null;
+  xero_draft_error: string | null;
 };
 
 function encode(value: object): string {
@@ -154,14 +157,15 @@ function rowFor(review: Review): string[] {
     [
       ...(a.exceptions ?? []),
       ...(a.evidence_notes ? [`Evidence: ${a.evidence_notes}`] : []),
+      ...(review.xero_draft_error ? [`Draft review: ${review.xero_draft_error}`] : []),
     ].join(" | "),
     review.review_status,
     "",
-    "Requires human review; no Xero draft authorised",
+    review.xero_draft_id ? "Review Xero draft; correct any uncertainties" : "Requires human review",
     "",
-    "No",
-    "",
-    "",
+    review.xero_draft_id ? "Yes" : "No",
+    text(review.xero_draft_id),
+    text(review.xero_draft_status),
   ];
 }
 
@@ -186,7 +190,7 @@ export async function syncPilotReviewExceptions(
     `SELECT id::text, created_at, front_conversation_id,
             front_message_id, attachment_id, supplier_name,
             invoice_number, document_type, assessment_json,
-            review_status
+            review_status, xero_draft_id, xero_draft_status, xero_draft_error
        FROM pilot_invoice_reviews
       WHERE id::text = ANY($1::text[])
       ORDER BY id`,
@@ -223,6 +227,26 @@ export async function syncPilotReviewExceptions(
 
   for (const review of records.rows) {
     if (present.has(review.id)) {
+      // Update only draft-tracking cells on an existing row; never overwrite
+      // a colleague's review status, decision, notes or hold.
+      const rowIndex = values.findIndex((row, index) => index > 0 && text(row[0]) === review.id);
+      if (rowIndex > 0 && review.xero_draft_id) {
+        const rowNumber = rowIndex + 1;
+        const current = values[rowIndex] ?? [];
+        const desired = ["Yes", text(review.xero_draft_id), text(review.xero_draft_status)];
+        if (desired.some((v,i) => v !== text(current[23+i]))) {
+          await sheetsRequest(token,
+            `/values/${encodeURIComponent(`'${SHEET_NAME}'!X${rowNumber}:Z${rowNumber}`)}?valueInputOption=RAW`,
+            "PUT", { values: [desired] });
+        }
+        const issueNote = review.xero_draft_error ? `Draft review: ${review.xero_draft_error}` : '';
+        if (issueNote && !text(current[18]).includes(issueNote)) {
+          const updatedNotes = [text(current[18]), issueNote].filter(Boolean).join(' | ');
+          await sheetsRequest(token,
+            `/values/${encodeURIComponent(`'${SHEET_NAME}'!S${rowNumber}`)}?valueInputOption=RAW`,
+            "PUT", { values: [[updatedNotes]] });
+        }
+      }
       already_present.push(review.id);
       continue;
     }
