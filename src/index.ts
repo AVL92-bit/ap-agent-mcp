@@ -2256,6 +2256,8 @@ const xero = await assessPilotXeroInvoice({
           const base=previewDirectDraft(candidate);
           const existing=identity.existing_xero_document || !!identity.review_id && !!identity.prior_draft_attempt;
           return toolResult({...base,mode,attachment_verified:true,...identity,historical_coding:historicalCoding,
+            historical_account_selected:historicalCoding.account_code??null,
+            historical_account_selection_method:historicalCoding.selection_method??null,
             status:identity.existing_xero_document?'existing_xero_document':existing?'requires_source_data_or_reconciliation':base.status,
             creates_draft:false,review_issues:[...((base.review_issues as string[])??[]),...((identity.identity_review_issues as string[])??[])],
             note:'Read-only PostgreSQL review lookup and Xero document-number duplicate check completed. Create repeats Xero checks before posting.'});
