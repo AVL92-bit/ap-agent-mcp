@@ -1,7 +1,7 @@
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
-import { createReviewDraft, previewReviewDraft } from "./xero-review-drafts.js";
+import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft } from "./xero-review-drafts.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -1481,7 +1481,7 @@ Accept: isPdf
           `SELECT id::text, review_status, supplier_name, invoice_number, xero_draft_id FROM pilot_invoice_reviews WHERE front_conversation_id=$1 ORDER BY created_at DESC LIMIT 100`, [conversation_id]);
         reviews = result.rows;
       } finally {await pool.end();}
-      const matchingReviews = reviews.filter(r => r.invoice_number?.trim().toLowerCase() === invoice_number.trim().toLowerCase() && r.supplier_name?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
+      const matchingReviews = reviews.filter(r => r.invoice_number?.trim().toLowerCase() === invoice_number.trim().toLowerCase());
       const session = await getPilotXeroReadSession();
       const url = new URL("https://api.xero.com/api.xro/2.0/Invoices");
       url.searchParams.set("where", `Type=="ACCPAY"&&InvoiceNumber=="${invoice_number}"`);
@@ -1510,6 +1510,7 @@ Accept: isPdf
       const identityNeedsReview = !xero_contact_id && otherSupplierMatches > 0 && supplierMatches.length === 0;
       return toolResult({status: "ok", conversation_id, supplier_name, invoice_number,
         postgres_review_count: matchingReviews.length,
+        postgres_supplier_name_mismatch: matchingReviews.some(r=>r.supplier_name?.trim().toLowerCase() !== supplier_name.trim().toLowerCase()),
         postgres_reviews: matchingReviews.map(r=>({review_id:r.id, review_status:r.review_status, xero_draft_id:r.xero_draft_id})),
         xero_search_complete: true, matching_xero_bill_count: supplierMatches.length,
         xero_contact_id_used: xero_contact_id ?? null,
@@ -1613,6 +1614,7 @@ Accept: isPdf
             connection.tenant_type,
           enabled:
             connection.enabled,
+          ...pilotDraftWriteState(),
           xero_api_called:
             false,
         });
@@ -2177,10 +2179,31 @@ const xero = await assessPilotXeroInvoice({
    server.registerTool("preview_pilot_review_draft", {
     title:"Preview Invoice Or Credit Note Draft Readiness",
     description:"Read-only draft preview: uncertain coding or supplier is a review issue, not a blocker. Does not call Xero or modify data.",
-    inputSchema:{review_id:z.string().regex(/^[1-9]\d{0,17}$/)}
-  }, async ({review_id}) => {
+    inputSchema:{
+      review_id:z.string().regex(/^[1-9]\d{0,17}$/).optional(),
+      extracted_invoice:z.object({
+        document_type:z.enum(['invoice','credit_note']),
+        supplier_name:z.string().max(150).optional(),
+        invoice_number:z.string().max(100).optional(),
+        invoice_date:z.string().optional(),gross_gbp:z.number().optional(),
+        due_date:z.string().optional(),proposed_account:z.string().optional(),
+        billed_to:z.string().optional(),exceptions:z.array(z.string()).optional(),
+        front_conversation_id:z.string().startsWith('cnv_').optional()
+      }).optional()
+    }
+  }, async ({review_id,extracted_invoice}) => {
+    if (!!review_id === !!extracted_invoice) return toolFailure('Provide exactly one of review_id or extracted_invoice');
+    if (extracted_invoice) {
+      try {
+        if (extracted_invoice.front_conversation_id) {
+          const membership = await verifyConversationInbox(extracted_invoice.front_conversation_id);
+          if (!membership.allowed) return toolFailure('Conversation not in enabled Front inbox');
+        }
+        return toolResult(previewDirectDraft(extracted_invoice));
+      } catch(error) {return safeError('Direct draft preview failed',error);}
+    }
     const pool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
-    try {return toolResult(await previewReviewDraft(pool,review_id));}
+    try {return toolResult(await previewReviewDraft(pool,review_id!));}
     catch(error){return safeError("Draft preview failed",error);}
     finally{await pool.end();}
   });
@@ -2196,7 +2219,7 @@ const xero = await assessPilotXeroInvoice({
         "Uncertain supplier and coding are flagged for human review; new supplier contacts can be created. " +
         "Checks Xero for existing same-number documents. Attempts Google Sheet review sync. " +
         "Never authorises or pays. Requires XERO_DRAFT_WRITES_ENABLED=true. " +
-        "The tool name is retained for compatibility; original document attachment is not yet uploaded by this workflow.",
+        "The tool name is retained for compatibility; original PDF attachment is attempted and separately verified.",
       inputSchema: { review_id: z.string().regex(/^[1-9]\d{0,17}$/) },
     },
     async ({review_id}) => {
@@ -2206,6 +2229,16 @@ const xero = await assessPilotXeroInvoice({
       finally { await pool.end(); }
     }
   );
+  server.registerTool('link_existing_pilot_xero_draft', {
+    title:'Link Verified Existing Xero Document To Review',
+    description:'Explicit supervised register reconciliation. Verifies Xero invoice/credit note number and supplier name, then links the existing document in PostgreSQL and the review Sheet. Does not create a Xero bill. Requires XERO_DRAFT_WRITES_ENABLED=true.',
+    inputSchema:{review_id:z.string().regex(/^[1-9]\d{0,17}$/),xero_document_id:z.string().uuid(),verified_xero_contact_id:z.string().uuid().optional()}
+  }, async ({review_id,xero_document_id,verified_xero_contact_id})=>{
+    const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+    try{return toolResult(await linkExistingReviewDraft(pool,review_id,xero_document_id,verified_xero_contact_id));}
+    catch(error){return safeError('Existing draft link failed',error);}
+    finally{await pool.end();}
+  });
   // --------------------------------------------------
   // PILOT REVIEW REGISTER: CHECK EXISTING ASSESSMENT
   // --------------------------------------------------
