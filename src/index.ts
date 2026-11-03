@@ -1,6 +1,7 @@
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
+import { createReviewDraft, previewReviewDraft } from "./xero-review-drafts.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -2173,71 +2174,36 @@ const xero = await assessPilotXeroInvoice({
       }
     }
   );
-   // --------------------------------------------------
-  // XERO: SUPERVISED PILOT DRAFT CREATION
+   server.registerTool("preview_pilot_review_draft", {
+    title:"Preview Invoice Or Credit Note Draft Readiness",
+    description:"Read-only draft preview: uncertain coding or supplier is a review issue, not a blocker. Does not call Xero or modify data.",
+    inputSchema:{review_id:z.string().regex(/^[1-9]\d{0,17}$/)}
+  }, async ({review_id}) => {
+    const pool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+    try {return toolResult(await previewReviewDraft(pool,review_id));}
+    catch(error){return safeError("Draft preview failed",error);}
+    finally{await pool.end();}
+  });
   // --------------------------------------------------
-
+  // XERO: SUPERVISED PILOT DRAFTS — INVOICES AND CREDIT NOTES
+  // --------------------------------------------------
   server.registerTool(
     "create_pilot_xero_draft_with_pdf",
     {
-      title: "Create Pilot Xero Draft With Original PDF",
+      title: "Create Pilot Xero Draft For Human Review",
       description:
-        "Creates a DRAFT purchase bill only for an eligible " +
-        "St George's Road Surgery pilot invoice with an approved " +
-        "coding rule, verified supplier, no Xero duplicate, and " +
-        "original Front PDF. Attaches and verifies the PDF. " +
-        "Never submits, approves or pays bills. " +
-        "Disabled unless XERO_DRAFT_WRITES_ENABLED is true.",
-      inputSchema: {
-        review_id: z.string().regex(/^[0-9]{1,30}$/),
-      },
+        "Creates a Xero DRAFT supplier invoice or credit note from a recorded Front assessment. " +
+        "Uncertain supplier and coding are flagged for human review; new supplier contacts can be created. " +
+        "Checks Xero for existing same-number documents. Attempts Google Sheet review sync. " +
+        "Never authorises or pays. Requires XERO_DRAFT_WRITES_ENABLED=true. " +
+        "The tool name is retained for compatibility; original document attachment is not yet uploaded by this workflow.",
+      inputSchema: { review_id: z.string().regex(/^[1-9]\d{0,17}$/) },
     },
-    async ({ review_id }) => {
-      if (
-        process.env.XERO_DRAFT_WRITES_ENABLED !== "true"
-      ) {
-        return toolFailure(
-          "Xero draft writes are disabled"
-        );
-      }
-
-      if (
-        process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
-        process.env.XERO_PILOT_TENANT_ID !==
-          "45a1074b-b172-4f49-a192-f0a8e293b54d" ||
-        !process.env.DATABASE_URL
-      ) {
-        return toolFailure(
-          "Pilot configuration is invalid"
-        );
-      }
-
-      const pool = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        max: 1,
-        connectionTimeoutMillis: 5000,
-      });
-
-      try {
-        const result = await createPilotDraftWithPdf(
-          pool,
-          review_id
-        );
-
-        return toolResult({
-          ...result,
-          submitted_for_approval: false,
-          approved: false,
-          payment_initiated: false,
-        });
-      } catch (error) {
-        return safeError(
-          "Pilot Xero draft creation failed",
-          error
-        );
-      } finally {
-        await pool.end();
-      }
+    async ({review_id}) => {
+      const pool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+      try { return toolResult(await createReviewDraft(pool,review_id)); }
+      catch(error) { return safeError("Pilot draft creation failed",error); }
+      finally { await pool.end(); }
     }
   );
   // --------------------------------------------------
