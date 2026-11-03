@@ -7,6 +7,8 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import * as z from "zod/v4";
 import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
+import { pdfToPng } from "pdf-to-png-converter";
+import { getPilotXeroReadSession } from "./xero-pilot-test.js";
 import { Pool } from "pg";
 import {
   findExistingPilotReview,
@@ -522,9 +524,10 @@ function buildMcpServer() {
     {
       title: "Scan Enabled AP Inboxes",
       description:
-        "Lists conversations in the permitted AP inbox, prioritising active conversations without previous invoice assessments. Previously reviewed conversations are identified separately because they may contain new attachments. Read-only.",
+        "Lists permitted Front inbox conversations with configurable bounded pagination, newest-updated-first ordering within the fetched set, and explicit coverage metadata. Previously assessed items are not assumed processed in Xero. Read-only.",
+      inputSchema: { max_pages: z.number().int().min(1).max(40).default(8).describe("Maximum Front pages to scan, 1–40. A complete scan requires has_more=false.") },
     },
-    async () => {
+    async ({ max_pages }) => {
       try {
         const { inboxId } = frontConfig();
 
@@ -538,7 +541,7 @@ function buildMcpServer() {
 
         const allConversations: ScannedConversation[] = [];
         const visitedPages = new Set<string>();
-        const maxPages = 8;
+        const maxPages = max_pages;
 
         let nextPath: string | null =
           `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
@@ -549,10 +552,6 @@ let scanTruncated = false;
               `Front pagination repeated a page after ${visitedPages.size} pages`
             );
           }
-
-if (visitedPages.has(nextPath)) {
-  return toolFailure("Front pagination repeated a page");
-}
 
 if (visitedPages.size >= maxPages) {
   scanTruncated = true;
@@ -641,12 +640,13 @@ if (visitedPages.size >= maxPages) {
           await pool.end();
         }
 
-const conversations = allConversations
+const conversations = Array.from(new Map(allConversations.filter((c) => typeof c.id === "string").map((c) => [c.id as string, c])).values())
   .filter(
     (conversation) =>
       typeof conversation.id === "string" &&
       conversation.status !== "archived"
   )
+          .sort((a, b) => (b.updated_at ?? b.created_at ?? 0) - (a.updated_at ?? a.created_at ?? 0))
           .map((conversation) => ({
             id: conversation.id as string,
             subject: conversation.subject ?? null,
@@ -657,6 +657,7 @@ const conversations = allConversations
               conversation.updated_at ?? null,
             has_previous_assessment:
               reviewedIds.has(conversation.id as string),
+            xero_processing_status: "not_verified",
           }));
 
         // Prioritise active conversations with no previous
@@ -683,6 +684,14 @@ const conversations = allConversations
           previously_reviewed_conversations:
             previouslyReviewedConversations,
           has_more: scanTruncated,
+          search_complete: !scanTruncated,
+          ordering: "updated_at_desc_within_fetched_pages",
+          latest_in_inbox_guaranteed: false,
+          ordering_verified_by_front: false,
+          ordering_limitation: "Sorted by updated_at only after retrieval; Front API pagination order is not verified. Do not claim these are the latest conversations.",
+          coverage_note: scanTruncated ? "Front has further pages; newer conversations may exist outside this fetched set. Do not claim latest-inbox coverage." : "All paginated results fetched; sorted by update time. API ordering not independently verified.",
+          assessed_does_not_mean_xero_processed: true,
+          xero_status_reconciliation: "not_performed; previous assessment is not a Xero status check",
 pages_scanned: visitedPages.size,
           selection_guidance:
             "Inspect priority_conversations first. " +
@@ -1261,11 +1270,44 @@ Accept: isPdf
           invoiceText.length >
             MAX_EXTRACTED_CHARACTERS
         ) {
+          if (invoiceText.length < 50) {
+            // Provide page images for the reviewing model's vision. This is
+            // not OCR text and does not imply invoice fields are verified.
+            // Bound page count, resolution and response size.
+            try {
+              const rendered = await pdfToPng(pdfBuffer, {
+                pagesToProcess: Array.from({length: Math.min(totalPages, 2)}, (_, i) => i + 1),
+                viewportScale: 1.25,
+              });
+              const images = rendered.filter(page => page.content.length <= 2_000_000);
+              if (images.length > 0) {
+                return {
+                  content: [
+                    {type: "text" as const, text: JSON.stringify({
+                      status: "review_required", reason: "insufficient_embedded_text_visual_review",
+                      extraction_method: "rendered_pdf_pages_for_visual_review",
+                      rendered_pages: images.map(page => page.pageNumber),
+                      total_pages: totalPages, manual_review_required: true,
+                      requires_field_verification: true, invoice_ready_for_draft: false,
+                      bills_created: false, conversation_id, message_id, attachment_id,
+                      note: "Images are provided for visual reading; no OCR or invoice-field verification has been performed."
+                    })},
+                    ...images.map(page => ({type: "image" as const, data: page.content.toString("base64"), mimeType: "image/png" as const})),
+                  ],
+                };
+              }
+            } catch (renderError) {
+              console.error("PDF visual fallback failed", renderError instanceof Error ? renderError.message : "Unknown failure");
+            }
+          }
           return toolResult({
             status:
               "review_required",
             reason:
-              "PDF text is missing, insufficient or exceeds the extraction limit",
+              "PDF text is missing, insufficient or exceeds the extraction limit; likely image-only or poorly encoded PDF. Manual document review or OCR required",
+            extraction_method: "embedded_pdf_text",
+            extraction_limitation: invoiceText.length < 50 ? "insufficient_embedded_text_requires_ocr_or_manual_review" : "text_limit_exceeded",
+            manual_review_required: true,
             total_pages:
               totalPages,
             extracted_characters:
@@ -1314,6 +1356,8 @@ Accept: isPdf
             "review_required",
           reason:
             "PDF extraction failed; manual review required",
+          extraction_limitation: "pdf_parser_failure",
+          manual_review_required: true,
           invoice_ready_for_draft:
             false,
         });
@@ -1340,6 +1384,64 @@ Accept: isPdf
     },
     extractVerifiedInvoiceAttachment
   );
+
+  // --------------------------------------------------
+  // READ-ONLY: RECONCILE A REGISTERED INVOICE WITH LIVE XERO
+  // --------------------------------------------------
+  server.registerTool("reconcile_pilot_invoice_xero_status", {
+    title: "Reconcile Invoice Xero Status",
+    description: "Read-only reconciliation of a previously assessed Front invoice against Xero. Never equates an assessment with processing. Exact invoice number and supplier must match.",
+    inputSchema: z.object({
+      conversation_id: z.string().startsWith("cnv_"),
+      invoice_number: z.string().min(1).max(100),
+      supplier_name: z.string().min(1).max(150),
+    }),
+  }, async ({conversation_id, invoice_number, supplier_name}) => {
+    try {
+      if (/["\\\r\n]/.test(invoice_number) || /["\\\r\n]/.test(supplier_name)) {
+        return toolFailure("Invoice number or supplier contains unsupported Xero query characters");
+      }
+      const membership = await verifyConversationInbox(conversation_id);
+      if (!membership.allowed) return toolFailure("Conversation is not verified in the enabled inbox");
+      const pool = new Pool({connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000});
+      let reviews: Array<{id: string; review_status: string; supplier_name: string | null; invoice_number: string | null; xero_draft_id: string | null}> = [];
+      try {
+        const result = await pool.query<typeof reviews[number]>(
+          `SELECT id::text, review_status, supplier_name, invoice_number, xero_draft_id FROM pilot_invoice_reviews WHERE front_conversation_id=$1 ORDER BY created_at DESC LIMIT 100`, [conversation_id]);
+        reviews = result.rows;
+      } finally {await pool.end();}
+      const matchingReviews = reviews.filter(r => r.invoice_number?.trim().toLowerCase() === invoice_number.trim().toLowerCase() && r.supplier_name?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
+      const session = await getPilotXeroReadSession();
+      const url = new URL("https://api.xero.com/api.xro/2.0/Invoices");
+      url.searchParams.set("where", `Type=="ACCPAY"&&InvoiceNumber=="${invoice_number}"`);
+      const matches: Array<{InvoiceID?: string; InvoiceNumber?: string; Status?: string; AmountDue?: number; AmountPaid?: number; Contact?: {Name?: string}}> = [];
+      let searchComplete = false;
+      for (let page=1; page<=20; page++) {
+        url.searchParams.set("page", String(page));
+        const response = await fetch(url, {headers: {Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json"}, signal: AbortSignal.timeout(20000)});
+        if (!response.ok) throw new Error(`Xero invoice status lookup failed (HTTP ${response.status})`);
+        const data = await response.json() as {Invoices?: typeof matches};
+        if (!Array.isArray(data.Invoices) || data.Invoices.length > 100) throw new Error("Unexpected Xero invoice response");
+        for (const bill of data.Invoices) {
+          if (bill.InvoiceNumber !== invoice_number || typeof bill.InvoiceID !== "string") throw new Error("Xero returned an unexpected invoice");
+          matches.push(bill);
+        }
+        if (data.Invoices.length < 100) {searchComplete=true;break;}
+      }
+      if (!searchComplete) return toolResult({status: "review_required", reason: "xero_search_page_limit", xero_processing_status: "unknown", bills_created: false});
+      const supplierMatches = matches.filter(b => b.Contact?.Name?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
+      const otherSupplierMatches = matches.length - supplierMatches.length;
+      return toolResult({status: "ok", conversation_id, supplier_name, invoice_number,
+        postgres_review_count: matchingReviews.length,
+        postgres_reviews: matchingReviews.map(r=>({review_id:r.id, review_status:r.review_status, xero_draft_id:r.xero_draft_id})),
+        xero_search_complete: true, matching_xero_bill_count: supplierMatches.length,
+        same_number_other_supplier_count: otherSupplierMatches,
+        xero_bills: supplierMatches.map(b=>({invoice_id:b.InvoiceID, status:b.Status ?? "UNKNOWN", amount_due:b.AmountDue ?? null, amount_paid:b.AmountPaid ?? null})),
+        xero_processing_status: supplierMatches.length===0 ? "no_matching_bill_found" : supplierMatches.length===1 ? (supplierMatches[0].Status ?? "unknown") : "multiple_matching_bills_review_required",
+        note: "Xero status is authoritative only for returned matching bills. No match does not prove invoice is new; review records and supplier identity may be incomplete.",
+        read_only: true, bills_created: false, bills_modified: false});
+    } catch (error) {return safeError("Invoice Xero reconciliation failed", error);}
+  });
 
   // --------------------------------------------------
   // XERO: READ SAVED PILOT CONNECTION METADATA
