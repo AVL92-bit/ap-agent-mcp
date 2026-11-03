@@ -1279,7 +1279,8 @@ Accept: isPdf
                 pagesToProcess: Array.from({length: Math.min(totalPages, 2)}, (_, i) => i + 1),
                 viewportScale: 1.25,
               });
-              const images = rendered.filter(page => page.content.length <= 2_000_000);
+              const images = rendered.filter((page): page is typeof page & { content: Buffer } =>
+                Buffer.isBuffer(page.content) && page.content.length <= 2_000_000);
               if (images.length > 0) {
                 return {
                   content: [
