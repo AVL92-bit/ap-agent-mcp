@@ -33,11 +33,14 @@ type HistoryInvoice = {
   Contact?: {
     Name?: string;
   };
+  Total?: number;
+  InvoiceID?: string;
   LineItems?: Array<{
     Description?: string;
     AccountCode?: string;
     LineAmount?: number;
     TaxType?: string;
+    TaxAmount?: number;
   }>;
 };
 
@@ -367,13 +370,29 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
       throw new Error("Live Xero organisation does not match pilot");
     }
 
+    // Retrieve active chart-of-account labels for interpreting historical codes.
+    // A failure to fetch labels is surfaced; never invent an account name.
+    const accountsResponse = await fetch("https://api.xero.com/api.xro/2.0/Accounts", {
+      headers, signal: AbortSignal.timeout(20000),
+    });
+    if (!accountsResponse.ok) {
+      throw new Error(`Xero account lookup failed (HTTP ${accountsResponse.status})`);
+    }
+    const accountData = await accountsResponse.json() as {
+      Accounts?: Array<{ Code?: string; Name?: string; Status?: string; Type?: string }>;
+    };
+    if (!Array.isArray(accountData.Accounts)) throw new Error("Xero account lookup returned invalid data");
+    const accountMap = new Map(accountData.Accounts.filter(a => a.Code).map(a => [a.Code!, {
+      name: a.Name ?? null, status: a.Status ?? null, type: a.Type ?? null,
+    }]));
+
     // Retrieve a deliberately limited historical sample.
     // This is NOT a search of the entire Xero history.
 // Targeted searches can examine more historical bills.
     // The existing test keeps its original limits.
-    const PAGE_LIMIT = search ? 10 : 3;
+    const PAGE_LIMIT = search ? 20 : 3;
     const PAGE_SIZE = 100;
-    const MAX_EXAMPLES = search ? 50 : 30;
+    const MAX_EXAMPLES = search ? 500 : 30;
 
     const examples: Array<{
       supplier: string;
@@ -383,12 +402,19 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
       account_code: string;
       line_amount: number | null;
       historical_tax_type: string | null;
+      account_name: string | null;
+      account_status: string | null;
+      account_type: string | null;
+      invoice_total: number | null;
+      historical_tax_amount: number | null;
     }> = [];
 
     let scannedBills = 0;
     let matchingBills = 0;
     let hitLineLimit = false;
     let reachedEnd = false;
+    let pagesScanned = 0;
+    let stoppedAtPageLimit = false;
 
     for (let page = 1; page <= PAGE_LIMIT; page++) {
       const url = new URL(
@@ -411,6 +437,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
         );
       }
 
+      pagesScanned++;
       const data = (await response.json()) as {
         Invoices?: HistoryInvoice[];
       };
@@ -489,6 +516,11 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
                 ? line.LineAmount
                 : null,
             historical_tax_type: line.TaxType ?? null,
+            historical_tax_amount: typeof line.TaxAmount === "number" ? line.TaxAmount : null,
+            account_name: accountMap.get(line.AccountCode)?.name ?? null,
+            account_status: accountMap.get(line.AccountCode)?.status ?? null,
+            account_type: accountMap.get(line.AccountCode)?.type ?? null,
+            invoice_total: typeof invoice.Total === "number" ? invoice.Total : null,
           });
         }
         if (matchedThisBill) matchingBills++;
@@ -500,10 +532,12 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
       }
 
       if (examples.length >= MAX_EXAMPLES) {
+        hitLineLimit = true;
         break;
       }
     }
 
+    stoppedAtPageLimit = !reachedEnd && !hitLineLimit && pagesScanned >= PAGE_LIMIT;
     return {
       status: "ok",
       tenant_name: PILOT_NAME,
@@ -516,18 +550,21 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
           }
         : null,
       matching_invoice_lines: examples.length,
-      search_complete: reachedEnd,
+      search_complete: reachedEnd && !hitLineLimit,
+      stop_reason: hitLineLimit ? "matching_line_limit" : reachedEnd ? "end_of_history" : "page_limit",
+      pages_scanned: pagesScanned,
+      stopped_at_page_limit: stoppedAtPageLimit,
       xero_connection_verified: true,
       organisation_name_verified: true,
       token_refreshed: tokenResult.refreshed,
       historical_bills_scanned: scannedBills,
       matching_bills_in_returned_lines: matchingBills,
+      distinct_matching_invoices: new Set(examples.map(x => x.invoice_number)).size,
       max_returned_lines: MAX_EXAMPLES,
       max_pages_scanned: PAGE_LIMIT,
       stopped_at_line_limit: hitLineLimit,
       historical_examples: examples,
-      sample_limited:
-        !reachedEnd || examples.length >= MAX_EXAMPLES,
+      sample_limited: !reachedEnd || hitLineLimit,
       historical_data_is_evidence_only: true,
       pilot_default_tax_type_for_future_proposals: "NONE",
       gross_cost_coding_requires_human_review: true,
