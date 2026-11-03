@@ -541,6 +541,16 @@ function buildMcpServer() {
         };
 
         const allConversations: ScannedConversation[] = [];
+        const pageDiagnostics: Array<{
+          page: number;
+          returned: number;
+          eligible: number;
+          assigned_or_other_status: number;
+          missing_assignee_field: number;
+          duplicates_with_prior_pages: number;
+          next_page_available: boolean;
+        }> = [];
+        const seenConversationIds = new Set<string>();
         const visitedPages = new Set<string>();
         const maxPages = Math.min(max_pages, 6);
 
@@ -586,9 +596,30 @@ if (visitedPages.size >= maxPages) {
             );
           }
 
-          allConversations.push(...data._results);
-
+          const eligibleOnPage = data._results.filter(
+            (conversation) => conversation.status === "unassigned" &&
+              (conversation.assignee === null || conversation.assignee === undefined)
+          );
+          const duplicatesWithPriorPages = data._results.filter(
+            (conversation) => typeof conversation.id === "string" &&
+              seenConversationIds.has(conversation.id)
+          ).length;
+          for (const conversation of data._results) {
+            if (typeof conversation.id === "string") seenConversationIds.add(conversation.id);
+          }
           const next = data._pagination?.next;
+          pageDiagnostics.push({
+            page: visitedPages.size,
+            returned: data._results.length,
+            eligible: eligibleOnPage.length,
+            assigned_or_other_status: data._results.length - eligibleOnPage.length,
+            missing_assignee_field: data._results.filter(c => c.assignee === undefined).length,
+            duplicates_with_prior_pages: duplicatesWithPriorPages,
+            next_page_available: Boolean(next),
+          });
+          // Fail closed: unexpected statuses must not enter the AP queue.
+          allConversations.push(...eligibleOnPage);
+
           if (!next) {
 
             nextPath = null;
@@ -691,6 +722,15 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           status: "ok",
           enabled_inbox_id: inboxId,
           conversation_count: conversations.length,
+          front_page_diagnostics: pageDiagnostics,
+          front_total_results_before_local_validation: pageDiagnostics.reduce((sum, page) => sum + page.returned, 0),
+          front_total_duplicates_across_pages: pageDiagnostics.reduce((sum, page) => sum + page.duplicates_with_prior_pages, 0),
+          front_page_size_requested: 100,
+          front_page_size_observed: pageDiagnostics.map(page => page.returned),
+          queue_incomplete: scanTruncated,
+          queue_next_action: scanTruncated
+            ? "The six-page safety cap was reached. This is a partial queue: do not claim all unassigned conversations were reviewed. Investigate Front page sizing and queue backlog before expanding the cap."
+            : "Front returned no additional page; all eligible conversations in this scan were returned.",
           priority_conversations:
             priorityConversations,
           previously_reviewed_conversations:
@@ -713,7 +753,7 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
 pages_scanned: visitedPages.size,
           selection_guidance:
             "Only open, unassigned conversations from the enabled inbox are returned. Discover all eligible invoice candidates in the returned queue; assess in manageable batches without silently discarding remaining candidates. " +
-            "Use prepare_pilot_review_batch before extracting. " +
+            "Use prepare_pilot_review_batch in successive groups of up to five attachments per call; five is a PER-CALL preflight limit, not a limit on the total number of invoices to review. Continue with every discovered candidate and explicitly report unfinished items. " +
             "Previously reviewed conversations may contain " +
             "new attachments and must not be treated as " +
             "permanently completed. Never discard payment " +
@@ -1294,8 +1334,8 @@ Accept: isPdf
             // Bound page count, resolution and response size.
             try {
               const rendered = await pdfToPng(pdfBuffer, {
-                pagesToProcess: Array.from({length: Math.min(totalPages, 2)}, (_, i) => i + 1),
-                viewportScale: 1.25,
+                pagesToProcess: Array.from({length: Math.min(totalPages, 3)}, (_, i) => i + 1),
+                viewportScale: 1.5,
               });
               const images = rendered.filter((page): page is typeof page & { content: Buffer } =>
                 Buffer.isBuffer(page.content) && page.content.length <= 2_000_000);
@@ -1309,7 +1349,7 @@ Accept: isPdf
                       total_pages: totalPages, manual_review_required: true,
                       requires_field_verification: true, invoice_ready_for_draft: false,
                       bills_created: false, conversation_id, message_id, attachment_id,
-                      note: "Images are provided for visual reading; no OCR or invoice-field verification has been performed."
+                      note: "Rendered page images are attached as image content for the reviewing model to read visually. Do not label the PDF as unreadable without inspecting these images. No invoice fields are verified until checked against the visible page; manual review remains required."
                     })},
                     ...images.map(page => ({type: "image" as const, data: page.content.toString("base64"), mimeType: "image/png" as const})),
                   ],
@@ -2492,7 +2532,7 @@ const xero = await assessPilotXeroInvoice({
     {
       title: "Prepare Pilot Review Batch",
       description:
-        "Verifies up to five Front PDF attachments and checks existing PostgreSQL reviews in one call. Returns compact metadata only. No PDF downloads, Xero calls or writes.",
+        "Verifies up to five Front PDF attachments PER CALL and checks existing PostgreSQL reviews. Repeat for all discovered candidates; five is not a total invoice-assessment limit. Returns compact metadata only. No PDF downloads, Xero calls or writes.",
       inputSchema: {
         items: z.array(z.object({
           conversation_id: z.string().startsWith("cnv_").max(100),
