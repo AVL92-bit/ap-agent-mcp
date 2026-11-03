@@ -85,6 +85,49 @@ async function accountCode(api: Api, proposed: unknown): Promise<{code:string;is
   throw new Error('No valid proposed or review fallback Xero account; configure XERO_REVIEW_FALLBACK_ACCOUNT_CODE');
 }
 
+/** Shared read-only preflight for intake preview and create. Fail closed on ambiguous matches. */
+export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:string;messageId:string;attachmentId:string;supplierName:string;invoiceNumber:string;documentType:'invoice'|'credit_note'}):Promise<Record<string,unknown>> {
+  const rows=await pool.query(`SELECT id::text, front_message_id, attachment_id, supplier_name, invoice_number,
+    document_type, review_status, xero_draft_id, xero_draft_status FROM pilot_invoice_reviews
+    WHERE (front_message_id=$1 AND attachment_id=$2)
+       OR (front_conversation_id=$3 AND lower(trim(invoice_number))=lower(trim($4)))
+    ORDER BY CASE WHEN front_message_id=$1 AND attachment_id=$2 THEN 0 ELSE 1 END, id`,
+    [input.messageId,input.attachmentId,input.conversationId,input.invoiceNumber]);
+  const reviews=rows.rows;
+  if(reviews.length>1) throw new Error('Multiple PostgreSQL reviews match attachment or invoice; reconcile before drafting');
+  const review=reviews[0]??null;
+  if(review && (String(review.invoice_number??'').trim().toLowerCase()!==input.invoiceNumber.trim().toLowerCase()
+      || review.document_type!==input.documentType))
+    throw new Error('Existing attachment review has a different invoice identity; reconcile before drafting');
+  const issues:string[]=[];
+  if(review && String(review.supplier_name??'').trim().toLowerCase()!==input.supplierName.trim().toLowerCase())
+    issues.push('PostgreSQL supplier name differs from extracted supplier; verify identity');
+  const api=await getPilotXeroReadSessionForLink();
+  if(api.tenantId!==TENANT) throw new Error('Wrong Xero tenant for intake preflight');
+  const kind=input.documentType==='credit_note'?'CreditNotes':'Invoices';
+  const field=kind==='Invoices'?'InvoiceNumber':'CreditNoteNumber';
+  const escaped=input.invoiceNumber.replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+  const data=await xero(api,`${kind}?where=${encodeURIComponent(`${field}=="${escaped}"`)}`);
+  const matches=(data[kind]??[]).filter((d:any)=>d[field]===input.invoiceNumber && !['DELETED','VOIDED'].includes(d.Status));
+  if(matches.length>1) throw new Error('Multiple Xero documents share this number; manual reconciliation required');
+  const doc=matches[0]??null;
+  const id=doc?.[kind==='Invoices'?'InvoiceID':'CreditNoteID']??null;
+  if(doc && !id) throw new Error('Existing Xero document lacks an identifier; reconciliation required');
+  if(doc && String(doc.Contact?.Name??'').trim().toLowerCase()!==input.supplierName.trim().toLowerCase())
+    issues.push('Existing Xero document supplier differs from extracted supplier; verify before linking');
+  if(review?.xero_draft_id && doc && review.xero_draft_id!==id)
+    throw new Error('PostgreSQL and Xero document IDs conflict; reconcile before drafting');
+  if(review?.xero_draft_id && !doc)
+    throw new Error('PostgreSQL links a Xero document not found by number; reconcile before drafting');
+  return {review_id:review?.id??null,review_status:review?.review_status??null,
+    review_match:review?(review.front_message_id===input.messageId && review.attachment_id===input.attachmentId?'attachment':'conversation_invoice'):null,
+    postgres_supplier_mismatch:issues.some(i=>i.startsWith('PostgreSQL')),
+    existing_xero_document:!!doc,xero_document_id:id,xero_document_status:doc?.Status??null,
+    xero_supplier_name:doc?.Contact?.Name??null,duplicate_check_completed:true,
+    identity_review_issues:issues,requires_identity_reconciliation:!!doc && issues.some(i=>i.startsWith('Existing Xero')),
+    prior_draft_attempt:review?.xero_draft_status??null};
+}
+
 export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Record<string,unknown>> {
   if (!idOk(reviewId)) throw new Error('Invalid review ID');
   const data = await pool.query(`SELECT document_type, supplier_name, invoice_number, assessment_json,
