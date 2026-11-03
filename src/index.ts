@@ -1,7 +1,7 @@
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
-import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft } from "./xero-review-drafts.js";
+import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, inspectIntakeIdentity } from "./xero-review-drafts.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -2242,10 +2242,27 @@ const xero = await assessPilotXeroInvoice({
         due_date:assessment.due_date??undefined,proposed_account:assessment.proposed_account??undefined,
         billed_to:assessment.billed_to??undefined,exceptions:assessment.exceptions,
         front_conversation_id:conversation_id};
-      if(mode==='preview') return toolResult({mode,attachment_verified:true,...previewDirectDraft(candidate)});
-      if(!pilotDraftWriteState().draft_writes_enabled) return toolFailure('Draft writes disabled; set XERO_DRAFT_WRITES_ENABLED=true only after staging validation');
+      if(mode==='create' && !pilotDraftWriteState().draft_writes_enabled)
+        return toolFailure('Draft writes disabled; set XERO_DRAFT_WRITES_ENABLED=true only after staging validation');
       const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
       try {
+        // Both modes use the same PostgreSQL + Xero read-only identity checks.
+        // Failure to check is a hard failure, never a fresh draft candidate.
+        const identity=await inspectIntakeIdentity(pool,{conversationId:conversation_id,messageId:message_id,
+          attachmentId:attachment_id,supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type});
+        if(mode==='preview') {
+          const base=previewDirectDraft(candidate);
+          const existing=identity.existing_xero_document || !!identity.review_id && !!identity.prior_draft_attempt;
+          return toolResult({...base,mode,attachment_verified:true,...identity,
+            status:identity.existing_xero_document?'existing_xero_document':existing?'requires_source_data_or_reconciliation':base.status,
+            creates_draft:false,review_issues:[...((base.review_issues as string[])??[]),...((identity.identity_review_issues as string[])??[])],
+            note:'Read-only PostgreSQL review lookup and Xero document-number duplicate check completed. Create repeats Xero checks before posting.'});
+        }
+        if(identity.requires_identity_reconciliation) throw new Error('Xero supplier mismatch requires supervised reconciliation; no new draft');
+        if(identity.existing_xero_document && !identity.review_id)
+          throw new Error('Existing Xero document found without PostgreSQL review; reconcile/link before creating another');
+        if(identity.review_id && identity.review_match==='conversation_invoice')
+          throw new Error('Invoice already assessed under a different Front attachment; reconcile the existing review before creating');
         const record=await recordPilotAssessment(pool,{
           frontConversationId:conversation_id,frontMessageId:message_id,attachmentId:attachment_id,
           supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type,
