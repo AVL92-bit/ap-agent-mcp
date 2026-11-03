@@ -1642,7 +1642,7 @@ server.registerTool(
     {
       title: "Assess Pilot Historical Coding Evidence",
       description:
-        "Read-only assessment of historical Xero purchase-bill line coding grouped by description. Shows observed patterns and search limitations; does not approve or select a nominal code, apply supplier policies, or create bills.",
+        "Read-only assessment of historical Xero purchase-bill line coding grouped by description. Shows account names, coverage and provisional human-review suggestions only when historical evidence meets conservative thresholds; never selects a code for a bill, applies supplier policies, or creates bills.",
       inputSchema: {
         supplier_name: z.string().max(150).optional(),
         description_query: z.string().max(150).optional(),
