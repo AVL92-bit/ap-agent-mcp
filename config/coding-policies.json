@@ -6,7 +6,7 @@
     "xero_purchase_tax_type": "NONE",
     "expense_amount_basis": "gross_invoice_amount",
     "missing_due_date_days": 30,
-    "automatic_draft_creation_allowed": true,
+    "automatic_draft_creation_allowed": false,
     "automatic_submission_allowed": false,
     "automatic_approval_allowed": false,
     "automatic_payment_allowed": false,
