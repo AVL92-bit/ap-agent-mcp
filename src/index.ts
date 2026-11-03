@@ -524,8 +524,8 @@ function buildMcpServer() {
     {
       title: "Scan Enabled AP Inboxes",
       description:
-        "Lists permitted Front inbox conversations with configurable bounded pagination, newest-updated-first ordering within the fetched set, and explicit coverage metadata. Previously assessed items are not assumed processed in Xero. Read-only.",
-      inputSchema: { max_pages: z.number().int().min(1).max(40).default(8).describe("Maximum Front pages to scan, 1–40. A complete scan requires has_more=false.") },
+        "Fast routine Front inbox discovery. Hard-capped at 6 pages server-side, even when a larger max_pages value is requested. Results are not a complete historical inbox audit. Previously assessed items are not assumed processed in Xero. Read-only.",
+      inputSchema: { max_pages: z.number().int().min(1).max(40).default(6).describe("Requested pages for routine discovery. The server enforces a hard maximum of 6 pages regardless of the requested value; use a separate deliberate audit for deep history.") },
     },
     async ({ max_pages }) => {
       try {
@@ -541,7 +541,7 @@ function buildMcpServer() {
 
         const allConversations: ScannedConversation[] = [];
         const visitedPages = new Set<string>();
-        const maxPages = max_pages;
+        const maxPages = Math.min(max_pages, 6);
 
         let nextPath: string | null =
           `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
@@ -684,6 +684,10 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           previously_reviewed_conversations:
             previouslyReviewedConversations,
           has_more: scanTruncated,
+          requested_max_pages: max_pages,
+          effective_max_pages: maxPages,
+          server_page_cap_applied: max_pages > maxPages,
+          scan_mode: "routine_bounded_discovery",
           search_complete: !scanTruncated,
           ordering: "updated_at_desc_within_fetched_pages",
           latest_in_inbox_guaranteed: false,
@@ -694,7 +698,7 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           xero_status_reconciliation: "not_performed; previous assessment is not a Xero status check",
 pages_scanned: visitedPages.size,
           selection_guidance:
-            "Inspect priority_conversations first. " +
+            "This is a bounded routine discovery scan, not a full inbox audit. Do not request more pages to make routine review comprehensive. Inspect a small number of candidates, then stop. " +
             "Use prepare_pilot_review_batch before extracting. " +
             "Previously reviewed conversations may contain " +
             "new attachments and must not be treated as " +
