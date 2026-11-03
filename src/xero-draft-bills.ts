@@ -1007,7 +1007,7 @@ async function verifiedSupplierContactId(
   return contactId;
 }
 
-async function originalFrontDocument(
+export async function originalFrontDocument(
   invoice: Pick<
     DraftInvoice,
     "conversationId" | "messageId" | "attachmentId"
@@ -1334,16 +1334,17 @@ export async function createPilotXeroDraftBill(
   return created.InvoiceID;
 }
 
-async function attachAndVerifyOriginal(
+export async function attachAndVerifyOriginal(
   tenantId: string,
   accessToken: string,
   draftId: string,
   filename: string,
   contentType: string,
-  bytes: Buffer
+  bytes: Buffer,
+  documentKind: "Invoices" | "CreditNotes" = "Invoices"
 ): Promise<void> {
   const attachmentUrl =
-    `https://api.xero.com/api.xro/2.0/Invoices/${
+    `https://api.xero.com/api.xro/2.0/${documentKind}/${
       encodeURIComponent(draftId)
     }/Attachments/${encodeURIComponent(filename)}`;
 
@@ -1366,7 +1367,7 @@ async function attachAndVerifyOriginal(
   }
 
   const listing = await xeroGet(
-    `Invoices/${encodeURIComponent(draftId)}/Attachments`,
+    `${documentKind}/${encodeURIComponent(draftId)}/Attachments`,
     tenantId,
     accessToken
   );
