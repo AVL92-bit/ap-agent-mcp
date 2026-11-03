@@ -27,6 +27,7 @@ import {
 import {
   testPilotXeroInvoiceHistory,
 } from "./xero-invoice-history.js";
+import { assessPilotHistoricalCoding } from "./historical-coding-assessment.js";
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
 // in xero-pilot-test.ts.
@@ -1633,6 +1634,25 @@ server.registerTool(
           "Pilot Xero history search failed",
           error
         );
+      }
+    }
+  );
+  server.registerTool(
+    "assess_pilot_historical_coding",
+    {
+      title: "Assess Pilot Historical Coding Evidence",
+      description:
+        "Read-only assessment of historical Xero purchase-bill line coding grouped by description. Shows observed patterns and search limitations; does not approve or select a nominal code, apply supplier policies, or create bills.",
+      inputSchema: {
+        supplier_name: z.string().max(150).optional(),
+        description_query: z.string().max(150).optional(),
+      },
+    },
+    async ({ supplier_name, description_query }) => {
+      try {
+        return toolResult(await assessPilotHistoricalCoding({ supplier_name, description_query }));
+      } catch (error) {
+        return safeError("Historical coding assessment failed", error);
       }
     }
   );
