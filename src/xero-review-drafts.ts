@@ -73,6 +73,52 @@ async function supplierContact(api: Api, supplier: string): Promise<{id:string; 
   return {id:contact.ContactID,created:true,issue:'New Xero supplier contact created; verify identity and possible aliases'};
 }
 
+/** Approved/paid Xero purchase bills are the supplier's authorised coding precedent.
+ * Read-only, bounded and contact-ID scoped. Ambiguous history is reported, not guessed.
+ */
+export async function inspectApprovedSupplierCoding(supplierName:string, description:string):Promise<Record<string,unknown>> {
+  const api=await getPilotXeroReadSessionForLink();
+  const name=supplierName.trim();
+  const where=encodeURIComponent(`Name=="${name.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`);
+  const contacts=await xero(api,`Contacts?where=${where}`);
+  const exact=(contacts.Contacts??[]).filter((c:any)=>c.ContactID && String(c.Name??'').trim().toLowerCase()===name.toLowerCase());
+  if(exact.length!==1) return {status:'contact_unresolved',account_code:null,issues:['Supplier contact is not uniquely matched; historical coding not applied']};
+  const contactId=exact[0].ContactID;
+  const lines:Array<{code:string;description:string;invoice:string;date:string}> = [];
+  let complete=false;
+  // Filter by contact ID at Xero; verify contact, type and approved status again locally.
+  for(let page=1;page<=5;page++) {
+    const filter=encodeURIComponent(`Contact.ContactID==Guid("${contactId}")`);
+    const result=await xero(api,`Invoices?where=${filter}&page=${page}`);
+    const bills=result.Invoices??[];
+    if(!Array.isArray(bills)) throw new Error('Historical Xero invoice response invalid');
+    for(const bill of bills) {
+      if(bill.Contact?.ContactID?.toLowerCase()!==contactId.toLowerCase() || bill.Type!=='ACCPAY' || !['AUTHORISED','PAID'].includes(bill.Status)) continue;
+      for(const line of bill.LineItems??[]) {
+        if(typeof line.AccountCode==='string' && line.AccountCode.trim()) lines.push({code:line.AccountCode.trim(),description:String(line.Description??''),invoice:String(bill.InvoiceNumber??''),date:String(bill.DateString??'')});
+      }
+    }
+    if(bills.length<100){complete=true;break;}
+  }
+  const accounts=await xero(api,'Accounts');
+  const active=new Set((accounts.Accounts??[]).filter((a:any)=>a.Status==='ACTIVE' && typeof a.Code==='string').map((a:any)=>a.Code));
+  const valid=lines.filter(x=>active.has(x.code));
+  const groups=new Map<string,typeof valid>();
+  for(const line of valid) groups.set(line.code,[...(groups.get(line.code)??[]),line]);
+  const ranked=[...groups].map(([code,examples])=>({code,count:examples.length,distinct_bills:new Set(examples.map(x=>x.invoice)).size,examples:examples.slice(0,4).map(x=>({invoice:x.invoice,description:x.description}))})).sort((a,b)=>b.distinct_bills-a.distinct_bills||b.count-a.count);
+  const dominant=ranked[0];
+  // Only auto-select when the entire bounded history is available and all valid
+  // historical expense lines agree. Mixed coding requires review, not a guess.
+  const selected=complete && ranked.length===1 && dominant?.distinct_bills>=1 ? dominant.code : null;
+  return {status:selected?'approved_history_selected':ranked.length?'ambiguous_history':'no_approved_history',
+    contact_id:contactId,account_code:selected,history_complete:complete,
+    approved_lines:lines.length,valid_lines:valid.length,account_codes:ranked,
+    issues:[...(!complete?['Supplier historical search exceeded five pages; no automatic coding']:[]),
+      ...(ranked.length>1?['Approved supplier bills use multiple nominal codes; match purchase descriptions before selecting']:[]),
+      ...(lines.length>valid.length?['Some historical account codes are inactive or unavailable']:[])],
+    matching_description:description.slice(0,200),tax_type:'NONE'};
+}
+
 async function accountCode(api: Api, proposed: unknown): Promise<{code:string;issue?:string}> {
   const preferred = typeof proposed === 'string' ? proposed.match(/^\s*([A-Za-z0-9_-]{1,20})(?:\s|$)/)?.[1] : undefined;
   const fallback = process.env.XERO_REVIEW_FALLBACK_ACCOUNT_CODE?.trim();
@@ -197,11 +243,15 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
       }
       throw new Error('Same-number Xero document exists under another/ambiguous supplier; reconcile before retry');
     }
-    const coding = await accountCode(api,a.proposed_account);
+    const history=await inspectApprovedSupplierCoding(supplier,String(a.evidence_notes??''));
+    issues.push(...((history.issues as string[])??[]));
+    const historicalCode=typeof history.account_code==='string'?history.account_code:null;
+    const coding = await accountCode(api,historicalCode??a.proposed_account);
+    if (historicalCode) issues.push(`Nominal code ${historicalCode} selected from approved/paid Xero supplier bills; verify source descriptions`);
     if (coding.issue) issues.push(coding.issue);
     const contact = await supplierContact(api,supplier);
     if (contact.issue) issues.push(contact.issue);
-    if (!a.proposed_account) issues.push('No historically supported nominal code supplied');
+    if (!a.proposed_account && !historicalCode) issues.push('No historically supported nominal code supplied');
     const common = {
       Status:'DRAFT',Contact:{ContactID:contact.id},Date:a.invoice_date,
       CurrencyCode:'GBP',LineAmountTypes:'Exclusive',
