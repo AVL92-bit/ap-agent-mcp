@@ -645,175 +645,25 @@ export async function getPilotDraftReadiness(
   const assessment = review.assessment_json;
   const reasons: string[] = [];
 
-  const verifications = await getReadinessVerifications(
-    pool,
-    reviewId
-  );
-
-  if (
-    HELD_ATTACHMENTS.has(
-      `${review.front_message_id}:${review.attachment_id}`
-    )
-  ) {
-    reasons.push("Existing human hold");
+  // Draft-first: review holds and routine exceptions remain recorded, never veto drafts.
+  // This legacy readiness check is informational; the supported creation tool performs
+  // independent live Xero identity/duplicate checks and validates the original PDF.
+  if (review.xero_draft_id || review.xero_draft_status) {
+    reasons.push("Existing Xero link or previous attempt requires reconciliation");
   }
-
-  if (review.review_status !== "awaiting_review") {
-    reasons.push("Review status blocks drafting");
+  if (!["invoice", "credit_note"].includes(review.document_type)) {
+    reasons.push("Not a supplier invoice or credit note");
   }
-
-  if (review.document_type !== "invoice") {
-    reasons.push("Document is not a supplier invoice");
-  }
-
-  if (
-    review.xero_draft_id !== null ||
-    review.xero_draft_status !== null
-  ) {
-    reasons.push("Draft exists or creation was attempted");
-  }
-
-  if (
-    !assessment ||
-    typeof assessment !== "object" ||
-    Array.isArray(assessment)
-  ) {
+  if (!assessment || typeof assessment !== "object" || Array.isArray(assessment)) {
     reasons.push("Assessment is invalid");
   } else {
-     let billingPrecedentMatched = false;
-
-    if (
-      assessment.billed_to !== PILOT_NAME &&
-      !hasVerifiedResolution(verifications, "billing_entity")
-    ) {
-      try {
-        const precedent = await historicalBillingPrecedent(
-          pool,
-          review,
-          typeof assessment.billed_to === "string"
-            ? assessment.billed_to
-            : ""
-        );
-
-        billingPrecedentMatched = precedent.matched;
-                console.info(
-          "Historical Xero billing precedent result",
-          {
-            review_id: reviewId,
-            matched: precedent.matched,
-            historical_invoice_id:
-              precedent.historical_invoice_id ?? null,
-          }
-        );
-      } catch (error) {
-        billingPrecedentMatched = false;
-
-        console.error(
-          "Historical Xero billing precedent check failed",
-          {
-            review_id: reviewId,
-            error:
-              error instanceof Error
-                ? error.message
-                : String(error),
-          }
-        );
-      }
-
-      if (!billingPrecedentMatched) {
-        reasons.push("Billing entity not verified");
-      }
-    }
-
-   const originalExceptions = assessment.exceptions;
-
-       const remainingExceptions =
-      Array.isArray(originalExceptions)
-        ? originalExceptions.filter((exception: unknown) => {
-            if (typeof exception !== "string") {
-              return true;
-            }
-
-            // Supplier identity and duplicate status are
-            // checked against live Xero data before drafting.
-            if (
-              /^Supplier not uniquely matched in Xero:/i.test(exception) ||
-              /^Duplicate check incomplete:/i.test(exception)
-            ) {
-              return false;
-            }
-
-            // VAT treatment is governed by the approved
-            // practice-wide policy: gross expense, no VAT reclaimed.
-            if (/^VAT review required:/i.test(exception)) {
-              return false;
-            }
-
-            // Historical paid or authorised Xero bills
-            // establish the billing addressee precedent.
-            if (
-              billingPrecedentMatched &&
-              /\b(billed[\s-]*to|billing entity|billing address)\b/i.test(
-                exception
-              )
-            ) {
-              return false;
-            }
-
-            return true;
-          })
-        : originalExceptions;
-    if (
-      !hasResolvedOriginalExceptions(
-        remainingExceptions,
-        verifications
-      )
-    ) {
-      console.info("Unresolved assessment exceptions", {
-        review_id: reviewId,
-        billing_precedent_matched: billingPrecedentMatched,
-        remaining_exceptions: remainingExceptions,
-      });
-      reasons.push("Assessment has unresolved exceptions");
-    }
-
-    const net = amountInPence(assessment.net_gbp);
-    const vat = amountInPence(assessment.vat_gbp);
-    const gross = amountInPence(assessment.gross_gbp);
-
-    if (
-      net === null ||
-      vat === null ||
-      gross === null ||
-      gross <= 0 ||
-      net + vat !== gross
-    ) {
-      reasons.push("Invoice amounts do not reconcile");
-    }
-
-    if (!validDate(assessment.invoice_date)) {
-      reasons.push("Invoice date requires verification");
-    }
-
-    if (
-      assessment.due_date !== null &&
-      assessment.due_date !== undefined &&
-      assessment.due_date !== "" &&
-      !validDate(assessment.due_date)
-    ) {
-      reasons.push("Supplied due date is invalid");
-    }
+    if (!validDate(assessment.invoice_date)) reasons.push("Valid invoice date missing");
+    const gross = amountInPence(Math.abs(assessment.gross_gbp));
+    if (gross === null || gross <= 0) reasons.push("Valid gross amount missing");
   }
-
-  if (
-    typeof review.supplier_name !== "string" ||
-    !review.supplier_name.trim() ||
-    typeof review.invoice_number !== "string" ||
-    !review.invoice_number.trim()
-  ) {
+  if (!review.supplier_name?.trim() || !review.invoice_number?.trim()) {
     reasons.push("Supplier or invoice number missing");
   }
-
   return {
     status:
       reasons.length === 0

@@ -186,20 +186,30 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
   if(review && (String(review.invoice_number??'').trim().toLowerCase()!==input.invoiceNumber.trim().toLowerCase()
       || review.document_type!==input.documentType))
     throw new Error('Existing attachment review has a different invoice identity; reconcile before drafting');
+  const api=await getPilotXeroReadSessionForLink();
+  if(api.tenantId!==TENANT) throw new Error('Wrong Xero tenant for intake preflight');
+  // Search both AP bills and supplier credits by their exact source number.
+  // Punctuation (including iGPR's literal asterisk) is never normalised away.
+  const escaped=input.invoiceNumber.replace(/\\/g,'\\\\').replace(/"/g,'\\"');
+  const foundDocs: Array<{doc:any;kind:'Invoices'|'CreditNotes';id:string}> = [];
+  for (const kind of ['Invoices','CreditNotes'] as const) {
+    const field=kind==='Invoices'?'InvoiceNumber':'CreditNoteNumber';
+    const data=await xero(api,`${kind}?where=${encodeURIComponent(`${field}=="${escaped}"`)}`);
+    if (!Array.isArray(data[kind])) throw new Error(`Incomplete Xero ${kind} duplicate search`);
+    for (const d of data[kind]) {
+      if (d[field]!==input.invoiceNumber || ['DELETED','VOIDED'].includes(d.Status)) continue;
+      const id=d[kind==='Invoices'?'InvoiceID':'CreditNoteID'];
+      if (!id) throw new Error('Existing Xero document lacks an identifier; reconciliation required');
+      foundDocs.push({doc:d,kind,id});
+    }
+  }
+  if(foundDocs.length>1) throw new Error('Multiple Xero bills/credits share this number; reconcile before drafting');
+  const matched=foundDocs[0]??null;
+  const doc=matched?.doc??null;
+  const id=matched?.id??null;
   const issues:string[]=[];
   if(review && String(review.supplier_name??'').trim().toLowerCase()!==input.supplierName.trim().toLowerCase())
     issues.push('PostgreSQL supplier name differs from extracted supplier; verify identity');
-  const api=await getPilotXeroReadSessionForLink();
-  if(api.tenantId!==TENANT) throw new Error('Wrong Xero tenant for intake preflight');
-  const kind=input.documentType==='credit_note'?'CreditNotes':'Invoices';
-  const field=kind==='Invoices'?'InvoiceNumber':'CreditNoteNumber';
-  const escaped=input.invoiceNumber.replace(/\\/g,'\\\\').replace(/"/g,'\\"');
-  const data=await xero(api,`${kind}?where=${encodeURIComponent(`${field}=="${escaped}"`)}`);
-  const matches=(data[kind]??[]).filter((d:any)=>d[field]===input.invoiceNumber && !['DELETED','VOIDED'].includes(d.Status));
-  if(matches.length>1) throw new Error('Multiple Xero documents share this number; manual reconciliation required');
-  const doc=matches[0]??null;
-  const id=doc?.[kind==='Invoices'?'InvoiceID':'CreditNoteID']??null;
-  if(doc && !id) throw new Error('Existing Xero document lacks an identifier; reconciliation required');
   if(doc && String(doc.Contact?.Name??'').trim().toLowerCase()!==input.supplierName.trim().toLowerCase())
     issues.push('Existing Xero document supplier differs from extracted supplier; verify before linking');
   if(review?.xero_draft_id && doc && review.xero_draft_id!==id)
@@ -210,7 +220,7 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
     review_match:review?(review.front_message_id===input.messageId && review.attachment_id===input.attachmentId?'attachment':'conversation_invoice'):null,
     postgres_supplier_mismatch:issues.some(i=>i.startsWith('PostgreSQL')),
     existing_xero_document:!!doc,xero_document_id:id,xero_document_status:doc?.Status??null,
-    xero_supplier_name:doc?.Contact?.Name??null,duplicate_check_completed:true,
+    xero_supplier_name:doc?.Contact?.Name??null,xero_document_type:matched?.kind??null,duplicate_check_completed:true,
     identity_review_issues:issues,requires_identity_reconciliation:!!doc && issues.some(i=>i.startsWith('Existing Xero')),
     prior_draft_attempt:review?.xero_draft_status??null};
 }

@@ -2263,8 +2263,6 @@ const xero = await assessPilotXeroInvoice({
             note:'Read-only PostgreSQL review lookup and Xero document-number duplicate check completed. Create repeats Xero checks before posting.'});
         }
         if(identity.existing_xero_document) return toolResult({mode,status:'existing_xero_document',...identity,creates_draft:false,review_required:true,note:'Existing Xero document found by number; do not create a duplicate. Supplier name mismatch remains a review issue.'});
-        if(identity.existing_xero_document && !identity.review_id)
-          throw new Error('Existing Xero document found without PostgreSQL review; reconcile/link before creating another');
         if(identity.review_id && identity.review_match==='conversation_invoice')
           throw new Error('Invoice already assessed under a different Front attachment; reconcile the existing review before creating');
         const codingAssessment={...assessment,invoice_date:normaliseInvoiceDate(assessment.invoice_date)??assessment.invoice_date,

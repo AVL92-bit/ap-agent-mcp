@@ -27,6 +27,7 @@ type Assessment = {
 type Review = {
   id: string;
   created_at: Date;
+  updated_at: Date;
   front_conversation_id: string;
   front_message_id: string;
   attachment_id: string;
@@ -138,7 +139,7 @@ function rowFor(review: Review): string[] {
   const a = review.assessment_json;
   return [
     review.id,
-    review.created_at.toISOString().slice(0, 10),
+    review.created_at.toISOString(),
     review.front_conversation_id,
     review.front_message_id,
     review.attachment_id,
@@ -164,9 +165,10 @@ function rowFor(review: Review): string[] {
     "",
     review.xero_draft_id ? "Review Xero draft; correct any uncertainties" : "Requires human review",
     "",
-    review.xero_draft_id ? "Yes" : "No",
+    "No", // A Xero draft is not evidence of visual PDF verification.
     text(review.xero_draft_id),
     text(review.xero_draft_status),
+    review.updated_at.toISOString(),
   ];
 }
 
@@ -188,7 +190,7 @@ export async function syncPilotReviewExceptions(
   }
 
   const records = await pool.query<Review>(
-    `SELECT id::text, created_at, front_conversation_id,
+    `SELECT id::text, created_at, updated_at, front_conversation_id,
             front_message_id, attachment_id, supplier_name,
             invoice_number, document_type, assessment_json,
             review_status, xero_draft_id, xero_draft_status, xero_draft_error
@@ -199,7 +201,7 @@ export async function syncPilotReviewExceptions(
   );
 
   const token = await getAccessToken();
-  const range = encodeURIComponent(`'${SHEET_NAME}'!A1:Z1000`);
+  const range = encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`);
 
   const existing = await sheetsRequest(
     token,
@@ -213,7 +215,7 @@ export async function syncPilotReviewExceptions(
     header[0] !== "Review ID" ||
     header[19] !== "Review status" ||
     header[21] !== "Decision / action" ||
-    header.length !== 26
+    header[26] !== "Last updated timestamp"
   ) {
     throw new Error("Unexpected Google Sheet column layout");
   }
@@ -250,10 +252,10 @@ export async function syncPilotReviewExceptions(
             `/values/${encodeURIComponent(`'${SHEET_NAME}'!H${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [["invoice"]] });
         }
-        const desired = ["Yes", text(review.xero_draft_id), text(review.xero_draft_status)];
-        if (desired.some((v,i) => v !== text(current[23+i]))) {
+        const desired = [text(review.xero_draft_id), text(review.xero_draft_status)];
+        if (desired.some((v,i) => v !== text(current[24+i]))) {
           await sheetsRequest(token,
-            `/values/${encodeURIComponent(`'${SHEET_NAME}'!X${rowNumber}:Z${rowNumber}`)}?valueInputOption=RAW`,
+            `/values/${encodeURIComponent(`'${SHEET_NAME}'!Y${rowNumber}:Z${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [desired] });
         }
         const xeroUrl = review.document_type === 'credit_note'
@@ -266,6 +268,18 @@ export async function syncPilotReviewExceptions(
             `/values/${encodeURIComponent(`'${SHEET_NAME}'!S${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [[updatedNotes]] });
         }
+      }
+      // Backfill the original assessment time from PostgreSQL, never from this sync.
+      if (text(values[rowIndex]?.[1]) !== review.created_at.toISOString()) {
+        await sheetsRequest(token,
+          `/values/${encodeURIComponent(`'${SHEET_NAME}'!B${rowIndex+1}`)}?valueInputOption=RAW`,
+          "PUT", { values: [[review.created_at.toISOString()]] });
+      }
+      // Only the database's actual updated_at is reflected, not the sync time.
+      if (text(values[rowIndex]?.[26]) !== review.updated_at.toISOString()) {
+        await sheetsRequest(token,
+          `/values/${encodeURIComponent(`'${SHEET_NAME}'!AA${rowIndex+1}`)}?valueInputOption=RAW`,
+          "PUT", { values: [[review.updated_at.toISOString()]] });
       }
       already_present.push(review.id);
       continue;
@@ -293,7 +307,7 @@ export async function syncPilotReviewExceptions(
 
     await sheetsRequest(
       token,
-      `/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:Z1000`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      `/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
       "POST",
       { values: [rowFor(review)] }
     );
