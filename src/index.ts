@@ -2,7 +2,7 @@ import { inspectApprovedSupplierCoding } from './xero-review-drafts.js';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
-import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, inspectIntakeIdentity } from "./xero-review-drafts.js";
+import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, inspectIntakeIdentity, normaliseInvoiceDate } from "./xero-review-drafts.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -2239,7 +2239,7 @@ const xero = await assessPilotXeroInvoice({
     try {
       await verifyPilotReviewAttachment(conversation_id,message_id,attachment_id);
       const candidate={document_type,supplier_name,invoice_number,
-        invoice_date:assessment.invoice_date,gross_gbp:assessment.gross_gbp,
+        invoice_date:normaliseInvoiceDate(assessment.invoice_date)??assessment.invoice_date,gross_gbp:assessment.gross_gbp,
         due_date:assessment.due_date??undefined,proposed_account:assessment.proposed_account??undefined,
         billed_to:assessment.billed_to??undefined,exceptions:assessment.exceptions,
         front_conversation_id:conversation_id};
@@ -2262,12 +2262,13 @@ const xero = await assessPilotXeroInvoice({
             creates_draft:false,review_issues:[...((base.review_issues as string[])??[]),...((identity.identity_review_issues as string[])??[])],
             note:'Read-only PostgreSQL review lookup and Xero document-number duplicate check completed. Create repeats Xero checks before posting.'});
         }
-        if(identity.requires_identity_reconciliation) throw new Error('Xero supplier mismatch requires supervised reconciliation; no new draft');
+        if(identity.existing_xero_document) return toolResult({mode,status:'existing_xero_document',...identity,creates_draft:false,review_required:true,note:'Existing Xero document found by number; do not create a duplicate. Supplier name mismatch remains a review issue.'});
         if(identity.existing_xero_document && !identity.review_id)
           throw new Error('Existing Xero document found without PostgreSQL review; reconcile/link before creating another');
         if(identity.review_id && identity.review_match==='conversation_invoice')
           throw new Error('Invoice already assessed under a different Front attachment; reconcile the existing review before creating');
-        const codingAssessment={...assessment,
+        const codingAssessment={...assessment,invoice_date:normaliseInvoiceDate(assessment.invoice_date)??assessment.invoice_date,
+          due_date:normaliseInvoiceDate(assessment.due_date)??assessment.due_date,
           proposed_account:historicalCoding.account_code ? String(historicalCoding.account_code) : assessment.proposed_account,
           exceptions:[...assessment.exceptions,...((historicalCoding.issues as string[])??[])],
           evidence_notes:[assessment.evidence_notes??'',`Approved Xero supplier history: ${JSON.stringify(historicalCoding).slice(0,1500)}`].filter(Boolean).join(' | ').slice(0,3000)};
