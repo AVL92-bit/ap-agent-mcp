@@ -82,13 +82,16 @@ async function findSupplierContact(api:Api,supplier:string):Promise<{id:string;n
   if(exact.length===1) return {id:exact[0].ContactID,name:exact[0].Name,alias:false};
   // Bounded read-only candidate search; do not automatically merge different legal names.
   const key=supplierKey(supplier);
+  // A verified Xero contact may carry the payment-method suffix (DD).
+  // Do not accept arbitrary legal-name variants or create a second contact.
+  const contactKey=(name:string)=>supplierKey(name).replace(/\s*\(dd\)\s*$/i,'').replace(/\s+dd$/i,'').trim();
   const candidates:any[]=[];
   let exhausted=false;
   for(let page=1;page<=5;page++) {
     const response=await xero(api,`Contacts?page=${page}`);
     const list=response.Contacts??[];
     if(!Array.isArray(list)) throw new Error('Xero contacts response invalid');
-    candidates.push(...list.filter((c:any)=>c.ContactID && supplierKey(String(c.Name??''))===key));
+    candidates.push(...list.filter((c:any)=>c.ContactID && (supplierKey(String(c.Name??''))===key || contactKey(String(c.Name??''))===key)));
     if(list.length<100){exhausted=true;break;}
   }
   if(!exhausted) throw new Error('Xero contact search incomplete; do not create a duplicate contact');
@@ -325,10 +328,12 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
       throw new Error('Xero response requires reconciliation; draft may exist');
     if (typeof doc.Total === 'number' && Math.abs(Math.abs(doc.Total)-gross)>0.011)
       issues.push(`Xero returned total ${doc.Total}; source gross ${gross}; review required`);
+    let originalAttachmentVerified=false;
     try {
       await attachAndVerifyOriginal(api.tenantId,api.accessToken,createdId,original.filename,
         original.contentType,original.bytes,kind as 'Invoices'|'CreditNotes');
       await pool.query(`UPDATE pilot_invoice_reviews SET xero_attachment_verified=TRUE WHERE id=$1`,[reviewId]);
+      originalAttachmentVerified=true;
     } catch(e) { issues.push(`Original attachment needs attention: ${e instanceof Error?e.message:String(e)}`); }
     // Preserve original assessment and human decisions. Add draft-specific issues separately.
     await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_error=$2,updated_at=NOW() WHERE id=$1`,
@@ -339,7 +344,8 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     return {status:'draft_created',review_id:reviewId,xero_draft_id:createdId,
       document_type:r.document_type,xero_contact_id:contact.id,new_contact_created:contact.created,
       account_code:coding.code,tax_type:'NONE',gross_gbp:gross,review_required:true,
-      review_issues:issues,sheet_status:sheetStatus,approved:false,submitted:false};
+      review_issues:issues,sheet_status:sheetStatus,original_pdf_attached_and_verified:originalAttachmentVerified,
+      visual_pdf_verification:false,approved:false,submitted:false};
   } catch(e) {
     const reason = e instanceof Error ? e.message : String(e);
     await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_status=CASE WHEN xero_draft_id IS NULL THEN $3 ELSE xero_draft_status END,

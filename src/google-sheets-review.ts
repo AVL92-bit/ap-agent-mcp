@@ -3,8 +3,8 @@ import { createSign } from "node:crypto";
 import type { Pool } from "pg";
 
 // Configure a new trial spreadsheet without changing code. Never silently write to the old trial.
-const SPREADSHEET_ID = process.env.AP_TRIAL_SPREADSHEET_ID?.trim() ||
-  "1J3-MeXhDsRH-X0k39dDFI92rwJot1oQxfvayWYVmAsg";
+const EXPECTED_SPREADSHEET_ID = "1OkGJeNAKIdAVM_GLDm_9euaG86wWIlr3HHvZkFbbQYg";
+const SPREADSHEET_ID = process.env.AP_TRIAL_SPREADSHEET_ID?.trim() || EXPECTED_SPREADSHEET_ID;
 const SHEET_NAME = process.env.AP_TRIAL_SHEET_NAME?.trim() || "Invoice Reviews";
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`;
 
@@ -207,6 +207,8 @@ export async function syncPilotReviewExceptions(
     [reviewIds]
   );
 
+  if (SPREADSHEET_ID !== EXPECTED_SPREADSHEET_ID || SHEET_NAME !== "Invoice Reviews")
+    throw new Error(`Sheet target mismatch: expected ${EXPECTED_SPREADSHEET_ID}/Invoice Reviews; check Railway AP_TRIAL_SPREADSHEET_ID and AP_TRIAL_SHEET_NAME`);
   const token = await getAccessToken();
   const range = encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`);
 
@@ -216,6 +218,13 @@ export async function syncPilotReviewExceptions(
   ) as { values?: string[][] };
 
   const values = existing.values ?? [];
+  async function verifiedWrite(range:string, expected:string[][], method="PUT") {
+    const path=`/values/${encodeURIComponent(`'${SHEET_NAME}'!${range}`)}`;
+    await sheetsRequest(token,`${path}?valueInputOption=RAW`,method,{values:expected});
+    const observed=await sheetsRequest(token,path) as {values?:string[][]};
+    if(JSON.stringify(observed.values??[])!==JSON.stringify(expected))
+      throw new Error(`Sheet write verification failed at ${range}`);
+  }
   const header = values[0] ?? [];
 
   if (
@@ -232,12 +241,14 @@ export async function syncPilotReviewExceptions(
   // Match them only by BOTH conversation and document number, uniquely.
   // Never change human-entered review status, decisions, holds or notes.
   function sheetRowIndex(review: Review): number {
-    const exact = values.findIndex((row,i)=>i>0 && text(row[0])===review.id);
-    if (exact>0) return exact;
+    const exactMatches=values.map((row,i)=>({row,i})).filter(({row,i})=>i>0 && text(row[0])===review.id);
+    if(exactMatches.length>1) throw new Error(`Duplicate Sheet review ID ${review.id}; reconcile manually`);
+    if(exactMatches.length===1) return exactMatches[0].i;
     const matches = values.map((row,i)=>({row,i})).filter(({row,i})=>i>0 &&
       text(row[2])===review.front_conversation_id &&
       text(row[8]).trim().toLowerCase()===text(review.invoice_number).trim().toLowerCase() &&
       !!text(review.invoice_number).trim());
+    if(matches.length>1) throw new Error(`Multiple Sheet rows match review ${review.id}; manual reconciliation required`);
     return matches.length===1 ? matches[0].i : -1;
   }
 
@@ -288,6 +299,12 @@ export async function syncPilotReviewExceptions(
           `/values/${encodeURIComponent(`'${SHEET_NAME}'!AA${rowIndex+1}`)}?valueInputOption=RAW`,
           "PUT", { values: [[ukTimestamp(review.updated_at)]] });
       }
+      const verified=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A${rowIndex+1}:AA${rowIndex+1}`)}`) as {values?:string[][]};
+      const persisted=verified.values?.[0]??[];
+      if(review.xero_draft_id && (text(persisted[24])!==text(review.xero_draft_id)||text(persisted[25])!==text(review.xero_draft_status)))
+        throw new Error(`Sheet Xero reference not persisted for review ${review.id}`);
+      if(text(persisted[26])!==ukTimestamp(review.updated_at))
+        throw new Error(`Sheet timestamp not persisted for review ${review.id}`);
       already_present.push(review.id);
       continue;
     }
@@ -316,6 +333,9 @@ export async function syncPilotReviewExceptions(
       { values: [rowFor(review)] }
     );
 
+    const confirmed=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`)}`) as {values?:string[][]};
+    if((confirmed.values??[]).filter(row=>text(row[0])===review.id).length!==1)
+      throw new Error(`Sheet append not verified for review ${review.id}`);
     appended.push(review.id);
 
   }
