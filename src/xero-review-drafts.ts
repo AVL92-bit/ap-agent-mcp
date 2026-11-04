@@ -11,6 +11,17 @@ const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
 const INBOX = 'inb_bys7q';
 const API = 'https://api.xero.com/api.xro/2.0/';
 const dateOk = (s: unknown): s is string => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`)) && new Date(`${s}T00:00:00Z`).toISOString().slice(0,10) === s;
+// Normalise common UK source dates at the boundary; never silently swap ambiguous ISO dates.
+export function normaliseInvoiceDate(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const s=value.trim();
+  if (dateOk(s)) return s;
+  const m=/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2}|\d{4})$/.exec(s);
+  if (!m) return null;
+  const year=m[3].length===2 ? `20${m[3]}` : m[3];
+  const iso=`${year}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  return dateOk(iso)?iso:null;
+}
 const due30 = (s: string) => { const d = new Date(`${s}T00:00:00Z`); d.setUTCDate(d.getUTCDate()+30); return d.toISOString().slice(0,10); };
 const money = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0 && Math.abs(n*100-Math.round(n*100)) < 0.00001;
 const idOk = (s: string) => /^[1-9]\d{0,17}$/.test(s);
@@ -58,13 +69,35 @@ async function xero(api: Api, path: string, method = 'GET', body?: unknown): Pro
   return response.json();
 }
 
+function supplierKey(name:string):string {
+  return name.toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').trim()
+    .replace(/\b(limited|ltd)\b$/,'').trim();
+}
+async function findSupplierContact(api:Api,supplier:string):Promise<{id:string;name:string;alias:boolean}|null> {
+  const where=encodeURIComponent(`Name=="${supplier.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`);
+  const exactResponse=await xero(api,`Contacts?where=${where}`);
+  const exact=(exactResponse.Contacts??[]).filter((c:any)=>c.ContactID && String(c.Name??'').trim().toLowerCase()===supplier.trim().toLowerCase());
+  if(exact.length>1) throw new Error('Multiple exact Xero contacts; do not create another');
+  if(exact.length===1) return {id:exact[0].ContactID,name:exact[0].Name,alias:false};
+  // Bounded read-only candidate search; do not automatically merge different legal names.
+  const key=supplierKey(supplier);
+  const candidates:any[]=[];
+  let exhausted=false;
+  for(let page=1;page<=5;page++) {
+    const response=await xero(api,`Contacts?page=${page}`);
+    const list=response.Contacts??[];
+    if(!Array.isArray(list)) throw new Error('Xero contacts response invalid');
+    candidates.push(...list.filter((c:any)=>c.ContactID && supplierKey(String(c.Name??''))===key));
+    if(list.length<100){exhausted=true;break;}
+  }
+  if(!exhausted) throw new Error('Xero contact search incomplete; do not create a duplicate contact');
+  if(candidates.length>1) throw new Error('Ambiguous supplier alias; manual identity reconciliation required');
+  if(candidates.length===1) return {id:candidates[0].ContactID,name:candidates[0].Name,alias:true};
+  return null;
+}
 async function supplierContact(api: Api, supplier: string): Promise<{id:string; created:boolean; issue?:string}> {
-  // Search across all contact types; an existing contact need not already have IsSupplier=true.
-  const where = encodeURIComponent(`Name=="${supplier.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`);
-  const result = await xero(api, `Contacts?where=${where}`);
-  const contacts = (result.Contacts ?? []).filter((c:any) => typeof c.ContactID === 'string' && c.Name?.trim().toLowerCase() === supplier.toLowerCase());
-  if (contacts.length === 1) return {id:contacts[0].ContactID, created:false};
-  if (contacts.length > 1) throw new Error('Multiple exact Xero contacts; reconcile before creating duplicate supplier');
+  const match=await findSupplierContact(api,supplier);
+  if(match) return {id:match.id,created:false,...(match.alias?{issue:`Xero contact name differs: ${match.name}; verify supplier identity`}:{})};
   // New contact name is explicitly marked for review; never fabricate tax or bank details.
   const created = await xero(api,'Contacts','POST',{Contacts:[{Name:supplier}]});
   const contact = created.Contacts?.[0];
@@ -79,11 +112,9 @@ async function supplierContact(api: Api, supplier: string): Promise<{id:string; 
 export async function inspectApprovedSupplierCoding(supplierName:string, description:string):Promise<Record<string,unknown>> {
   const api=await getPilotXeroReadSessionForLink();
   const name=supplierName.trim();
-  const where=encodeURIComponent(`Name=="${name.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`);
-  const contacts=await xero(api,`Contacts?where=${where}`);
-  const exact=(contacts.Contacts??[]).filter((c:any)=>c.ContactID && String(c.Name??'').trim().toLowerCase()===name.toLowerCase());
-  if(exact.length!==1) return {status:'contact_unresolved',account_code:null,issues:['Supplier contact is not uniquely matched; historical coding not applied']};
-  const contactId=exact[0].ContactID;
+  const contact=await findSupplierContact(api,name);
+  if(!contact) return {status:'contact_unresolved',account_code:null,issues:['Supplier contact is not uniquely matched; historical coding not applied']};
+  const contactId=contact.id;
   const lines:Array<{code:string;description:string;invoice:string;date:string}> = [];
   let complete=false;
   // Filter by contact ID at Xero; verify contact, type and approved status again locally.
@@ -106,7 +137,7 @@ export async function inspectApprovedSupplierCoding(supplierName:string, descrip
   const groups=new Map<string,typeof valid>();
   for(const line of valid) groups.set(line.code,[...(groups.get(line.code)??[]),line]);
   const ranked=[...groups].map(([code,examples])=>({code,count:examples.length,distinct_bills:new Set(examples.map(x=>x.invoice)).size,examples:examples.slice(0,4).map(x=>({invoice:x.invoice,description:x.description}))})).sort((a,b)=>b.distinct_bills-a.distinct_bills||b.count-a.count);
-  const dominant=ranked[0];
+  const dominant=[...ranked].sort((a,b)=>b.count-a.count||b.distinct_bills-a.distinct_bills)[0];
   // Approved supplier history is authorised coding precedent. Select the account
   // used on strictly more than half of ACTIVE-coded historical lines. One
   // anomalous line must not veto a clear majority; ties/no majority remain
@@ -122,7 +153,7 @@ export async function inspectApprovedSupplierCoding(supplierName:string, descrip
     selected_line_count:selected?dominant.count:0,
     total_valid_line_count:valid.length,
     approved_lines:lines.length,valid_lines:valid.length,account_codes:ranked,
-    issues:[...(!complete?['Supplier historical search exceeded five pages; no automatic coding']:[]),
+    issues:[...(contact.alias?[`Historical coding uses Xero contact ${contact.name}; verify supplier alias`]:[]),...(!complete?['Supplier historical search exceeded five pages; no automatic coding']:[]),
       ...(ranked.length>1 && selected?[`Historical minority coding differs on ${minorityLines} of ${valid.length} active-coded lines; majority ${selected} selected for draft review`]:[]),
       ...(ranked.length>1 && !selected?['No majority account code in approved supplier history; coding needs review']:[]),
       ...(lines.length>valid.length?['Some historical account codes are inactive or unavailable']:[])],
@@ -219,8 +250,10 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const issues:string[] = [...(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : [])];
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
   if (a.billed_to !== "St George's Road Surgery") issues.push(`Billing entity requires review: ${String(a.billed_to ?? 'not extracted')}`);
-  const due = dateOk(a.due_date) ? a.due_date : due30(a.invoice_date);
-  if (!dateOk(a.due_date)) issues.push('Due date defaulted to invoice date + 30 days');
+  const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
+  const due = dateOk(a.due_date) ? a.due_date : onPresentation ? a.invoice_date : due30(a.invoice_date);
+  if (!dateOk(a.due_date) && onPresentation) issues.push('Due on presentation: used invoice date as due date; verify source');
+  else if (!dateOk(a.due_date)) issues.push('Due date defaulted to invoice date + 30 days');
   if (a.proposed_vat_treatment && !/NONE/i.test(a.proposed_vat_treatment)) issues.push('Practice uses gross expense and tax NONE; review source VAT');
   // Fetch and validate original attachment before any Xero write.
   const original = await originalFrontDocument({conversationId:r.front_conversation_id,
