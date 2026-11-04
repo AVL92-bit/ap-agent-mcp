@@ -2,9 +2,10 @@
 import { createSign } from "node:crypto";
 import type { Pool } from "pg";
 
-const SPREADSHEET_ID =
+// Configure a new trial spreadsheet without changing code. Never silently write to the old trial.
+const SPREADSHEET_ID = process.env.AP_TRIAL_SPREADSHEET_ID?.trim() ||
   "1J3-MeXhDsRH-X0k39dDFI92rwJot1oQxfvayWYVmAsg";
-const SHEET_NAME = "Invoice Reviews";
+const SHEET_NAME = process.env.AP_TRIAL_SHEET_NAME?.trim() || "Invoice Reviews";
 const BASE = `https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}`;
 
 type Assessment = {
@@ -217,9 +218,7 @@ export async function syncPilotReviewExceptions(
     throw new Error("Unexpected Google Sheet column layout");
   }
 
-  const present = new Set(
-    values.slice(1).map(row => text(row[0])).filter(Boolean)
-  );
+
   // Legacy rows sometimes use TEST-001 instead of the PostgreSQL review ID.
   // Match them only by BOTH conversation and document number, uniquely.
   // Never change human-entered review status, decisions, holds or notes.
@@ -300,7 +299,7 @@ export async function syncPilotReviewExceptions(
     );
 
     appended.push(review.id);
-    present.add(review.id);
+
   }
 
   const found = new Set(records.rows.map(row => row.id));
