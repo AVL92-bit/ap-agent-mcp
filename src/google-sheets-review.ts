@@ -142,6 +142,14 @@ export function ukTimestamp(value:Date):string {
   return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`;
 }
 
+/** VAT is settled by inbox policy; legacy assessments must not create VAT review questions. */
+function reviewQueries(assessment: Assessment, draftError: string | null): string[] {
+  return [
+    ...(assessment.exceptions ?? []),
+    ...(assessment.evidence_notes ? [`Evidence: ${assessment.evidence_notes}`] : []),
+    ...(draftError ? [`Draft review: ${draftError}`] : []),
+  ].filter(note => !/\bvat\b|tax treatment|tax rate/i.test(note));
+}
 function rowFor(review: Review): string[] {
   const a = review.assessment_json;
   return [
@@ -162,12 +170,8 @@ function rowFor(review: Review): string[] {
     text(a.gross_gbp),
     text(a.duplicate_check),
     text(a.proposed_account),
-    text(a.proposed_vat_treatment),
-    [
-      ...(a.exceptions ?? []),
-      ...(a.evidence_notes ? [`Evidence: ${a.evidence_notes}`] : []),
-      ...(review.xero_draft_error ? [`Draft review: ${review.xero_draft_error}`] : []),
-    ].join(" | "),
+    "NONE", // Overriding inbox-wide tax policy; not a review question.
+    reviewQueries(a, review.xero_draft_error).join(" | "),
     review.review_status,
     "",
     review.xero_draft_id ? "Review Xero draft; correct any uncertainties" : "Requires human review",
@@ -218,17 +222,26 @@ export async function syncPilotReviewExceptions(
   ) as { values?: string[][] };
 
   const values = existing.values ?? [];
-  async function verifiedWrite(range:string, expected:string[][], method="PUT") {
-    const path=`/values/${encodeURIComponent(`'${SHEET_NAME}'!${range}`)}`;
-    await sheetsRequest(token,`${path}?valueInputOption=RAW`,method,{values:expected});
-    const observed=await sheetsRequest(token,path) as {values?:string[][]};
-    if(JSON.stringify(observed.values??[])!==JSON.stringify(expected))
-      throw new Error(`Sheet write verification failed at ${range}`);
-  }
+  // Values are written as RAW UK-formatted strings. Enforce text display for B and AA.
+  // This does not change any cell value or overwrite a human decision.
+  const sheetMetaResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=sheets(properties(sheetId,title))`,
+    {headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(20000)});
+  if (!sheetMetaResponse.ok) throw new Error(`Sheet metadata HTTP ${sheetMetaResponse.status}`);
+  const sheetMeta = await sheetMetaResponse.json() as {sheets?:Array<{properties?:{sheetId?:number;title?:string}}>};
+  const sheetId = sheetMeta.sheets?.find(x=>x.properties?.title===SHEET_NAME)?.properties?.sheetId;
+  if (sheetId == null) throw new Error('Invoice Reviews sheet tab not found');
+  const formatResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,{
+    method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},
+    body:JSON.stringify({requests:[1,26].map(column=>({repeatCell:{range:{sheetId,startRowIndex:1,startColumnIndex:column,endColumnIndex:column+1},cell:{userEnteredFormat:{numberFormat:{type:'TEXT'}}},fields:'userEnteredFormat.numberFormat'}}))}),
+    signal:AbortSignal.timeout(20000)});
+  if (!formatResponse.ok) throw new Error(`Sheet timestamp formatting HTTP ${formatResponse.status}`);
+
   const header = values[0] ?? [];
 
   if (
+    header.length !== 27 ||
     header[0] !== "Review ID" ||
+    header[1] !== "Assessment timestamp" ||
     header[19] !== "Review status" ||
     header[21] !== "Decision / action" ||
     header[26] !== "Last updated timestamp"
@@ -279,13 +292,19 @@ export async function syncPilotReviewExceptions(
         const xeroUrl = review.document_type === 'credit_note'
           ? `https://go.xero.com/AccountsPayable/ViewCreditNote.aspx?creditNoteID=${encodeURIComponent(review.xero_draft_id)}`
           : `https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${encodeURIComponent(review.xero_draft_id)}`;
-        const issueNote = [review.xero_draft_error ? `Draft review: ${review.xero_draft_error}` : '',`Xero document: ${xeroUrl}`].filter(Boolean).join(' | ');
+        const issueNote = [...reviewQueries(review.assessment_json, review.xero_draft_error), `Xero document: ${xeroUrl}`].filter(Boolean).join(' | ');
         if (issueNote && !text(current[18]).includes(issueNote)) {
           const updatedNotes = [text(current[18]), issueNote].filter(Boolean).join(' | ');
           await sheetsRequest(token,
             `/values/${encodeURIComponent(`'${SHEET_NAME}'!S${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [[updatedNotes]] });
         }
+      }
+      // The inbox-wide VAT policy is fixed; column R is policy, not a human decision.
+      if (text(values[rowIndex]?.[17]) !== 'NONE') {
+        await sheetsRequest(token,
+          `/values/${encodeURIComponent(`'${SHEET_NAME}'!R${rowIndex+1}`)}?valueInputOption=RAW`,
+          "PUT", { values: [['NONE']] });
       }
       // Backfill the original assessment time from PostgreSQL, never from this sync.
       if (text(values[rowIndex]?.[1]) !== ukTimestamp(review.created_at)) {
@@ -303,8 +322,8 @@ export async function syncPilotReviewExceptions(
       const persisted=verified.values?.[0]??[];
       if(review.xero_draft_id && (text(persisted[24])!==text(review.xero_draft_id)||text(persisted[25])!==text(review.xero_draft_status)))
         throw new Error(`Sheet Xero reference not persisted for review ${review.id}`);
-      if(text(persisted[26])!==ukTimestamp(review.updated_at))
-        throw new Error(`Sheet timestamp not persisted for review ${review.id}`);
+      if(text(persisted[1])!==ukTimestamp(review.created_at) || text(persisted[26])!==ukTimestamp(review.updated_at))
+        throw new Error(`Sheet timestamps not persisted for review ${review.id}`);
       already_present.push(review.id);
       continue;
     }

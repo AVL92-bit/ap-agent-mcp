@@ -1,3 +1,4 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 /** Read-only, fail-closed purchase document number lookup.
  * Always inspect bills and supplier credits independently of supplier display name.
  * A missing literal asterisk in a supplied number must not turn a PAID invoice into a new liability.
@@ -21,7 +22,7 @@ export async function lookupXeroPurchaseNumber(session:{tenantId:string;accessTo
       const where=encodeURIComponent(`${field}=="${candidate}"`);
       let complete=false;
       for(let page=1;page<=20;page++) {
-        const response=await fetch(`https://api.xero.com/api.xro/2.0/${kind}?where=${where}&page=${page}`,{
+        const response=await xeroFetch(`https://api.xero.com/api.xro/2.0/${kind}?where=${where}&page=${page}`,{
           headers:{Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'},
           signal:AbortSignal.timeout(20000)});
         if(!response.ok) throw new Error(`Xero ${kind} duplicate lookup HTTP ${response.status}`);

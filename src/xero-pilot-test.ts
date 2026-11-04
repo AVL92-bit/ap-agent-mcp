@@ -1,3 +1,4 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 import { createDecipheriv, createCipheriv, randomBytes } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 
@@ -247,7 +248,7 @@ async function verifyPilotConnection(
         `${process.env.XERO_CLIENT_ID}:${process.env.XERO_CLIENT_SECRET}`
       ).toString("base64");
 
-      const refreshResponse = await fetch(
+      const refreshResponse = await xeroFetch(
         "https://identity.xero.com/connect/token",
         {
           method: "POST",
@@ -316,7 +317,7 @@ async function verifyPilotConnection(
     }
 
     // Verify the exact saved Xero connection.
-    const connectionsResponse = await fetch(
+    const connectionsResponse = await xeroFetch(
       "https://api.xero.com/connections",
       {
         method: "GET",
@@ -378,7 +379,7 @@ async function verifyPilotConnection(
 
     // Verify the pilot organisation before
     // accessing contacts or invoices.
-    const organisationResponse = await fetch(
+    const organisationResponse = await xeroFetch(
       "https://api.xero.com/api.xro/2.0/Organisation",
       {
         method: "GET",
@@ -448,7 +449,7 @@ async function verifyPilotConnection(
 
       const [accountsResponse, ratesResponse] =
         await Promise.all([
-          fetch(
+          xeroFetch(
             "https://api.xero.com/api.xro/2.0/Accounts",
             {
               method: "GET",
@@ -456,7 +457,7 @@ async function verifyPilotConnection(
               signal: AbortSignal.timeout(20000),
             }
           ),
-          fetch(
+          xeroFetch(
             "https://api.xero.com/api.xro/2.0/TaxRates",
             {
               method: "GET",
@@ -546,7 +547,7 @@ async function verifyPilotConnection(
       `Name=="${supplierName}"`
     );
 
-    const contactsResponse = await fetch(contactsUrl, {
+    const contactsResponse = await xeroFetch(contactsUrl, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${tokens.access_token}`,
@@ -687,7 +688,7 @@ async function verifyPilotConnection(
         String(page)
       );
 
-      const invoicesResponse = await fetch(
+      const invoicesResponse = await xeroFetch(
         invoicesUrl,
         {
           method: "GET",
@@ -968,7 +969,7 @@ async function getPilotXeroSession(
         `${process.env.XERO_CLIENT_ID}:${process.env.XERO_CLIENT_SECRET}`
       ).toString("base64");
 
-      const response = await fetch(
+      const response = await xeroFetch(
         "https://identity.xero.com/connect/token",
         {
           method: "POST",
@@ -1029,7 +1030,7 @@ async function getPilotXeroSession(
 
     // Verify the live tenant and connection before
     // returning credentials to the server-side writer.
-    const connectionsResponse = await fetch(
+    const connectionsResponse = await xeroFetch(
       "https://api.xero.com/connections",
       {
         headers: {
@@ -1065,7 +1066,7 @@ async function getPilotXeroSession(
       throw new Error("Xero write tenant verification failed");
     }
 
-    const organisationResponse = await fetch(
+    const organisationResponse = await xeroFetch(
       "https://api.xero.com/api.xro/2.0/Organisation",
       {
         headers: {

@@ -1,3 +1,4 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 /** Supervised AP draft creation. Uncertainty is recorded for review, not an approval gate.
  * All external writes require XERO_DRAFT_WRITES_ENABLED=true and the fixed pilot tenant.
  * An indeterminate Xero POST is never automatically retried: manual reconciliation first.
@@ -62,11 +63,16 @@ export function previewDirectDraft(data:DirectDraftPreview):Record<string,unknow
 
 type Api = { tenantId: string; accessToken: string };
 async function xero(api: Api, path: string, method = 'GET', body?: unknown): Promise<any> {
-  const response = await fetch(API + path, { method, headers: {
+  const response = await xeroFetch(API + path, { method, headers: {
     Authorization: `Bearer ${api.accessToken}`, 'xero-tenant-id': api.tenantId,
     Accept: 'application/json', ...(body ? {'Content-Type':'application/json'} : {})
   }, ...(body ? {body:JSON.stringify(body)} : {}), signal:AbortSignal.timeout(25000) });
-  if (!response.ok) throw new Error(`Xero ${method} ${path.split('?')[0]} HTTP ${response.status}; reconcile Xero before retry`);
+  if (!response.ok) {
+    const requestId = response.headers.get('xero-correlation-id') ?? response.headers.get('x-request-id');
+    const retryAfter = response.headers.get('retry-after');
+    const detail = (await response.text().catch(() => '')).slice(0, 700);
+    throw new Error(`Xero ${method} ${path.split('?')[0]} HTTP ${response.status}${requestId ? ` request_id=${requestId}` : ''}${retryAfter ? ` retry_after=${retryAfter}` : ''}: ${detail || 'no response body'}; reconcile Xero before retry`);
+  }
   return response.json();
 }
 
@@ -231,6 +237,49 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
       exceptions:Array.isArray(a.exceptions)?a.exceptions:[]},r.xero_draft_id,r.xero_draft_status)};
 }
 
+/** Resume the PDF + Sheet stages for an already linked Xero document.
+ * Never posts another invoice/credit note, and never alters human review status.
+ * The live Xero document must still match the stored invoice number and supplier.
+ */
+export async function completeExistingReviewDraft(pool:Pool, reviewId:string):Promise<Record<string,unknown>> {
+  if (!idOk(reviewId)) throw new Error('Invalid review ID');
+  if (!pilotDraftWriteState().draft_writes_enabled) throw new Error('Pilot draft writes disabled');
+  const result=await pool.query(`SELECT id::text,front_conversation_id,front_message_id,attachment_id,
+    supplier_name,invoice_number,document_type,xero_draft_id,xero_attachment_verified,review_status
+    FROM pilot_invoice_reviews WHERE id=$1`,[reviewId]);
+  if(result.rowCount!==1) throw new Error('Review not found');
+  const r=result.rows[0];
+  if(!r.xero_draft_id) throw new Error('No linked Xero document; reconcile and link before attachment recovery');
+  const kind=r.document_type==='credit_note'?'CreditNotes':r.document_type==='invoice'?'Invoices':null;
+  if(!kind) throw new Error('Invalid review document type');
+  const api=await getPilotXeroReadSessionForLink();
+  const data=await xero(api,`${kind}/${encodeURIComponent(r.xero_draft_id)}`);
+  const doc=data[kind]?.[0];
+  const number=kind==='Invoices'?doc?.InvoiceNumber:doc?.CreditNoteNumber;
+  if(!doc || number!==r.invoice_number || supplierKey(String(doc.Contact?.Name??'')).replace(/\s+dd$/,'')!==supplierKey(String(r.supplier_name??'')).replace(/\s+dd$/,''))
+    throw new Error('Linked Xero document identity mismatch; do not upload attachment');
+  if(['DELETED','VOIDED'].includes(String(doc.Status??''))) throw new Error('Xero document is voided or deleted');
+  let attachmentVerified=r.xero_attachment_verified===true;
+  if(!attachmentVerified){
+    const original=await originalFrontDocument({conversationId:r.front_conversation_id,
+      messageId:r.front_message_id,attachmentId:r.attachment_id});
+    // The attachment uploader uses PUT to a deterministic filename and then GET
+    // to verify its presence. Never create another bill to recover a PDF.
+    await attachAndVerifyOriginal(api.tenantId,api.accessToken,r.xero_draft_id,
+      original.filename,original.contentType,original.bytes,kind);
+    await pool.query(`UPDATE pilot_invoice_reviews SET xero_attachment_verified=TRUE,
+      updated_at=NOW() WHERE id=$1 AND xero_draft_id=$2`,[reviewId,r.xero_draft_id]);
+    attachmentVerified=true;
+  }
+  let sheetStatus:'synced'|'sync_failed'='synced';
+  try {await syncPilotReviewExceptions(pool,[reviewId]);}
+  catch(error){sheetStatus='sync_failed';console.error('Draft completion Sheet sync failed',error);}
+  return {status:attachmentVerified&&sheetStatus==='synced'?'draft_pdf_and_sheet_completed':'draft_pdf_verified_sheet_sync_failed',
+    review_id:reviewId,xero_draft_id:r.xero_draft_id,xero_status:doc.Status,
+    original_pdf_attached_and_verified:attachmentVerified,sheet_status:sheetStatus,
+    human_review_status_preserved:r.review_status,created_xero_document:false};
+}
+
 export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Record<string,unknown>> {
   if (!idOk(reviewId)) throw new Error('Invalid review ID');
   if (!pilotDraftWriteState().draft_writes_enabled)
@@ -241,7 +290,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   if (found.rowCount !== 1) throw new Error('Review not found');
   const r = found.rows[0];
   if (!['invoice','credit_note'].includes(r.document_type)) throw new Error('Not an invoice or credit note');
-  if (r.xero_draft_id) return {status:'already_drafted',review_id:reviewId,xero_draft_id:r.xero_draft_id};
+  if (r.xero_draft_id) return completeExistingReviewDraft(pool,reviewId);
   if (r.xero_draft_status && !['reconcile_required','creating'].includes(r.xero_draft_status))
     throw new Error(`Previous draft state ${r.xero_draft_status}; reconcile before retry`);
   if (['reconcile_required','creating'].includes(r.xero_draft_status)) {
@@ -260,14 +309,15 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     throw new Error('Document cannot be represented in Xero: supplier, number, date or gross amount missing');
   if (supplier.length > 150 || number.length > 100) throw new Error('Supplier or document number too long');
   const gross = Math.abs(a.gross_gbp as number);
-  const issues:string[] = [...(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : [])];
+  const issues:string[] = [...(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string' && !/\bvat\b|tax treatment|tax rate/i.test(x)) : [])];
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
   if (a.billed_to !== "St George's Road Surgery") issues.push(`Billing entity requires review: ${String(a.billed_to ?? 'not extracted')}`);
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
   const due = dateOk(a.due_date) ? a.due_date : onPresentation ? a.invoice_date : due30(a.invoice_date);
   if (!dateOk(a.due_date) && onPresentation) issues.push('Due on presentation: used invoice date as due date; verify source');
   else if (!dateOk(a.due_date)) issues.push('Due date defaulted to invoice date + 30 days');
-  if (a.proposed_vat_treatment && !/NONE/i.test(a.proposed_vat_treatment)) issues.push('Practice uses gross expense and tax NONE; review source VAT');
+  // Inbox-wide policy: non-recoverable VAT is included in gross expense; Xero TaxType is NONE.
+  // Never raise VAT queries even if an old assessment suggested another treatment.
   // Fetch and validate original attachment before any Xero write.
   const original = await originalFrontDocument({conversationId:r.front_conversation_id,
     messageId:r.front_message_id,attachmentId:r.attachment_id});

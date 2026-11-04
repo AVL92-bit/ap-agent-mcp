@@ -1,3 +1,4 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 import {
   createCipheriv,
   createDecipheriv,
@@ -152,7 +153,7 @@ async function refreshIfNeeded(
     `${clientId}:${clientSecret}`
   ).toString("base64");
 
-  const response = await fetch(
+  const response = await xeroFetch(
     "https://identity.xero.com/connect/token",
     {
       method: "POST",
@@ -300,7 +301,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
     };
 
     // Verify the exact authorised Xero connection.
-    const connectionsResponse = await fetch(
+    const connectionsResponse = await xeroFetch(
       "https://api.xero.com/connections",
       {
         headers: {
@@ -339,7 +340,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
     }
 
     // Verify the live accounting organisation.
-    const organisationResponse = await fetch(
+    const organisationResponse = await xeroFetch(
       "https://api.xero.com/api.xro/2.0/Organisation",
       {
         headers,
@@ -372,7 +373,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
 
     // Retrieve active chart-of-account labels for interpreting historical codes.
     // A failure to fetch labels is surfaced; never invent an account name.
-    const accountsResponse = await fetch("https://api.xero.com/api.xro/2.0/Accounts", {
+    const accountsResponse = await xeroFetch("https://api.xero.com/api.xro/2.0/Accounts", {
       headers, signal: AbortSignal.timeout(20000),
     });
     if (!accountsResponse.ok) {
@@ -425,7 +426,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
       url.searchParams.set("order", "Date DESC");
       url.searchParams.set("page", String(page));
 
-      const response = await fetch(url, {
+      const response = await xeroFetch(url, {
         method: "GET",
         headers,
         signal: AbortSignal.timeout(20000),

@@ -1,9 +1,10 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { inspectApprovedSupplierCoding } from './xero-review-drafts.js';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
-import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, clearConfirmedPrePostFailure, inspectIntakeIdentity, normaliseInvoiceDate } from "./xero-review-drafts.js";
+import { createReviewDraft, completeExistingReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, clearConfirmedPrePostFailure, inspectIntakeIdentity, normaliseInvoiceDate } from "./xero-review-drafts.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -94,7 +95,7 @@ async function frontGet(
 ): Promise<Response> {
   const { headers } = frontConfig();
 
-  return fetch(
+  return xeroFetch(
     path.startsWith("https://")
       ? path
       : `https://api2.frontapp.com${path}`,
@@ -219,7 +220,7 @@ async function frontWrite(
 ): Promise<Response> {
   const { token } = frontConfig();
 
-  return fetch(`https://api2.frontapp.com${path}`, {
+  return xeroFetch(`https://api2.frontapp.com${path}`, {
     method,
     headers: {
       Authorization: `Bearer ${token}`,
@@ -420,7 +421,7 @@ export async function downloadVerifiedPilotPdf(
 
   const { token } = frontConfig();
 
-  const response = await fetch(
+  const response = await xeroFetch(
     `https://api2.frontapp.com/messages/${encodeURIComponent(
       messageId
     )}/download/${encodeURIComponent(fileId)}`,
@@ -1163,7 +1164,7 @@ if (!isPdf && !isDocx) {
         // verified IDs, never an arbitrary
         // URL supplied by the agent.
         const downloadResponse =
-          await fetch(
+          await xeroFetch(
             `https://api2.frontapp.com/messages/${encodeURIComponent(
               message_id
             )}/download/${encodeURIComponent(
@@ -2312,6 +2313,16 @@ const xero = await assessPilotXeroInvoice({
       finally { await pool.end(); }
     }
   );
+  server.registerTool('complete_existing_pilot_draft_pdf_and_sheet', {
+    title:'Complete Missing Original PDF And Sheet Link For Existing Xero Draft',
+    description:'Recovery only: verify the linked Xero document, attach and verify the original Front PDF if missing, and sync the review Sheet. Never creates another Xero bill or changes human review status.',
+    inputSchema:{review_id:z.string().regex(/^[1-9]\d{0,17}$/)}
+  },async ({review_id})=>{
+    const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+    try{return toolResult(await completeExistingReviewDraft(pool,review_id));}
+    catch(error){return safeError('Existing Xero draft PDF completion failed',error);}
+    finally{await pool.end();}
+  });
   server.registerTool('link_existing_pilot_xero_draft', {
     title:'Link Verified Existing Xero Document To Review',
     description:'Explicit supervised register reconciliation. Verifies Xero invoice/credit note number and supplier name, then links the existing document in PostgreSQL and the review Sheet. Does not create a Xero bill. Requires XERO_DRAFT_WRITES_ENABLED=true.',

@@ -1,3 +1,4 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 import type http from "node:http";
 import {
   createCipheriv,
@@ -283,7 +284,7 @@ async function getPilotAccessToken(
     return tokens.access_token;
   }
 
-  const response = await fetch(
+  const response = await xeroFetch(
     "https://identity.xero.com/connect/token",
     {
       method: "POST",
@@ -417,7 +418,7 @@ async function checkLivePilot(
       connection.encrypted_tokens
     );
 
-  const response = await fetch(
+  const response = await xeroFetch(
     "https://api.xero.com/api.xro/2.0/Organisation",
     {
       method: "GET",
@@ -722,7 +723,7 @@ export async function handleXeroOAuth(
       "Xero token exchange";
 
     const tokenResponse =
-      await fetch(
+      await xeroFetch(
         "https://identity.xero.com/connect/token",
         {
           method: "POST",
@@ -787,7 +788,7 @@ export async function handleXeroOAuth(
       "Xero connection discovery";
 
     const connectionsResponse =
-      await fetch(
+      await xeroFetch(
         "https://api.xero.com/connections",
         {
           headers: {

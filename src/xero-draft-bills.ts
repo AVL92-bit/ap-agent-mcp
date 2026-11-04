@@ -1,3 +1,4 @@
+import { xeroFetch } from "./xero-rate-limit.js";
 import type { Pool } from "pg";
 import { readFile } from "node:fs/promises";
 import { PDFParse } from "pdf-parse";
@@ -392,7 +393,7 @@ async function historicalBillingPrecedent(
     Accept: "application/json",
   };
 
-  const contactsResponse = await fetch(contactsUrl, {
+  const contactsResponse = await xeroFetch(contactsUrl, {
     headers,
     signal: AbortSignal.timeout(20000),
   });
@@ -442,7 +443,7 @@ async function historicalBillingPrecedent(
   invoicesUrl.searchParams.set("order", "Date DESC");
   invoicesUrl.searchParams.set("page", "1");
 
-  const invoicesResponse = await fetch(invoicesUrl, {
+  const invoicesResponse = await xeroFetch(invoicesUrl, {
     headers,
     signal: AbortSignal.timeout(20000),
   });
@@ -493,7 +494,7 @@ async function historicalBillingPrecedent(
       `https://api.xero.com/api.xro/2.0/Invoices/` +
       `${encodeURIComponent(invoiceId)}/Attachments`;
 
-   const listingResponse = await fetch(attachmentUrl, {
+   const listingResponse = await xeroFetch(attachmentUrl, {
       headers,
       signal: AbortSignal.timeout(20000),
     });
@@ -538,7 +539,7 @@ async function historicalBillingPrecedent(
         continue;
       }
 
-      const pdfResponse = await fetch(
+      const pdfResponse = await xeroFetch(
         `${attachmentUrl}/${encodeURIComponent(attachment.FileName)}`,
         {
           headers: {
@@ -768,7 +769,7 @@ async function xeroGet(
   tenantId: string,
   accessToken: string
 ): Promise<any> {
-  const response = await fetch(
+  const response = await xeroFetch(
     `https://api.xero.com/api.xro/2.0/${path}`,
     {
       headers: {
@@ -811,7 +812,7 @@ async function verifiedSupplierContactId(
     `Name=="${supplierName}"`
   );
 
-  const response = await fetch(url, {
+  const response = await xeroFetch(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
       "xero-tenant-id": tenantId,
@@ -879,7 +880,7 @@ export async function originalFrontDocument(
   };
 
   // Verify the conversation belongs to the pilot inbox.
-  const inboxResponse = await fetch(
+  const inboxResponse = await xeroFetch(
     `https://api2.frontapp.com/conversations/${
       encodeURIComponent(invoice.conversationId)
     }/inboxes`,
@@ -909,7 +910,7 @@ export async function originalFrontDocument(
   }
 
   // Verify the message and original attachment.
-  const messagesResponse = await fetch(
+  const messagesResponse = await xeroFetch(
     `https://api2.frontapp.com/conversations/${
       encodeURIComponent(invoice.conversationId)
     }/messages?limit=100`,
@@ -1011,7 +1012,7 @@ export async function originalFrontDocument(
     );
   }
 
-  const response = await fetch(
+  const response = await xeroFetch(
     `https://api2.frontapp.com/messages/${
       encodeURIComponent(invoice.messageId)
     }/download/${encodeURIComponent(invoice.attachmentId)}`,
@@ -1104,7 +1105,7 @@ export async function createPilotXeroDraftBill(
     );
   }
 
-  const response = await fetch(
+  const response = await xeroFetch(
     "https://api.xero.com/api.xro/2.0/Invoices",
     {
       method: "POST",
@@ -1194,7 +1195,7 @@ export async function attachAndVerifyOriginal(
       encodeURIComponent(draftId)
     }/Attachments/${encodeURIComponent(filename)}`;
 
-  const upload = await fetch(attachmentUrl, {
+  const upload = await xeroFetch(attachmentUrl, {
     method: "PUT",
     headers: {
       Authorization: `Bearer ${accessToken}`,
