@@ -135,11 +135,18 @@ function text(value: unknown): string {
   return value == null ? "" : String(value);
 }
 
+/** Stable UK wall-clock display; historical times are sourced only from PostgreSQL. */
+export function ukTimestamp(value:Date):string {
+  const parts=new Intl.DateTimeFormat('en-GB',{timeZone:'Europe/London',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(value);
+  const get=(type:string)=>parts.find(p=>p.type===type)?.value??'';
+  return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
+
 function rowFor(review: Review): string[] {
   const a = review.assessment_json;
   return [
     review.id,
-    review.created_at.toISOString(),
+    ukTimestamp(review.created_at),
     review.front_conversation_id,
     review.front_message_id,
     review.attachment_id,
@@ -168,7 +175,7 @@ function rowFor(review: Review): string[] {
     "No", // A Xero draft is not evidence of visual PDF verification.
     text(review.xero_draft_id),
     text(review.xero_draft_status),
-    review.updated_at.toISOString(),
+    ukTimestamp(review.updated_at),
   ];
 }
 
@@ -270,25 +277,22 @@ export async function syncPilotReviewExceptions(
         }
       }
       // Backfill the original assessment time from PostgreSQL, never from this sync.
-      if (text(values[rowIndex]?.[1]) !== review.created_at.toISOString()) {
+      if (text(values[rowIndex]?.[1]) !== ukTimestamp(review.created_at)) {
         await sheetsRequest(token,
           `/values/${encodeURIComponent(`'${SHEET_NAME}'!B${rowIndex+1}`)}?valueInputOption=RAW`,
-          "PUT", { values: [[review.created_at.toISOString()]] });
+          "PUT", { values: [[ukTimestamp(review.created_at)]] });
       }
       // Only the database's actual updated_at is reflected, not the sync time.
-      if (text(values[rowIndex]?.[26]) !== review.updated_at.toISOString()) {
+      if (text(values[rowIndex]?.[26]) !== ukTimestamp(review.updated_at)) {
         await sheetsRequest(token,
           `/values/${encodeURIComponent(`'${SHEET_NAME}'!AA${rowIndex+1}`)}?valueInputOption=RAW`,
-          "PUT", { values: [[review.updated_at.toISOString()]] });
+          "PUT", { values: [[ukTimestamp(review.updated_at)]] });
       }
       already_present.push(review.id);
       continue;
     }
 
-    if (
-      (!review.xero_draft_id && review.assessment_json.requires_human_review !== true) ||
-      (!review.xero_draft_id && !["awaiting_review", "on_hold"].includes(review.review_status))
-    ) {
+    if (!review.xero_draft_id && review.assessment_json.requires_human_review !== true) {
       skipped.push(review.id);
       continue;
     }

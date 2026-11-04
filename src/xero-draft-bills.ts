@@ -966,19 +966,15 @@ export async function originalFrontDocument(
   const attachment = attachments[0];
   const maximumBytes = 10 * 1024 * 1024;
 
-  const filename = attachment.filename;
-
-  if (
-    !filename ||
-    filename.length > 150 ||
-    filename === "." ||
-    filename === ".." ||
-    !/^[A-Za-z0-9][A-Za-z0-9._ -]*$/.test(filename)
-  ) {
-    throw new Error(
-      "Original attachment filename requires human review"
-    );
-  }
+  const originalFilename=attachment.filename;
+  if (!originalFilename || originalFilename.length > 250 || originalFilename === "." || originalFilename === "..")
+    throw new Error("Original attachment filename missing or invalid");
+  // Front may supply filenames with apostrophes, brackets or Unicode. These are
+  // not evidence of an unsafe invoice. Sanitize the Xero attachment display name,
+  // but preserve and verify the original bytes and extension below.
+  const filename=originalFilename.replace(/[^A-Za-z0-9._ -]/g,"_").replace(/^[^A-Za-z0-9]+/,"file_").slice(0,150);
+  if (!filename || filename === "." || filename === "..")
+    throw new Error("Original attachment filename cannot be safely represented");
 
   const extension = filename
     .split(".")

@@ -1,8 +1,9 @@
+import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { inspectApprovedSupplierCoding } from './xero-review-drafts.js';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
-import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, inspectIntakeIdentity, normaliseInvoiceDate } from "./xero-review-drafts.js";
+import { createReviewDraft, previewReviewDraft, previewDirectDraft, pilotDraftWriteState, linkExistingReviewDraft, clearConfirmedPrePostFailure, inspectIntakeIdentity, normaliseInvoiceDate } from "./xero-review-drafts.js";
 import { timingSafeEqual } from "node:crypto";
 import { McpServer, createMcpHandler } from "@modelcontextprotocol/server";
 import { toNodeHandler } from "@modelcontextprotocol/node";
@@ -1484,29 +1485,16 @@ Accept: isPdf
       } finally {await pool.end();}
       const matchingReviews = reviews.filter(r => r.invoice_number?.trim().toLowerCase() === invoice_number.trim().toLowerCase());
       const session = await getPilotXeroReadSession();
-      const url = new URL("https://api.xero.com/api.xro/2.0/Invoices");
-      url.searchParams.set("where", `Type=="ACCPAY"&&InvoiceNumber=="${invoice_number}"`);
-      const matches: Array<{InvoiceID?: string; InvoiceNumber?: string; Status?: string; AmountDue?: number; AmountPaid?: number; Contact?: {Name?: string; ContactID?: string}}> = [];
-      let searchComplete = false;
-      for (let page=1; page<=20; page++) {
-        url.searchParams.set("page", String(page));
-        const response = await fetch(url, {headers: {Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json"}, signal: AbortSignal.timeout(20000)});
-        if (!response.ok) throw new Error(`Xero invoice status lookup failed (HTTP ${response.status})`);
-        const data = await response.json() as {Invoices?: typeof matches};
-        if (!Array.isArray(data.Invoices) || data.Invoices.length > 100) throw new Error("Unexpected Xero invoice response");
-        for (const bill of data.Invoices) {
-          if (bill.InvoiceNumber !== invoice_number || typeof bill.InvoiceID !== "string") throw new Error("Xero returned an unexpected invoice");
-          matches.push(bill);
-        }
-        if (data.Invoices.length < 100) {searchComplete=true;break;}
-      }
-      if (!searchComplete) return toolResult({status: "review_required", reason: "xero_search_page_limit", xero_processing_status: "unknown", bills_created: false});
+      const allMatches=await lookupXeroPurchaseNumber(session,invoice_number);
+      const matches=allMatches.filter(m=>m.kind==='Invoices');
+      const creditMatches=allMatches.filter(m=>m.kind==='CreditNotes');
+      const searchComplete=true;
       // Match by verified Xero ContactID when provided, not the supplier's
       // free-text display name. Preserve other-contact invoice-number matches
       // for duplicate review rather than declaring the invoice clear.
       const supplierMatches = matches.filter(b => xero_contact_id
-        ? b.Contact?.ContactID?.toLowerCase() === xero_contact_id.toLowerCase()
-        : b.Contact?.Name?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
+        ? b.contactId?.toLowerCase() === xero_contact_id.toLowerCase()
+        : b.contactName?.trim().toLowerCase() === supplier_name.trim().toLowerCase());
       const otherSupplierMatches = matches.length - supplierMatches.length;
       const identityNeedsReview = !xero_contact_id && otherSupplierMatches > 0 && supplierMatches.length === 0;
       return toolResult({status: "ok", conversation_id, supplier_name, invoice_number,
@@ -1517,9 +1505,10 @@ Accept: isPdf
         xero_contact_id_used: xero_contact_id ?? null,
         supplier_identity_requires_review: identityNeedsReview,
         same_number_other_supplier_count: otherSupplierMatches,
-        same_number_other_supplier_bills: matches.filter(b => !supplierMatches.includes(b)).map(b => ({ invoice_id: b.InvoiceID, contact_id: b.Contact?.ContactID ?? null, contact_name: b.Contact?.Name ?? null, status: b.Status ?? "UNKNOWN" })),
-        xero_bills: supplierMatches.map(b=>({invoice_id:b.InvoiceID, status:b.Status ?? "UNKNOWN", amount_due:b.AmountDue ?? null, amount_paid:b.AmountPaid ?? null})),
-        xero_processing_status: identityNeedsReview ? "supplier_identity_unresolved_same_number_exists" : supplierMatches.length===0 ? "no_matching_bill_found" : supplierMatches.length===1 ? (supplierMatches[0].Status ?? "unknown") : "multiple_matching_bills_review_required",
+        xero_credit_note_matches:creditMatches, xero_all_purchase_document_matches:allMatches,
+        same_number_other_supplier_bills: matches.filter(b => !supplierMatches.includes(b)).map(b => ({ invoice_id: b.id, contact_id: b.contactId ?? null, contact_name: b.contactName ?? null, status: b.status ?? "UNKNOWN" })),
+        xero_bills: supplierMatches.map(b=>({invoice_id:b.id, status:b.status ?? "UNKNOWN", invoice_number:b.number, exact_number:b.exact})),
+        xero_processing_status: identityNeedsReview ? "supplier_identity_unresolved_same_number_exists" : supplierMatches.length===0 ? (allMatches.length ? "existing_purchase_document_requires_identity_review" : "no_matching_bill_found") : supplierMatches.length===1 ? (supplierMatches[0].status ?? "unknown") : "multiple_matching_bills_review_required",
         note: "Prefer verified Xero ContactID. When only a name is provided, a name mismatch does not clear a possible duplicate; other-contact invoice-number matches are returned for review. No match does not prove an invoice is new.",
         read_only: true, bills_created: false, bills_modified: false});
     } catch (error) {return safeError("Invoice Xero reconciliation failed", error);}
@@ -1702,12 +1691,16 @@ Accept: isPdf
       invoice_number,
     }) => {
       try {
-        return toolResult(
-          await assessPilotXeroInvoice({
-            supplier_name,
-            invoice_number,
-          })
-        );
+        const assessment=await assessPilotXeroInvoice({supplier_name,invoice_number});
+        // Supplier verification must not prevent an independent Xero duplicate search.
+        // Preserve all existing assessment evidence and add both bill and credit matches.
+        const session=await getPilotXeroReadSession();
+        const purchaseMatches=await lookupXeroPurchaseNumber(session,invoice_number);
+        return toolResult({...assessment, xero_purchase_matches:purchaseMatches,
+          cross_kind_duplicate_search_complete:true,duplicate_search_complete:true,
+          duplicate_status:purchaseMatches.length?'existing_xero_purchase_document':
+            'no_matching_xero_purchase_document_found',
+          note:'Purchase-document number search is independent of supplier verification. Name mismatches and punctuation variants require review; never treat them as clear to draft.'});
       } catch (error) {
         return safeError(
           "Pilot Xero invoice assessment failed",
@@ -2251,7 +2244,10 @@ const xero = await assessPilotXeroInvoice({
         // Failure to check is a hard failure, never a fresh draft candidate.
         const identity=await inspectIntakeIdentity(pool,{conversationId:conversation_id,messageId:message_id,
           attachmentId:attachment_id,supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type});
-        const historicalCoding=await inspectApprovedSupplierCoding(supplier_name,assessment.evidence_notes??'');
+        const historicalCoding=await inspectApprovedSupplierCoding(supplier_name,assessment.evidence_notes??'').catch((error:unknown)=>({
+          status:'history_unavailable',account_code:null,selection_method:null,
+          issues:[`Historical coding unavailable: ${error instanceof Error?error.message:String(error)}; verify ACTIVE fallback account`]
+        }));
         if(mode==='preview') {
           const base=previewDirectDraft(candidate);
           const existing=identity.existing_xero_document || !!identity.review_id && !!identity.prior_draft_attempt;
@@ -2262,7 +2258,19 @@ const xero = await assessPilotXeroInvoice({
             creates_draft:false,review_issues:[...((base.review_issues as string[])??[]),...((identity.identity_review_issues as string[])??[])],
             note:'Read-only PostgreSQL review lookup and Xero document-number duplicate check completed. Create repeats Xero checks before posting.'});
         }
-        if(identity.existing_xero_document) return toolResult({mode,status:'existing_xero_document',...identity,creates_draft:false,review_required:true,note:'Existing Xero document found by number; do not create a duplicate. Supplier name mismatch remains a review issue.'});
+        if(identity.existing_xero_document) {
+          // Existing PAID/AUTHORISED/DRAFT documents are never recreated. Link an
+          // existing review only after the source number, kind and supplier match.
+          let linkage:Record<string,unknown>|null=null;
+          if(identity.review_id && identity.xero_document_id && identity.xero_number_exact &&
+             !identity.requires_identity_reconciliation &&
+             identity.xero_document_type===(document_type==='credit_note'?'CreditNotes':'Invoices')) {
+            linkage=await linkExistingReviewDraft(pool,String(identity.review_id),String(identity.xero_document_id));
+          }
+          return toolResult({mode,status:'existing_xero_document',...identity,linkage,
+            creates_draft:false,review_required:true,
+            note:'Existing Xero document found by number; no new liability created. Unverified aliases or number variants require reconciliation.'});
+        }
         if(identity.review_id && identity.review_match==='conversation_invoice')
           throw new Error('Invoice already assessed under a different Front attachment; reconcile the existing review before creating');
         const codingAssessment={...assessment,invoice_date:normaliseInvoiceDate(assessment.invoice_date)??assessment.invoice_date,
@@ -2312,6 +2320,16 @@ const xero = await assessPilotXeroInvoice({
     const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
     try{return toolResult(await linkExistingReviewDraft(pool,review_id,xero_document_id,verified_xero_contact_id));}
     catch(error){return safeError('Existing draft link failed',error);}
+    finally{await pool.end();}
+  });
+  server.registerTool('clear_confirmed_failed_pilot_draft_attempt', {
+    title:'Clear Confirmed Pre-Xero-POST Attempt Flag',
+    description:'Supervised repair of a historical stale PostgreSQL draft-attempt flag. Requires explicit operator confirmation from logs that NO Xero invoice/credit POST occurred. Independently searches both Xero bills and credits before clearing. Never clears an ambiguous POST automatically.',
+    inputSchema:{review_id:z.string().regex(/^[1-9]\d{0,17}$/),operator_confirmed_no_xero_post:z.literal(true)}
+  },async ({review_id,operator_confirmed_no_xero_post}:{review_id:string;operator_confirmed_no_xero_post:true})=>{
+    const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+    try{return toolResult(await clearConfirmedPrePostFailure(pool,review_id,operator_confirmed_no_xero_post));}
+    catch(error){return safeError('Failed attempt reconciliation refused',error);}
     finally{await pool.end();}
   });
   // --------------------------------------------------

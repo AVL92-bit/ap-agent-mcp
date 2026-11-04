@@ -6,6 +6,7 @@ import type { Pool } from 'pg';
 import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { syncPilotReviewExceptions } from './google-sheets-review.js';
 import { originalFrontDocument, attachAndVerifyOriginal } from './xero-draft-bills.js';
+import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 
 const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
 const INBOX = 'inb_bys7q';
@@ -181,36 +182,25 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
     ORDER BY CASE WHEN front_message_id=$1 AND attachment_id=$2 THEN 0 ELSE 1 END, id`,
     [input.messageId,input.attachmentId,input.conversationId,input.invoiceNumber]);
   const reviews=rows.rows;
-  if(reviews.length>1) throw new Error('Multiple PostgreSQL reviews match attachment or invoice; reconcile before drafting');
+  // Repeated Front PDF copies may have separate reviews; do not treat identical
+  // invoice identities as separate liabilities. Never silently merge conflicting identities.
+  if(reviews.length>1 && reviews.some((r:any)=>String(r.invoice_number??'').trim().toLowerCase()!==input.invoiceNumber.trim().toLowerCase() || r.document_type!==input.documentType || supplierKey(String(r.supplier_name??''))!==supplierKey(input.supplierName)))
+    throw new Error('Conflicting PostgreSQL reviews for this invoice; reconcile identity');
   const review=reviews[0]??null;
   if(review && (String(review.invoice_number??'').trim().toLowerCase()!==input.invoiceNumber.trim().toLowerCase()
       || review.document_type!==input.documentType))
     throw new Error('Existing attachment review has a different invoice identity; reconcile before drafting');
   const api=await getPilotXeroReadSessionForLink();
   if(api.tenantId!==TENANT) throw new Error('Wrong Xero tenant for intake preflight');
-  // Search both AP bills and supplier credits by their exact source number.
-  // Punctuation (including iGPR's literal asterisk) is never normalised away.
-  const escaped=input.invoiceNumber.replace(/\\/g,'\\\\').replace(/"/g,'\\"');
-  const foundDocs: Array<{doc:any;kind:'Invoices'|'CreditNotes';id:string}> = [];
-  for (const kind of ['Invoices','CreditNotes'] as const) {
-    const field=kind==='Invoices'?'InvoiceNumber':'CreditNoteNumber';
-    const data=await xero(api,`${kind}?where=${encodeURIComponent(`${field}=="${escaped}"`)}`);
-    if (!Array.isArray(data[kind])) throw new Error(`Incomplete Xero ${kind} duplicate search`);
-    for (const d of data[kind]) {
-      if (d[field]!==input.invoiceNumber || ['DELETED','VOIDED'].includes(d.Status)) continue;
-      const id=d[kind==='Invoices'?'InvoiceID':'CreditNoteID'];
-      if (!id) throw new Error('Existing Xero document lacks an identifier; reconciliation required');
-      foundDocs.push({doc:d,kind,id});
-    }
-  }
-  if(foundDocs.length>1) throw new Error('Multiple Xero bills/credits share this number; reconcile before drafting');
+  const foundDocs=await lookupXeroPurchaseNumber(api,input.invoiceNumber);
+  if(foundDocs.length>1) throw new Error('Multiple Xero purchase documents match number; reconcile before drafting');
   const matched=foundDocs[0]??null;
-  const doc=matched?.doc??null;
   const id=matched?.id??null;
+  const doc=matched;
   const issues:string[]=[];
   if(review && String(review.supplier_name??'').trim().toLowerCase()!==input.supplierName.trim().toLowerCase())
     issues.push('PostgreSQL supplier name differs from extracted supplier; verify identity');
-  if(doc && String(doc.Contact?.Name??'').trim().toLowerCase()!==input.supplierName.trim().toLowerCase())
+  if(doc && supplierKey(String(doc.contactName??''))!==supplierKey(input.supplierName))
     issues.push('Existing Xero document supplier differs from extracted supplier; verify before linking');
   if(review?.xero_draft_id && doc && review.xero_draft_id!==id)
     throw new Error('PostgreSQL and Xero document IDs conflict; reconcile before drafting');
@@ -219,8 +209,8 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
   return {review_id:review?.id??null,review_status:review?.review_status??null,
     review_match:review?(review.front_message_id===input.messageId && review.attachment_id===input.attachmentId?'attachment':'conversation_invoice'):null,
     postgres_supplier_mismatch:issues.some(i=>i.startsWith('PostgreSQL')),
-    existing_xero_document:!!doc,xero_document_id:id,xero_document_status:doc?.Status??null,
-    xero_supplier_name:doc?.Contact?.Name??null,xero_document_type:matched?.kind??null,duplicate_check_completed:true,
+    existing_xero_document:!!doc,xero_document_id:id,xero_document_status:doc?.status??null,
+    xero_supplier_name:doc?.contactName??null,xero_document_type:matched?.kind??null,xero_number_exact:matched?.exact??null,duplicate_check_completed:true,
     identity_review_issues:issues,requires_identity_reconciliation:!!doc && issues.some(i=>i.startsWith('Existing Xero')),
     prior_draft_attempt:review?.xero_draft_status??null};
 }
@@ -249,7 +239,17 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const r = found.rows[0];
   if (!['invoice','credit_note'].includes(r.document_type)) throw new Error('Not an invoice or credit note');
   if (r.xero_draft_id) return {status:'already_drafted',review_id:reviewId,xero_draft_id:r.xero_draft_id};
-  if (r.xero_draft_status) throw new Error(`Previous draft attempt ${r.xero_draft_status}; reconcile before retry`);
+  if (r.xero_draft_status && !['reconcile_required','creating'].includes(r.xero_draft_status))
+    throw new Error(`Previous draft state ${r.xero_draft_status}; reconcile before retry`);
+  if (['reconcile_required','creating'].includes(r.xero_draft_status)) {
+    // Never clear an indeterminate attempt until BOTH Xero endpoints have been checked.
+    const session=await getPilotXeroReadSessionForLink();
+    const matches=await lookupXeroPurchaseNumber(session,String(r.invoice_number??''));
+    if(matches.length) throw new Error(`Previous attempt may have created Xero ${matches.map(m=>m.id).join(', ')}; link verified document before retry`);
+    // A negative search does not prove a timed-out POST failed; require explicit
+    // human confirmation before clearing the attempt state.
+    throw new Error('Prior attempt requires human-confirmed reconciliation; Xero lookup found no document');
+  }
   const a = r.assessment_json ?? {};
   const supplier = String(r.supplier_name || a.xero_supplier || '').trim();
   const number = String(r.invoice_number || '').trim();
@@ -275,28 +275,29 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     AND xero_draft_status IS NULL RETURNING id`,[reviewId]);
   if (claim.rowCount !== 1) throw new Error('Draft already claimed or attempted');
   let createdId:string|undefined;
+  let xeroPostStarted=false;
   let kind = r.document_type === 'credit_note' ? 'CreditNotes' : 'Invoices';
   try {
     const api = await getPilotXeroWriteSession();
     if (api.tenantId !== TENANT) throw new Error('Wrong Xero tenant');
-    // Check document number globally before contact creation. A same-number record under a
-    // different supplier is an exception requiring reconciliation, not a reason to duplicate.
-    const field = kind === 'Invoices' ? 'InvoiceNumber' : 'CreditNoteNumber';
-    const matches = await xero(api,`${kind}?where=${encodeURIComponent(`${field}=="${number.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`)}`);
-    const existing = (matches[kind] ?? []).filter((x:any)=>x[field] === number && x.Status !== 'DELETED' && x.Status !== 'VOIDED');
-    if (existing.length) {
-      const first = existing[0];
-      const matchedContactName = String(first.Contact?.Name ?? '').trim().toLowerCase();
-      if (existing.length === 1 && matchedContactName === supplier.toLowerCase() && first[`${kind === 'Invoices' ? 'Invoice' : 'CreditNote'}ID`]) {
-        const existingId = first[kind === 'Invoices' ? 'InvoiceID' : 'CreditNoteID'];
-        await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_id=$2,xero_draft_status='existing_in_xero',xero_draft_updated_at=NOW(),updated_at=NOW() WHERE id=$1`,[reviewId,existingId]);
-        let sheetStatus = 'synced';
-        try { await syncPilotReviewExceptions(pool,[reviewId]); } catch { sheetStatus = 'sync_failed'; }
-        return {status:'existing_in_xero',review_id:reviewId,xero_draft_id:existingId,review_required:true,sheet_status:sheetStatus};
+    // Check both AP bills and supplier credits before contact creation or Xero POST.
+    const matches=await lookupXeroPurchaseNumber(api,number);
+    if(matches.length) {
+      const first=matches[0];
+      if(matches.length===1 && first.kind===kind && first.exact && supplierKey(first.contactName??'')===supplierKey(supplier)) {
+        await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_id=$2,xero_draft_status='existing_in_xero',xero_draft_updated_at=NOW(),updated_at=NOW() WHERE id=$1`,[reviewId,first.id]);
+        let sheetStatus='synced';
+        try {await syncPilotReviewExceptions(pool,[reviewId]);}catch {sheetStatus='sync_failed';}
+        return {status:'existing_in_xero',review_id:reviewId,xero_draft_id:first.id,xero_status:first.status,review_required:true,sheet_status:sheetStatus};
       }
-      throw new Error('Same-number Xero document exists under another/ambiguous supplier; reconcile before retry');
+      throw new Error(`Existing Xero document(s) ${matches.map(m=>m.id).join(', ')} match this number; reconcile supplier, document type or punctuation before drafting`);
     }
-    const history=await inspectApprovedSupplierCoding(supplier,String(a.evidence_notes??''));
+    // Historical-coding lookup is advisory: a transient Xero history failure must
+    // not block drafting when an ACTIVE fallback nominal can be verified.
+    const history=await inspectApprovedSupplierCoding(supplier,String(a.evidence_notes??'')).catch((error:unknown)=>({
+      status:'history_unavailable',account_code:null,
+      issues:[`Historical coding lookup unavailable: ${error instanceof Error?error.message:String(error)}; fallback nominal requires review`]
+    }));
     issues.push(...((history.issues as string[])??[]));
     const historicalCode=typeof history.account_code==='string'?history.account_code:null;
     const coding = await accountCode(api,historicalCode??a.proposed_account);
@@ -313,6 +314,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     };
     const payload = kind === 'Invoices' ? {...common,Type:'ACCPAY',InvoiceNumber:number,DueDate:due}
       : {...common,Type:'ACCPAYCREDIT',CreditNoteNumber:number};
+    xeroPostStarted=true;
     const result = await xero(api,kind,'POST',{[kind]:[payload]});
     const doc = result[kind]?.[0];
     createdId = doc?.[kind === 'Invoices' ? 'InvoiceID' : 'CreditNoteID'];
@@ -340,10 +342,37 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
       review_issues:issues,sheet_status:sheetStatus,approved:false,submitted:false};
   } catch(e) {
     const reason = e instanceof Error ? e.message : String(e);
-    await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_status=CASE WHEN xero_draft_id IS NULL THEN 'reconcile_required' ELSE xero_draft_status END,
-      xero_draft_error=$2,xero_draft_updated_at=NOW() WHERE id=$1`,[reviewId,reason.slice(0,4000)]).catch(()=>{});
-    throw new Error(`${reason}. Do not retry without checking Xero and the review register.`);
+    await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_status=CASE WHEN xero_draft_id IS NULL THEN $3 ELSE xero_draft_status END,
+      xero_draft_error=$2,xero_draft_updated_at=NOW() WHERE id=$1`,[reviewId,reason.slice(0,4000),xeroPostStarted?'reconcile_required':null]).catch(()=>{});
+    throw new Error(`${reason}. ${xeroPostStarted?'Xero POST outcome must be reconciled before retry.':'No Xero document POST was attempted; correct the error and retry safely.'}`);
   }
+}
+
+/** One-time repair for historical stale attempt flags. Never clears an ambiguous POST
+ * without explicit operator confirmation from the actual Xero request logs.
+ * Live duplicate checks cover BOTH bills and credits before clearing.
+ */
+export async function clearConfirmedPrePostFailure(pool:Pool,reviewId:string,confirmedNoXeroPost:boolean):Promise<Record<string,unknown>> {
+  if(!pilotDraftWriteState().draft_writes_enabled) throw new Error('Draft register writes disabled');
+  if(!idOk(reviewId)||confirmedNoXeroPost!==true) throw new Error('Explicit confirmation that NO Xero invoice/credit POST was sent is required');
+  const result=await pool.query(`SELECT id::text,invoice_number,xero_draft_id,xero_draft_status,xero_draft_error
+    FROM pilot_invoice_reviews WHERE id=$1`,[reviewId]);
+  if(result.rowCount!==1) throw new Error('Review not found');
+  const r=result.rows[0];
+  if(r.xero_draft_id || !['creating','reconcile_required'].includes(r.xero_draft_status))
+    throw new Error('Review is not an unlinked indeterminate attempt');
+  const session=await getPilotXeroReadSessionForLink();
+  const matches=await lookupXeroPurchaseNumber(session,String(r.invoice_number??''));
+  if(matches.length) throw new Error(`Existing Xero document(s) ${matches.map(m=>m.id).join(', ')}; link instead of clearing`);
+  const updated=await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_status=NULL,
+    xero_draft_error=concat_ws(' | ',xero_draft_error,'Historical pre-POST failure reconciled; operator confirmed no Xero POST'),
+    xero_draft_updated_at=NOW(),updated_at=NOW()
+    WHERE id=$1 AND xero_draft_id IS NULL AND xero_draft_status IN ('creating','reconcile_required') RETURNING id`,[reviewId]);
+  if(updated.rowCount!==1) throw new Error('Concurrent review change; retry reconciliation');
+  let sheet_status='synced';
+  try{await syncPilotReviewExceptions(pool,[reviewId]);}catch{sheet_status='sync_failed';}
+  return {status:'cleared_confirmed_pre_post_failure',review_id:reviewId,
+    xero_duplicate_search_complete:true,operator_confirmed_no_xero_post:true,sheet_status};
 }
 
 /** Explicitly link an existing Xero document to a review after verifying it live.
@@ -365,7 +394,7 @@ export async function linkExistingReviewDraft(pool:Pool,reviewId:string,xeroDocu
   const doc=data[kind]?.[0];
   const number=kind==='Invoices'?doc?.InvoiceNumber:doc?.CreditNoteNumber;
   const contactName=String(doc?.Contact?.Name??'').trim().toLowerCase();
-  if (!doc || number!==r.invoice_number || !(verifiedContactId ? doc.Contact?.ContactID?.toLowerCase()===verifiedContactId.toLowerCase() : r.supplier_name && contactName===r.supplier_name.trim().toLowerCase()))
+  if (!doc || number!==r.invoice_number || !(verifiedContactId ? doc.Contact?.ContactID?.toLowerCase()===verifiedContactId.toLowerCase() : r.supplier_name && supplierKey(contactName)===supplierKey(r.supplier_name)))
     throw new Error('Xero document number or supplier differs from review; manually verify contact before linking');
   if (doc.Status==='DELETED'||doc.Status==='VOIDED') throw new Error('Xero document is deleted or voided');
   const updated=await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_id=$2,xero_draft_status='existing_in_xero',
