@@ -80,40 +80,71 @@ function supplierKey(name:string):string {
   return name.toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').trim()
     .replace(/\b(limited|ltd)\b$/,'').trim();
 }
-async function findSupplierContact(api:Api,supplier:string):Promise<{id:string;name:string;alias:boolean}|null> {
+/** Name similarity is a DISCOVERY threshold, not identity proof. */
+function supplierTokens(name:string):string[] {
+  return supplierKey(name).replace(/([a-z])([0-9])/g,'$1 $2').replace(/([0-9])([a-z])/g,'$1 $2')
+    .replace(/\b(dd|direct debit|limited|ltd|plc|the|uk)\b/g,' ')
+    .split(/\s+/).filter(Boolean);
+}
+export function supplierNameSimilarity(a:string,b:string):number {
+  const x=supplierTokens(a), y=supplierTokens(b);
+  if(!x.length||!y.length) return 0;
+  if(x.join(' ')===y.join(' ')) return 1;
+  const common=x.filter(t=>y.includes(t)).length;
+  // Dice overlap respects token order-independent matching, with modest prefix credit.
+  const tokenScore=2*common/(x.length+y.length);
+  const ax=x.join(''),by=y.join('');
+  let prefix=0;while(prefix<Math.min(ax.length,by.length)&&ax[prefix]===by[prefix])prefix++;
+  return Math.max(tokenScore, prefix/Math.max(ax.length,by.length));
+}
+type ContactMatch={id:string;name:string;alias:boolean;confidence:string};
+async function findSupplierContact(api:Api,supplier:string):Promise<ContactMatch|null> {
   const where=encodeURIComponent(`Name=="${supplier.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`);
   const exactResponse=await xero(api,`Contacts?where=${where}`);
-  const exact=(exactResponse.Contacts??[]).filter((c:any)=>c.ContactID && String(c.Name??'').trim().toLowerCase()===supplier.trim().toLowerCase());
-  if(exact.length>1) throw new Error('Multiple exact Xero contacts; do not create another');
-  if(exact.length===1) return {id:exact[0].ContactID,name:exact[0].Name,alias:false};
-  // Bounded read-only candidate search; do not automatically merge different legal names.
-  const key=supplierKey(supplier);
-  // A verified Xero contact may carry the payment-method suffix (DD).
-  // Do not accept arbitrary legal-name variants or create a second contact.
-  const contactKey=(name:string)=>supplierKey(name).replace(/\s*\(dd\)\s*$/i,'').replace(/\s+dd$/i,'').trim();
-  const candidates:any[]=[];
-  let exhausted=false;
-  for(let page=1;page<=5;page++) {
+  const exact=(exactResponse.Contacts??[]).filter((c:any)=>c.ContactID &&
+    String(c.Name??'').trim().toLowerCase()===supplier.trim().toLowerCase());
+  if(exact.length>1) throw new Error('Multiple exact Xero contacts; reconcile');
+  if(exact.length===1) return {id:exact[0].ContactID,name:exact[0].Name,alias:false,confidence:'exact'};
+  // Xero Contacts pagination must be complete before making a uniqueness decision.
+  const contacts:any[]=[];let complete=false;
+  for(let page=1;page<=20;page++) {
     const response=await xero(api,`Contacts?page=${page}`);
     const list=response.Contacts??[];
     if(!Array.isArray(list)) throw new Error('Xero contacts response invalid');
-    candidates.push(...list.filter((c:any)=>c.ContactID && (supplierKey(String(c.Name??''))===key || contactKey(String(c.Name??''))===key)));
-    if(list.length<100){exhausted=true;break;}
+    contacts.push(...list.filter((c:any)=>c.ContactID && c.Name));
+    if(list.length<100){complete=true;break;}
   }
-  if(!exhausted) throw new Error('Xero contact search incomplete; do not create a duplicate contact');
-  if(candidates.length>1) throw new Error('Ambiguous supplier alias; manual identity reconciliation required');
-  if(candidates.length===1) return {id:candidates[0].ContactID,name:candidates[0].Name,alias:true};
-  return null;
+  if(!complete) throw new Error('Xero contacts pagination incomplete; supplier unresolved');
+  const ranked=contacts.map(c=>({c,score:supplierNameSimilarity(supplier,String(c.Name))}))
+    .filter(x=>x.score>=0.50).sort((a,b)=>b.score-a.score);
+  if(!ranked.length) return null;
+  // 50% only triggers investigation; never auto-select on similarity alone.
+  const eligible=ranked.filter(x=>x.score>=0.66);
+  if(!eligible.length) throw new Error(`Supplier similarity candidates require evidence review: ${ranked.slice(0,5).map(x=>x.c.Name).join(', ')}`);
+  if(eligible.length>1 && eligible[0].score-eligible[1].score<0.15)
+    throw new Error(`Ambiguous supplier contact candidates: ${eligible.slice(0,5).map(x=>x.c.Name).join(', ')}`);
+  const best=eligible[0];
+  const invoiceTokens=supplierTokens(supplier),contactTokens=supplierTokens(String(best.c.Name));
+  const overlap=invoiceTokens.filter(t=>contactTokens.includes(t)).length;
+  const equivalent=invoiceTokens.join(' ')===contactTokens.join(' ');
+  // For non-equivalent names require two shared identifying tokens and Xero
+  // approved/paid purchase-bill history for that exact ContactID.
+  if(!equivalent && overlap<2)
+    throw new Error(`Supplier candidate ${best.c.Name} requires manual identity verification (insufficient distinctive name overlap)`);
+  if(!equivalent) {
+    const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${best.c.ContactID}")`);
+    const history=await xero(api,`Invoices?where=${filter}&page=1`);
+    const bills=history.Invoices??[];
+    if(!Array.isArray(bills)||!bills.some((i:any)=>i.Contact?.ContactID?.toLowerCase()===String(best.c.ContactID).toLowerCase() && i.Type==='ACCPAY' && ['PAID','AUTHORISED'].includes(i.Status)))
+      throw new Error(`Supplier candidate ${best.c.Name} has no confirmed historical purchase bill; verify manually`);
+  }
+  return {id:best.c.ContactID,name:best.c.Name,alias:true,confidence:equivalent?'normalised_name':'similar_name_and_approved_bill_history'};
 }
 async function supplierContact(api: Api, supplier: string): Promise<{id:string; created:boolean; issue?:string}> {
   const match=await findSupplierContact(api,supplier);
-  if(match) return {id:match.id,created:false,...(match.alias?{issue:`Xero contact name differs: ${match.name}; verify supplier identity`}:{})};
-  // New contact name is explicitly marked for review; never fabricate tax or bank details.
-  const created = await xero(api,'Contacts','POST',{Contacts:[{Name:supplier}]});
-  const contact = created.Contacts?.[0];
-  if (!contact?.ContactID || contact.HasErrors || (contact.ValidationErrors?.length ?? 0)>0)
-    throw new Error('Xero contact creation uncertain; reconcile Xero before retry');
-  return {id:contact.ContactID,created:true,issue:'New Xero supplier contact created; verify identity and possible aliases'};
+  if(match) return {id:match.id,created:false,...(match.alias?{issue:`Existing Xero contact ${match.name} matched (${match.confidence}); verify invoice legal identity against historical PDFs`}:{})};
+  // Never create a supplier automatically. Contact creation is a separate reviewed action.
+  throw new Error(`No existing Xero contact identified for ${supplier}; manual supplier identity review required; no contact created`);
 }
 
 /** Approved/paid Xero purchase bills are the supplier's authorised coding precedent.
