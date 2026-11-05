@@ -8,6 +8,7 @@ import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { syncPilotReviewExceptions } from './google-sheets-review.js';
 import { originalFrontDocument, attachAndVerifyOriginal } from './xero-draft-bills.js';
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
+export { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 
 const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
 const INBOX = 'inb_bys7q';
@@ -232,6 +233,7 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
     throw new Error('Existing attachment review has a different invoice identity; reconcile before drafting');
   const api=await getPilotXeroReadSessionForLink();
   if(api.tenantId!==TENANT) throw new Error('Wrong Xero tenant for intake preflight');
+  const contactMatch=await findSupplierContact(api,input.supplierName);
   const foundDocs=await lookupXeroPurchaseNumber(api,input.invoiceNumber);
   if(foundDocs.length>1) throw new Error('Multiple Xero purchase documents match number; reconcile before drafting');
   const matched=foundDocs[0]??null;
@@ -252,6 +254,8 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
     existing_xero_document:!!doc,xero_document_id:id,xero_document_status:doc?.status??null,
     xero_supplier_name:doc?.contactName??null,xero_document_type:matched?.kind??null,xero_number_exact:matched?.exact??null,duplicate_check_completed:true,
     identity_review_issues:issues,requires_identity_reconciliation:!!doc && issues.some(i=>i.startsWith('Existing Xero')),
+    supplier_contact_match:contactMatch?{contact_id:contactMatch.id,name:contactMatch.name,confidence:contactMatch.confidence}:null,
+    supplier_contact_unresolved:!contactMatch,
     prior_draft_attempt:review?.xero_draft_status??null};
 }
 
