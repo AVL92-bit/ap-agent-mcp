@@ -170,12 +170,11 @@ function rowFor(review: Review): string[] {
     text(a.gross_gbp),
     text(a.duplicate_check),
     text(a.proposed_account),
-    "NONE", // Overriding inbox-wide tax policy; not a review question.
     reviewQueries(a, review.xero_draft_error).join(" | "),
     review.review_status,
     "",
-    review.xero_draft_id ? "Review Xero draft; correct any uncertainties" : "Requires human review",
-    "",
+    "Review required", // Column U: valid dropdown default; human-owned thereafter.
+    "", // Column V: reviewer notes; never overwritten on existing rows.
     "No", // A Xero draft is not evidence of visual PDF verification.
     text(review.xero_draft_id),
     text(review.xero_draft_status),
@@ -214,7 +213,7 @@ export async function syncPilotReviewExceptions(
   if (SPREADSHEET_ID !== EXPECTED_SPREADSHEET_ID || SHEET_NAME !== "Invoice Reviews")
     throw new Error(`Sheet target mismatch: expected ${EXPECTED_SPREADSHEET_ID}/Invoice Reviews; check Railway AP_TRIAL_SPREADSHEET_ID and AP_TRIAL_SHEET_NAME`);
   const token = await getAccessToken();
-  const range = encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`);
+  const range = encodeURIComponent(`'${SHEET_NAME}'!A1:Z1000`);
 
   const existing = await sheetsRequest(
     token,
@@ -222,7 +221,7 @@ export async function syncPilotReviewExceptions(
   ) as { values?: string[][] };
 
   const values = existing.values ?? [];
-  // Values are written as RAW UK-formatted strings. Enforce text display for B and AA.
+  // Values are written as RAW UK-formatted strings. Enforce text display for B and Z.
   // This does not change any cell value or overwrite a human decision.
   const sheetMetaResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=sheets(properties(sheetId,title))`,
     {headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(20000)});
@@ -232,19 +231,20 @@ export async function syncPilotReviewExceptions(
   if (sheetId == null) throw new Error('Invoice Reviews sheet tab not found');
   const formatResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,{
     method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},
-    body:JSON.stringify({requests:[1,26].map(column=>({repeatCell:{range:{sheetId,startRowIndex:1,startColumnIndex:column,endColumnIndex:column+1},cell:{userEnteredFormat:{numberFormat:{type:'TEXT'}}},fields:'userEnteredFormat.numberFormat'}}))}),
+    body:JSON.stringify({requests:[1,25].map(column=>({repeatCell:{range:{sheetId,startRowIndex:1,startColumnIndex:column,endColumnIndex:column+1},cell:{userEnteredFormat:{numberFormat:{type:'TEXT'}}},fields:'userEnteredFormat.numberFormat'}}))}),
     signal:AbortSignal.timeout(20000)});
   if (!formatResponse.ok) throw new Error(`Sheet timestamp formatting HTTP ${formatResponse.status}`);
 
   const header = values[0] ?? [];
 
   if (
-    header.length !== 27 ||
+    header.length !== 26 ||
     header[0] !== "Review ID" ||
     header[1] !== "Assessment timestamp" ||
-    header[19] !== "Review status" ||
-    header[21] !== "Decision / action" ||
-    header[26] !== "Last updated timestamp"
+    header[18] !== "Review status" ||
+    header[20] !== "Decision / action" ||
+    header[21] !== "Reviewer notes" ||
+    header[25] !== "Last updated timestamp"
   ) {
     throw new Error("Unexpected Google Sheet column layout");
   }
@@ -284,27 +284,21 @@ export async function syncPilotReviewExceptions(
             "PUT", { values: [["invoice"]] });
         }
         const desired = [text(review.xero_draft_id), text(review.xero_draft_status)];
-        if (desired.some((v,i) => v !== text(current[24+i]))) {
+        if (desired.some((v,i) => v !== text(current[23+i]))) {
           await sheetsRequest(token,
-            `/values/${encodeURIComponent(`'${SHEET_NAME}'!Y${rowNumber}:Z${rowNumber}`)}?valueInputOption=RAW`,
+            `/values/${encodeURIComponent(`'${SHEET_NAME}'!X${rowNumber}:Y${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [desired] });
         }
         const xeroUrl = review.document_type === 'credit_note'
           ? `https://go.xero.com/AccountsPayable/ViewCreditNote.aspx?creditNoteID=${encodeURIComponent(review.xero_draft_id)}`
           : `https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${encodeURIComponent(review.xero_draft_id)}`;
         const issueNote = [...reviewQueries(review.assessment_json, review.xero_draft_error), `Xero document: ${xeroUrl}`].filter(Boolean).join(' | ');
-        if (issueNote && !text(current[18]).includes(issueNote)) {
-          const updatedNotes = [text(current[18]), issueNote].filter(Boolean).join(' | ');
+        if (issueNote && !text(current[17]).includes(issueNote)) {
+          const updatedNotes = [text(current[17]), issueNote].filter(Boolean).join(' | ');
           await sheetsRequest(token,
-            `/values/${encodeURIComponent(`'${SHEET_NAME}'!S${rowNumber}`)}?valueInputOption=RAW`,
+            `/values/${encodeURIComponent(`'${SHEET_NAME}'!R${rowNumber}`)}?valueInputOption=RAW`,
             "PUT", { values: [[updatedNotes]] });
         }
-      }
-      // The inbox-wide VAT policy is fixed; column R is policy, not a human decision.
-      if (text(values[rowIndex]?.[17]) !== 'NONE') {
-        await sheetsRequest(token,
-          `/values/${encodeURIComponent(`'${SHEET_NAME}'!R${rowIndex+1}`)}?valueInputOption=RAW`,
-          "PUT", { values: [['NONE']] });
       }
       // Backfill the original assessment time from PostgreSQL, never from this sync.
       if (text(values[rowIndex]?.[1]) !== ukTimestamp(review.created_at)) {
@@ -313,16 +307,16 @@ export async function syncPilotReviewExceptions(
           "PUT", { values: [[ukTimestamp(review.created_at)]] });
       }
       // Only the database's actual updated_at is reflected, not the sync time.
-      if (text(values[rowIndex]?.[26]) !== ukTimestamp(review.updated_at)) {
+      if (text(values[rowIndex]?.[25]) !== ukTimestamp(review.updated_at)) {
         await sheetsRequest(token,
-          `/values/${encodeURIComponent(`'${SHEET_NAME}'!AA${rowIndex+1}`)}?valueInputOption=RAW`,
+          `/values/${encodeURIComponent(`'${SHEET_NAME}'!Z${rowIndex+1}`)}?valueInputOption=RAW`,
           "PUT", { values: [[ukTimestamp(review.updated_at)]] });
       }
-      const verified=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A${rowIndex+1}:AA${rowIndex+1}`)}`) as {values?:string[][]};
+      const verified=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A${rowIndex+1}:Z${rowIndex+1}`)}`) as {values?:string[][]};
       const persisted=verified.values?.[0]??[];
-      if(review.xero_draft_id && (text(persisted[24])!==text(review.xero_draft_id)||text(persisted[25])!==text(review.xero_draft_status)))
+      if(review.xero_draft_id && (text(persisted[23])!==text(review.xero_draft_id)||text(persisted[24])!==text(review.xero_draft_status)))
         throw new Error(`Sheet Xero reference not persisted for review ${review.id}`);
-      if(text(persisted[1])!==ukTimestamp(review.created_at) || text(persisted[26])!==ukTimestamp(review.updated_at))
+      if(text(persisted[1])!==ukTimestamp(review.created_at) || text(persisted[25])!==ukTimestamp(review.updated_at))
         throw new Error(`Sheet timestamps not persisted for review ${review.id}`);
       already_present.push(review.id);
       continue;
@@ -347,12 +341,12 @@ export async function syncPilotReviewExceptions(
 
     await sheetsRequest(
       token,
-      `/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      `/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:Z1000`)}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
       "POST",
       { values: [rowFor(review)] }
     );
 
-    const confirmed=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:AA1000`)}`) as {values?:string[][]};
+    const confirmed=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:Z1000`)}`) as {values?:string[][]};
     if((confirmed.values??[]).filter(row=>text(row[0])===review.id).length!==1)
       throw new Error(`Sheet append not verified for review ${review.id}`);
     appended.push(review.id);
