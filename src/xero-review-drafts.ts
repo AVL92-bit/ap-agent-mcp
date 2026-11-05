@@ -202,7 +202,7 @@ async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:stri
   if(!candidates.length) return null;
   const confirmed:ContactMatch[]=[];
   for(const {c,score} of candidates) {
-    const evidence=await historicalInvoiceNameMatches(api,String(c.ContactID),incomingPdfText);
+    const evidence=await historicalInvoiceNameMatches(api,String(c.ContactID),incomingPdfText!);
     if(evidence.matched) confirmed.push({id:String(c.ContactID),name:String(c.Name),alias:printedName!==comparableSupplierName(String(c.Name)),confidence:`historical_pdf_supplier_name_match; bill=${evidence.bill_id}; filename=${evidence.filename}; candidate_similarity=${score.toFixed(2)}`});
   }
   if(confirmed.length>1) throw new Error(`Multiple Xero contacts have matching historical supplier invoice names: ${confirmed.map(x=>x.name).join(', ')}`);
