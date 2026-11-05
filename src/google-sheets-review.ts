@@ -221,19 +221,9 @@ export async function syncPilotReviewExceptions(
   ) as { values?: string[][] };
 
   const values = existing.values ?? [];
-  // Values are written as RAW UK-formatted strings. Enforce text display for B and Z.
-  // This does not change any cell value or overwrite a human decision.
-  const sheetMetaResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}?fields=sheets(properties(sheetId,title))`,
-    {headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(20000)});
-  if (!sheetMetaResponse.ok) throw new Error(`Sheet metadata HTTP ${sheetMetaResponse.status}`);
-  const sheetMeta = await sheetMetaResponse.json() as {sheets?:Array<{properties?:{sheetId?:number;title?:string}}>};
-  const sheetId = sheetMeta.sheets?.find(x=>x.properties?.title===SHEET_NAME)?.properties?.sheetId;
-  if (sheetId == null) throw new Error('Invoice Reviews sheet tab not found');
-  const formatResponse = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${SPREADSHEET_ID}:batchUpdate`,{
-    method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},
-    body:JSON.stringify({requests:[1,25].map(column=>({repeatCell:{range:{sheetId,startRowIndex:1,startColumnIndex:column,endColumnIndex:column+1},cell:{userEnteredFormat:{numberFormat:{type:'TEXT'}}},fields:'userEnteredFormat.numberFormat'}}))}),
-    signal:AbortSignal.timeout(20000)});
-  if (!formatResponse.ok) throw new Error(`Sheet timestamp formatting HTTP ${formatResponse.status}`);
+  // Read-only on existing rows unless draft-tracking or evidence actually changes.
+  // In particular, do not apply timestamp formatting on every sync: even a
+  // repeatCell formatting request makes a nominal no-op sync a Sheet write.
 
   const header = values[0] ?? [];
 
@@ -300,24 +290,13 @@ export async function syncPilotReviewExceptions(
             "PUT", { values: [[updatedNotes]] });
         }
       }
-      // Backfill the original assessment time from PostgreSQL, never from this sync.
-      if (text(values[rowIndex]?.[1]) !== ukTimestamp(review.created_at)) {
-        await sheetsRequest(token,
-          `/values/${encodeURIComponent(`'${SHEET_NAME}'!B${rowIndex+1}`)}?valueInputOption=RAW`,
-          "PUT", { values: [[ukTimestamp(review.created_at)]] });
-      }
-      // Only the database's actual updated_at is reflected, not the sync time.
-      if (text(values[rowIndex]?.[25]) !== ukTimestamp(review.updated_at)) {
-        await sheetsRequest(token,
-          `/values/${encodeURIComponent(`'${SHEET_NAME}'!Z${rowIndex+1}`)}?valueInputOption=RAW`,
-          "PUT", { values: [[ukTimestamp(review.updated_at)]] });
-      }
+      // B (assessment timestamp) and Z (last updated timestamp) are historical
+      // register values. Never backfill or normalise them during an existing-row
+      // sync. New rows still receive PostgreSQL timestamps via rowFor().
       const verified=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A${rowIndex+1}:Z${rowIndex+1}`)}`) as {values?:string[][]};
       const persisted=verified.values?.[0]??[];
       if(review.xero_draft_id && (text(persisted[23])!==text(review.xero_draft_id)||text(persisted[24])!==text(review.xero_draft_status)))
         throw new Error(`Sheet Xero reference not persisted for review ${review.id}`);
-      if(text(persisted[1])!==ukTimestamp(review.created_at) || text(persisted[25])!==ukTimestamp(review.updated_at))
-        throw new Error(`Sheet timestamps not persisted for review ${review.id}`);
       already_present.push(review.id);
       continue;
     }
