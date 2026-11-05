@@ -120,34 +120,51 @@ function comparableSupplierName(value:string):string {
  * Ambiguous header identities fail closed, rather than matching a shared customer.
  */
 function pdfSupplierName(text:string):string|null {
-  const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).slice(0,75);
+  const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).slice(0,100);
   const stop=/^(?:bill\s*to|invoice\s*to|sold\s*to|customer|ship\s*to|deliver\s*to|billed\s*to|recipient|to:)\b/i;
   const label=/^(?:supplier|seller|vendor|issued\s+by|from)\s*[:\-]\s*/i;
+  const payee=/^(?:account\s*(?:holder\s*)?name|beneficiary\s*name|payee\s*name)\s*[:\-]\s*/i;
   const legal=/\b(?:ltd|limited|llp|plc|inc|incorporated)\b/i;
-  const candidates:string[]=[];
-  // Prefer explicit issuer labels; never search customer blocks.
+  const isName=(value:string)=>value.length>=5 && value.length<=110 && /[a-z]/i.test(value)
+    && !/^(?:\d|bank:|sort code|account number|vat number)/i.test(value);
+  const issuerNames:string[]=[];
+  const payeeNames:string[]=[];
+  let beforeRecipient=true;
   for(let i=0;i<lines.length;i++) {
-    if(stop.test(lines[i])) break;
-    if(label.test(lines[i])) {
-      const value=lines[i].replace(label,'').trim() || (lines[i+1]??'');
-      const normalized=comparableSupplierName(value);
-      if(normalized.length>=5 && normalized.length<=110) candidates.push(normalized);
+    const line=lines[i];
+    if(stop.test(line)) beforeRecipient=false;
+    if(beforeRecipient && label.test(line)) {
+      const raw=line.replace(label,'').trim() || (lines[i+1]??'');
+      if(isName(raw)) issuerNames.push(comparableSupplierName(raw));
+    }
+    // A labelled remittance account holder is a candidate, not proof of issuer.
+    // Only accept it when historical Xero bill PDFs yield the same candidate.
+    if(payee.test(line)) {
+      const raw=line.replace(payee,'').trim() || (lines[i+1]??'');
+      if(isName(raw)) payeeNames.push(comparableSupplierName(raw));
     }
   }
-  if(candidates.length===0) {
-    // Unlabelled invoice mastheads: only the first legal name before the
-    // invoice/customer section is eligible. Multiple names are ambiguous.
-    for(const line of lines.slice(0,15)) {
-      if(stop.test(line) || /^(?:tax\s+)?invoice\b/i.test(line)) break;
-      if(legal.test(line) && !/\b(?:st george'?s road surgery)\b/i.test(line)) {
-        const name=comparableSupplierName(line);
-        if(name.length>=8 && name.length<=110) candidates.push(name);
-      }
+  const unique=(values:string[])=>[...new Set(values)];
+  const explicit=unique(issuerNames);
+  const payees=unique(payeeNames);
+  // Conflicting explicit issuer and payee identities are unsafe to auto-resolve.
+  if(explicit.length>1 || payees.length>1) return null;
+  if(explicit.length===1 && payees.length===1 && explicit[0]!==payees[0]) return null;
+  if(explicit.length===1) return explicit[0];
+  if(payees.length===1) return payees[0];
+  // Unlabelled masthead fallback only, never the recipient or a line item.
+  const masthead:string[]=[];
+  for(const line of lines.slice(0,15)) {
+    if(stop.test(line) || /^(?:tax\s+)?invoice\b/i.test(line)) break;
+    if(legal.test(line) && !/\b(?:st george'?s road surgery)\b/i.test(line)) {
+      const name=comparableSupplierName(line);
+      if(name.length>=8 && name.length<=110) masthead.push(name);
     }
   }
-  const distinct=[...new Set(candidates)];
-  return distinct.length===1?distinct[0]:null;
+  const names=unique(masthead);
+  return names.length===1?names[0]:null;
 }
+
 async function pdfText(bytes:Buffer):Promise<string> {
   if(!bytes.length || bytes.length>15*1024*1024) throw new Error('Supplier invoice PDF empty or too large');
   const parser=new PDFParse({data:new Uint8Array(bytes)});
