@@ -1,6 +1,6 @@
 import { xeroFetch } from "./xero-rate-limit.js";
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
-import { inspectApprovedSupplierCoding, resolveExistingXeroSupplierForDraft } from './xero-review-drafts.js';
+import { inspectApprovedSupplierCoding, resolveExistingXeroSupplierForReview } from './xero-review-drafts.js';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
@@ -2122,7 +2122,12 @@ server.registerTool(
 
         // Use exactly the same supplier identity resolver as the DRAFT write path.
         // Do not let an older exact-name-only assessment reject a verified alias.
-        const supplier = await resolveExistingXeroSupplierForDraft(String(review.supplier_name ?? ''));
+        const supplier = await resolveExistingXeroSupplierForReview({
+          conversationId:String(review.front_conversation_id ?? ''),
+          messageId:String(review.front_message_id ?? ''),
+          attachmentId:String(review.attachment_id ?? ''),
+          supplierName:String(review.supplier_name ?? '')
+        });
         const session = await getPilotXeroReadSession();
         const purchaseMatches = await lookupXeroPurchaseNumber(session,String(review.invoice_number ?? ''));
         if (purchaseMatches.length > 0) {

@@ -209,6 +209,22 @@ async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:stri
   if(!confirmed.length) throw new Error(`No supplier-name match found in the three most recent Xero bills for any 50%+ candidate; supplier review required`);
   return confirmed[0];
 }
+/** Read-only supplier identity check for a recorded Front invoice. Uses the exact
+ * original PDF and the same candidate/history verification as draft creation.
+ * Never trusts a review field as the supplier identity proof. */
+export async function resolveExistingXeroSupplierForReview(input:{
+  conversationId:string; messageId:string; attachmentId:string; supplierName:string;
+}):Promise<{contact_id:string;contact_name:string;match_confidence:string;alias:boolean}> {
+  const original=await originalFrontDocument({
+    conversationId:input.conversationId,messageId:input.messageId,attachmentId:input.attachmentId
+  });
+  const incomingPdfText=await pdfText(original.bytes);
+  const api=await getPilotXeroReadSessionForLink();
+  const contact=await findSupplierContact(api,input.supplierName,incomingPdfText);
+  if(!contact) throw new Error('No qualifying existing Xero contact found for supplier printed on incoming PDF');
+  return {contact_id:contact.id,contact_name:contact.name,match_confidence:contact.confidence,alias:contact.alias};
+}
+
 export async function resolveExistingXeroSupplierForDraft(supplier:string):Promise<{contact_id:string;contact_name:string;match_confidence:string;alias:boolean}> {
   throw new Error('Incoming PDF required for supplier verification; use Front intake or review-based workflow');
 }
