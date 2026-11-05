@@ -339,3 +339,22 @@ export async function syncPilotReviewExceptions(
 
   return { appended, already_present, skipped };
 }
+
+/** Read-only gate: fail closed if a human HOLD is present or the Sheet cannot
+ * be checked. No Sheet writes, and no automatic override of human decisions.
+ */
+export async function assertReviewNotHeldInSheet(reviewId:string,conversationId:string,invoiceNumber:string):Promise<void> {
+  if(SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID || SHEET_NAME!=='Invoice Reviews')
+    throw new Error('Unexpected review Sheet configuration; cannot verify human holds');
+  const token=await getAccessToken();
+  const result=await sheetsRequest(token,`/values/${encodeURIComponent(`'${SHEET_NAME}'!A1:Z1000`)}`) as {values?:string[][]};
+  const rows=result.values??[];
+  const header=rows[0]??[];
+  if(header[0]!=='Review ID'||header[18]!=='Review status'||header[20]!=='Decision / action'||header[21]!=='Reviewer notes')
+    throw new Error('Review Sheet columns changed; cannot verify human holds');
+  const matched=rows.slice(1).filter(row=>String(row[0]??'')===reviewId ||
+    (!!conversationId && String(row[2]??'')===conversationId && String(row[8]??'').trim().toLowerCase()===invoiceNumber.trim().toLowerCase()));
+  if(!matched.length) throw new Error('Invoice not found in review Sheet; cannot verify human holds');
+  if(matched.some(row=>[row[18],row[20],row[21]].some(value=>/\b(?:hold|on hold|do not process|do not draft|rejected)\b/i.test(String(value??'')))))
+    throw new Error('Human HOLD or rejection recorded in Google Sheet; no Xero write permitted');
+}
