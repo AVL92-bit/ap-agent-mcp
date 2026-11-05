@@ -1,4 +1,5 @@
 import { xeroFetch } from "./xero-rate-limit.js";
+import { PDFParse } from 'pdf-parse';
 /** Supervised AP draft creation. Uncertainty is recorded for review, not an approval gate.
  * All external writes require XERO_DRAFT_WRITES_ENABLED=true and the fixed pilot tenant.
  * An indeterminate Xero POST is never automatically retried: manual reconciliation first.
@@ -99,14 +100,52 @@ export function supplierNameSimilarity(a:string,b:string):number {
   return Math.max(tokenScore, prefix/Math.max(ax.length,by.length));
 }
 type ContactMatch={id:string;name:string;alias:boolean;confidence:string};
+/** A 50% contact-name match is only a candidate. The incoming supplier name
+ * must appear as the supplier name on an attached invoice PDF belonging to one
+ * of that contact's THREE most recent purchase bills (not three attached bills).
+ * No address, registration or VAT comparisons, and no hard-coded aliases.
+ */
+function comparableSupplierName(value:string):string {
+  return value.toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').trim();
+}
+function historicalPdfHasSupplierName(text:string, supplier:string):boolean {
+  const wanted=comparableSupplierName(supplier);
+  if(!wanted || wanted.length<4) return false;
+  // Supplier name must occupy a heading/line (possibly with a 'From' or
+  // 'Supplier' label); incidental mentions in item descriptions do not count.
+  return text.split(/\r?\n/).slice(0,100).some(raw=>{
+    const line=raw.trim().replace(/^(supplier|from|issued by)\s*[:\-]\s*/i,'');
+    return comparableSupplierName(line)===wanted;
+  });
+}
+async function historicalInvoiceNameMatches(api:Api,contactId:string,supplier:string):Promise<{matched:boolean;bill_id?:string;filename?:string}> {
+  const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
+  const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);
+  const bills=response.Invoices;
+  if(!Array.isArray(bills)) throw new Error('Xero supplier bill history unavailable');
+  // Strictly inspect the three most recent bills, even if they lack attachments.
+  for(const bill of bills.filter((b:any)=>b.Type==='ACCPAY' && String(b.Contact?.ContactID??'').toLowerCase()===contactId.toLowerCase()).slice(0,3)) {
+    if(!bill.InvoiceID) continue;
+    const listing=await xero(api,`Invoices/${encodeURIComponent(bill.InvoiceID)}/Attachments`);
+    const attachments=listing.Attachments;
+    if(!Array.isArray(attachments)) throw new Error('Xero bill attachment listing unavailable');
+    for(const attachment of attachments) {
+      const filename=String(attachment.FileName??'');
+      if(!/\.pdf$/i.test(filename)) continue;
+      const path=`Invoices/${encodeURIComponent(bill.InvoiceID)}/Attachments/${encodeURIComponent(filename)}`;
+      const response=await xeroFetch(API+path,{headers:{Authorization:`Bearer ${api.accessToken}`,'xero-tenant-id':api.tenantId,Accept:'application/pdf'},signal:AbortSignal.timeout(25000)});
+      if(!response.ok) throw new Error(`Xero historical PDF retrieval failed: HTTP ${response.status}`);
+      const bytes=Buffer.from(await response.arrayBuffer());
+      if(!bytes.length || bytes.length>15*1024*1024) throw new Error('Historical invoice PDF empty or too large');
+      const parser=new PDFParse({data:new Uint8Array(bytes)});
+      let text='';
+      try {text=String((await parser.getText()).text??'');} finally {await parser.destroy();}
+      if(historicalPdfHasSupplierName(text,supplier)) return {matched:true,bill_id:bill.InvoiceID,filename};
+    }
+  }
+  return {matched:false};
+}
 async function findSupplierContact(api:Api,supplier:string):Promise<ContactMatch|null> {
-  const where=encodeURIComponent(`Name=="${supplier.replace(/\\/g,'\\\\').replace(/"/g,'\\"')}"`);
-  const exactResponse=await xero(api,`Contacts?where=${where}`);
-  const exact=(exactResponse.Contacts??[]).filter((c:any)=>c.ContactID &&
-    String(c.Name??'').trim().toLowerCase()===supplier.trim().toLowerCase());
-  if(exact.length>1) throw new Error('Multiple exact Xero contacts; reconcile');
-  if(exact.length===1) return {id:exact[0].ContactID,name:exact[0].Name,alias:false,confidence:'exact'};
-  // Xero Contacts pagination must be complete before making a uniqueness decision.
   const contacts:any[]=[];let complete=false;
   for(let page=1;page<=20;page++) {
     const response=await xero(api,`Contacts?page=${page}`);
@@ -116,34 +155,28 @@ async function findSupplierContact(api:Api,supplier:string):Promise<ContactMatch
     if(list.length<100){complete=true;break;}
   }
   if(!complete) throw new Error('Xero contacts pagination incomplete; supplier unresolved');
-  const ranked=contacts.map(c=>({c,score:supplierNameSimilarity(supplier,String(c.Name))}))
+  const candidates=contacts.map(c=>({c,score:supplierNameSimilarity(supplier,String(c.Name))}))
     .filter(x=>x.score>=0.50).sort((a,b)=>b.score-a.score);
-  if(!ranked.length) return null;
-  // 50% only triggers investigation; never auto-select on similarity alone.
-  const eligible=ranked.filter(x=>x.score>=0.66);
-  if(!eligible.length) throw new Error(`Supplier similarity candidates require evidence review: ${ranked.slice(0,5).map(x=>x.c.Name).join(', ')}`);
-  if(eligible.length>1 && eligible[0].score-eligible[1].score<0.15)
-    throw new Error(`Ambiguous supplier contact candidates: ${eligible.slice(0,5).map(x=>x.c.Name).join(', ')}`);
-  const best=eligible[0];
-  const invoiceTokens=supplierTokens(supplier),contactTokens=supplierTokens(String(best.c.Name));
-  const overlap=invoiceTokens.filter(t=>contactTokens.includes(t)).length;
-  const equivalent=invoiceTokens.join(' ')===contactTokens.join(' ');
-  // For non-equivalent names require two shared identifying tokens and Xero
-  // approved/paid purchase-bill history for that exact ContactID.
-  if(!equivalent && overlap<2)
-    throw new Error(`Supplier candidate ${best.c.Name} requires manual identity verification (insufficient distinctive name overlap)`);
-  if(!equivalent) {
-    const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${best.c.ContactID}")`);
-    const history=await xero(api,`Invoices?where=${filter}&page=1`);
-    const bills=history.Invoices??[];
-    if(!Array.isArray(bills)||!bills.some((i:any)=>i.Contact?.ContactID?.toLowerCase()===String(best.c.ContactID).toLowerCase() && i.Type==='ACCPAY' && ['PAID','AUTHORISED'].includes(i.Status)))
-      throw new Error(`Supplier candidate ${best.c.Name} has no confirmed historical purchase bill; verify manually`);
+  if(!candidates.length) return null;
+  const confirmed:ContactMatch[]=[];
+  for(const {c,score} of candidates) {
+    const evidence=await historicalInvoiceNameMatches(api,String(c.ContactID),supplier);
+    if(evidence.matched) confirmed.push({id:String(c.ContactID),name:String(c.Name),alias:comparableSupplierName(supplier)!==comparableSupplierName(String(c.Name)),confidence:`historical_pdf_supplier_name_match; bill=${evidence.bill_id}; filename=${evidence.filename}; candidate_similarity=${score.toFixed(2)}`});
   }
-  return {id:best.c.ContactID,name:best.c.Name,alias:true,confidence:equivalent?'normalised_name':'similar_name_and_approved_bill_history'};
+  if(confirmed.length>1) throw new Error(`Multiple Xero contacts have matching historical supplier invoice names: ${confirmed.map(x=>x.name).join(', ')}`);
+  if(!confirmed.length) throw new Error(`No supplier-name match found in the three most recent Xero bills for any 50%+ candidate; supplier review required`);
+  return confirmed[0];
+}
+export async function resolveExistingXeroSupplierForDraft(supplier:string):Promise<{contact_id:string;contact_name:string;match_confidence:string;alias:boolean}> {
+  if(!supplier.trim()) throw new Error('Supplier name missing');
+  const api=await getPilotXeroReadSessionForLink();
+  const match=await findSupplierContact(api,supplier);
+  if(!match) throw new Error(`No existing Xero contact identified for ${supplier}; manual supplier identity review required`);
+  return {contact_id:match.id,contact_name:match.name,match_confidence:match.confidence,alias:match.alias};
 }
 async function supplierContact(api: Api, supplier: string): Promise<{id:string; created:boolean; issue?:string}> {
   const match=await findSupplierContact(api,supplier);
-  if(match) return {id:match.id,created:false,...(match.alias?{issue:`Existing Xero contact ${match.name} matched (${match.confidence}); verify invoice legal identity against historical PDFs`}:{})};
+  if(match) return {id:match.id,created:false,...(match.alias?{issue:`Existing Xero contact ${match.name} matched (${match.confidence}); historical invoice PDF supplier name verified`}:{})};
   // Never create a supplier automatically. Contact creation is a separate reviewed action.
   throw new Error(`No existing Xero contact identified for ${supplier}; manual supplier identity review required; no contact created`);
 }

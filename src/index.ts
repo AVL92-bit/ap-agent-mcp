@@ -1,6 +1,6 @@
 import { xeroFetch } from "./xero-rate-limit.js";
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
-import { inspectApprovedSupplierCoding } from './xero-review-drafts.js';
+import { inspectApprovedSupplierCoding, resolveExistingXeroSupplierForDraft } from './xero-review-drafts.js';
 import http from "node:http";
 import { readFile } from "node:fs/promises";
 import { syncPilotReviewExceptions } from "./google-sheets-review.js";
@@ -2120,30 +2120,19 @@ server.registerTool(
           review.attachment_id
         );
 
-        // Reuse the established Xero read-only checks.
-        // These require the pilot connection to remain disabled.
-// Verify the actual invoice supplier, not a policy-derived alias.
-const xero = await assessPilotXeroInvoice({
-  supplier_name: review.supplier_name,
-  invoice_number: review.invoice_number,
-});
-
-        if (
-          xero.status !== "xero_checks_clear" ||
-          xero.supplier_verified !== true ||
-          xero.duplicate_search_complete !== true ||
-          xero.duplicate_found_for_supplier !== false ||
-          xero.matching_supplier_bill_count !== 0 ||
-          xero.same_number_other_supplier_bill_count !== 0
-        ) {
+        // Use exactly the same supplier identity resolver as the DRAFT write path.
+        // Do not let an older exact-name-only assessment reject a verified alias.
+        const supplier = await resolveExistingXeroSupplierForDraft(String(review.supplier_name ?? ''));
+        const session = await getPilotXeroReadSession();
+        const purchaseMatches = await lookupXeroPurchaseNumber(session,String(review.invoice_number ?? ''));
+        if (purchaseMatches.length > 0) {
           return toolResult({
-            status: "blocked",
-            review_id,
-            reasons: [
-              "Xero supplier or duplicate checks did not clear",
-            ],
-            xero_check_status: xero.status,
-            draft_created: false,
+            status:'blocked',review_id,
+            reasons:['Existing Xero purchase document with this invoice number requires reconciliation'],
+            xero_contact_id:supplier.contact_id,
+            xero_contact_name:supplier.contact_name,
+            xero_purchase_matches:purchaseMatches,
+            draft_created:false
           });
         }
 
@@ -2157,6 +2146,9 @@ const xero = await assessPilotXeroInvoice({
           invoice_number: review.invoice_number,
           front_pdf_membership_verified: true,
           xero_supplier_verified: true,
+          xero_contact_id: supplier.contact_id,
+          xero_contact_name: supplier.contact_name,
+          supplier_match_confidence: supplier.match_confidence,
           xero_duplicate_search_complete: true,
           outstanding_requirements: [
             "Historically supported account code requires validation",
@@ -2359,7 +2351,7 @@ const xero = await assessPilotXeroInvoice({
       title: "Create Pilot Xero Draft For Human Review",
       description:
         "Creates a Xero DRAFT supplier invoice or credit note from a recorded Front assessment. " +
-        "Uncertain supplier and coding are flagged for human review; new supplier contacts can be created. " +
+        "Existing supplier contacts are resolved without creating new contacts; coding uncertainty is flagged for human review. " +
         "Checks Xero for existing same-number documents. Attempts Google Sheet review sync. " +
         "Never authorises or pays. Requires XERO_DRAFT_WRITES_ENABLED=true. " +
         "The tool name is retained for compatibility; original PDF attachment is attempted and separately verified.",
