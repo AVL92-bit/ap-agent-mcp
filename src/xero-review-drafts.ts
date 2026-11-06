@@ -356,20 +356,38 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const verified=await findSupplierContact(api,String(r.supplier_name??''),pdf);
   const coding=verified?await inspectApprovedSupplierCoding(String(r.supplier_name??''),'',pdf):
     {status:'contact_unresolved',account_code:null,issues:['Incoming and historical PDF supplier names did not match']};
-  const billedToPractice = /st\s*george[’\'s\s.-]*road\s*surgery/i.test(String(a.billed_to??'')) ||
-    /st\s*george[’\'s\s.-]*road\s*surgery/i.test(pdf);
+  // Resolve old assessment warnings using current source evidence, not stored guesses.
+  // A missing legal-entity label is not itself a conflict when the PDF names the
+  // practice as recipient. A different named recipient must still be reviewed.
+  const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(pdf);
+  const recordedRecipient=String(a.billed_to??'').trim();
+  const conflictingRecipient=!!recordedRecipient &&
+    !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
+    !/^(?:unknown|not stated|not extracted|none|n\/?a)$/i.test(recordedRecipient);
+  let latestVersionVerified=false;
+  let latestVersionError='';
+  try {
+    await assertLatestRecordedFrontVersion(pool,r,original.bytes);
+    latestVersionVerified=true;
+  } catch (error) {
+    latestVersionError=error instanceof Error?error.message:String(error);
+  }
   const issues=(base.review_issues as string[]).filter(issue=>
     !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
     !(/supplier identity/i.test(issue) && !!verified) &&
-    !(/billing entity requires review/i.test(issue) && billedToPractice));
+    !(/billing entity/i.test(issue) && practiceRecipient && !conflictingRecipient) &&
+    !(/latest.version copy/i.test(issue) && latestVersionVerified));
   if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
-  if (!billedToPractice) issues.push('Billed-to practice not verified from invoice PDF or recorded recipient');
+  if (!practiceRecipient || conflictingRecipient)
+    issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
+  if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
   if (coding.status!=='latest_bill_account_selected') issues.push('Latest approved/paid supplier bill has no single active account code');
   const explicitHold=r.review_status==='on_hold'||r.review_status==='rejected';
   if (explicitHold) issues.push('Explicit human hold or rejection');
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
+    latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:practiceRecipient&&!conflictingRecipient,
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
     selected_account_code:coding.account_code??null,tax_type:'NONE',
     gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
