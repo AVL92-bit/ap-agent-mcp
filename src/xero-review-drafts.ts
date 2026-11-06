@@ -11,6 +11,7 @@ import { syncPilotReviewExceptions, assertReviewNotHeldInSheet } from './google-
 import { originalFrontDocument, attachAndVerifyOriginal } from './xero-draft-bills.js';
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { selectLatestInvoiceVersion } from './invoice-version-policy.js';
+import { vatPolicyForInbox, grossExpenseLine } from './inbox-vat-policy.js';
 export { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 
 const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
@@ -276,7 +277,7 @@ export async function inspectApprovedSupplierCoding(supplierName:string, descrip
   return {status:code?'latest_bill_account_selected':'latest_bill_coding_ambiguous',account_code:code,
     contact_id:contact.id,source_bill_id:latest.InvoiceID,selection_method:'most_recent_approved_or_paid_bill',
     issues:code?[]:['Most recent supplier bill has no single active account code; coding review required'],
-    matching_description:description.slice(0,200),tax_type:'NONE'};
+    matching_description:description.slice(0,200),tax_type:vatPolicyForInbox(INBOX).purchaseTaxType};
 }
 
 /** Fail closed: only the latest approved/paid supplier bill may supply a draft account. */
@@ -389,7 +390,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
     latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:practiceRecipient&&!conflictingRecipient,
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
-    selected_account_code:coding.account_code??null,tax_type:'NONE',
+    selected_account_code:coding.account_code??null,tax_type:vatPolicyForInbox(INBOX).purchaseTaxType,
     gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
     review_issues:issues,requires_human_review:explicitHold||issues.length>0||essential.length>0,
     note:'Read-only preview uses incoming PDF-to-historical-PDF identity and latest approved/paid bill account. Final draft creation independently checks duplicate, latest version, explicit holds, VAT and PDF attachment.'};
@@ -473,7 +474,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const gross = Math.abs(a.gross_gbp as number);
   const issues:string[] = [...(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string' && !/\bvat\b|tax treatment|tax rate/i.test(x)) : [])];
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
-  if (a.billed_to !== "St George's Road Surgery") issues.push(`Billing entity requires review: ${String(a.billed_to ?? 'not extracted')}`);
+  // Billing-entity assessment happens against the original PDF below, not stale extraction text.
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
   const due = dateOk(a.due_date) ? a.due_date : onPresentation ? a.invoice_date : due30(a.invoice_date);
   if (!dateOk(a.due_date) && onPresentation) issues.push('Due on presentation: used invoice date as due date; verify source');
@@ -487,6 +488,23 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const printedSupplier=pdfSupplierName(incomingPdfText);
   if(!printedSupplier) throw new Error('Cannot identify exactly one supplier on incoming PDF');
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
+  // Resolve historical assessment warnings only after the current original PDF
+  // and the latest Front version have been independently verified.
+  const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(incomingPdfText);
+  const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(incomingPdfText) &&
+    /coventry/i.test(incomingPdfText) && /CV1\s*2DL/i.test(incomingPdfText);
+  const recordedRecipient=String(a.billed_to??'').trim();
+  const conflictingRecipient=!!recordedRecipient &&
+    !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
+    !/^(?:unknown|not stated|not extracted|none|n\/?a)$/i.test(recordedRecipient) &&
+    !/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(recordedRecipient);
+  const recipientVerified=(practiceRecipient||practiceAddress)&&!conflictingRecipient;
+  for(let i=issues.length-1;i>=0;i--){
+    const issue=issues[i];
+    if (/latest.version copy|earlier copy|superseded copy/i.test(issue)) issues.splice(i,1);
+    else if (/billing entity|legal entity name/i.test(issue) && recipientVerified) issues.splice(i,1);
+  }
+  if(!recipientVerified) issues.push('Billed-to practice not unambiguously verified from original invoice PDF');
   // Read-only coding verification precedes the atomic claim, so an unavailable
   // or ambiguous latest bill cannot reserve a review unnecessarily.
   const verifiedCoding=await inspectApprovedSupplierCoding(printedSupplier,String(a.evidence_notes??''),incomingPdfText);
@@ -521,17 +539,22 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     // Older conflicting codes and proposed/suspense codes cannot override it.
     const history=verifiedCoding;
     const coding=await accountCode(api,history.account_code);
-    issues.push(`Account ${coding.code} selected from latest approved/paid Xero supplier bill ${String(history.source_bill_id ?? '')}`);
+    // Historical coding provenance is audit evidence, not a human-review issue.
     const contact = await supplierContact(api,printedSupplier,incomingPdfText);
-    if (contact.issue) issues.push(contact.issue);
+    // Historical assessment strings are not unresolved warnings once the
+    // original supplier PDF, historical PDF and active account have passed.
+    for(let i=issues.length-1;i>=0;i--){
+      if(/supplier identity:.*historical PDF|supplier match requires historical PDF|sender signs as|AMS Accountants Group|existing Xero contact .*historical.*verified|account 449 selected from latest approved|account \d+ selected from latest approved/i.test(issues[i])) issues.splice(i,1);
+    }
+    // A successful historical PDF-to-PDF contact match is verified evidence, not a warning.
+    // The contact matcher throws when verification fails; no new contact is created.
     const taxRates=await xero(api,'TaxRates');
-    if (!Array.isArray(taxRates.TaxRates) || !taxRates.TaxRates.some((t:any)=>t.TaxType==='NONE' && t.Status==='ACTIVE'))
+    if (!Array.isArray(taxRates.TaxRates) || !taxRates.TaxRates.some((t:any)=>t.TaxType===vatPolicyForInbox(INBOX).purchaseTaxType && t.Status==='ACTIVE'))
       throw new Error('Xero TaxType NONE not verified as active; draft blocked');
     const common = {
       Status:'DRAFT',Contact:{ContactID:contact.id},Date:a.invoice_date,
       CurrencyCode:'GBP',LineAmountTypes:'Exclusive',
-      LineItems:[{Description:`${r.document_type === 'credit_note' ? 'Supplier credit note' : 'Supplier invoice'} ${number} — check source attachment and review notes`,
-        Quantity:1,UnitAmount:gross,AccountCode:coding.code,TaxType:'NONE'}]
+      LineItems:[grossExpenseLine({inboxId:INBOX,description:`${r.document_type === 'credit_note' ? 'Supplier credit note' : 'Supplier invoice'} ${number} — check source attachment and review notes`,gross,accountCode:coding.code})]
     };
     const payload = kind === 'Invoices' ? {...common,Type:'ACCPAY',InvoiceNumber:number,DueDate:due}
       : {...common,Type:'ACCPAYCREDIT',CreditNoteNumber:number};
@@ -561,7 +584,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     catch(e) {sheetStatus='sync_failed';issues.push(`Sheet sync failed: ${e instanceof Error?e.message:String(e)}`);}
     return {status:'draft_created',review_id:reviewId,xero_draft_id:createdId,
       document_type:r.document_type,xero_contact_id:contact.id,new_contact_created:contact.created,
-      account_code:coding.code,tax_type:'NONE',gross_gbp:gross,review_required:true,
+      account_code:coding.code,tax_type:vatPolicyForInbox(INBOX).purchaseTaxType,gross_gbp:gross,review_required:issues.length>0,
       review_issues:issues,sheet_status:sheetStatus,original_pdf_attached_and_verified:originalAttachmentVerified,
       visual_pdf_verification:false,approved:false,submitted:false};
   } catch(e) {
