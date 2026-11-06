@@ -1,3 +1,4 @@
+import { vatPolicyForInbox, grossExpenseLine } from "./inbox-vat-policy.js";
 import { xeroFetch } from "./xero-rate-limit.js";
 import type { Pool } from "pg";
 import { readFile } from "node:fs/promises";
@@ -1087,16 +1088,23 @@ export async function createPilotXeroDraftBill(
   contactId: string,
   invoice: DraftInvoice,
   accountCode: string,
-  taxType: string
+  taxType: string,
+  inboxId: string
 ): Promise<string> {
   requirePilotConfiguration();
+  // The legacy writer must not infer VAT treatment from an account default or caller.
+  // Explicit inbox identification is mandatory; unknown inboxes fail closed.
+  const policy = vatPolicyForInbox(inboxId);
+  if (inboxId !== PILOT_INBOX || policy.recoverInputVat || policy.expenseBasis !== "gross" ||
+      policy.purchaseTaxType !== taxType) {
+    throw new Error("Draft VAT treatment does not match explicitly configured pilot inbox policy");
+  }
 
   if (
     tenantId !== PILOT_TENANT_ID ||
     !accessToken ||
     !contactId ||
     !accountCode ||
-    taxType !== "NONE" ||
     !validDate(invoice.invoiceDate) ||
     !validDate(invoice.dueDate)
   ) {
@@ -1127,14 +1135,12 @@ export async function createPilotXeroDraftBill(
             CurrencyCode: "GBP",
             LineAmountTypes: "Exclusive",
             LineItems: [
-              {
-                Description:
-                  `Supplier invoice ${invoice.invoiceNumber}`,
-                Quantity: 1,
-                UnitAmount: invoice.gross,
-                AccountCode: accountCode,
-                TaxType: taxType,
-              },
+              grossExpenseLine({
+                inboxId,
+                description: `Supplier invoice ${invoice.invoiceNumber}`,
+                gross: invoice.gross,
+                accountCode,
+              }),
             ],
           },
         ],

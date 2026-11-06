@@ -361,10 +361,13 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   // A missing legal-entity label is not itself a conflict when the PDF names the
   // practice as recipient. A different named recipient must still be reviewed.
   const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(pdf);
+  const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(pdf) &&
+    /coventry/i.test(pdf) && /CV1\s*2DL/i.test(pdf);
   const recordedRecipient=String(a.billed_to??'').trim();
   const conflictingRecipient=!!recordedRecipient &&
     !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
-    !/^(?:unknown|not stated|not extracted|none|n\/?a)$/i.test(recordedRecipient);
+    !/^(?:unknown|not stated|not extracted|none|n\/?a)$/i.test(recordedRecipient) &&
+    !/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(recordedRecipient);
   let latestVersionVerified=false;
   let latestVersionError='';
   try {
@@ -376,10 +379,10 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const issues=(base.review_issues as string[]).filter(issue=>
     !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
     !(/supplier identity/i.test(issue) && !!verified) &&
-    !(/billing entity/i.test(issue) && practiceRecipient && !conflictingRecipient) &&
+    !(/billing entity|legal entity name/i.test(issue) && (practiceRecipient||practiceAddress) && !conflictingRecipient) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
   if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
-  if (!practiceRecipient || conflictingRecipient)
+  if (!(practiceRecipient||practiceAddress) || conflictingRecipient)
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
   if (coding.status!=='latest_bill_account_selected') issues.push('Latest approved/paid supplier bill has no single active account code');
@@ -388,7 +391,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
-    latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:practiceRecipient&&!conflictingRecipient,
+    latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:(practiceRecipient||practiceAddress)&&!conflictingRecipient,
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
     selected_account_code:coding.account_code??null,tax_type:vatPolicyForInbox(INBOX).purchaseTaxType,
     gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
@@ -488,8 +491,8 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const printedSupplier=pdfSupplierName(incomingPdfText);
   if(!printedSupplier) throw new Error('Cannot identify exactly one supplier on incoming PDF');
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
-  // Resolve historical assessment warnings only after the current original PDF
-  // and the latest Front version have been independently verified.
+  // Resolve assessment warnings only after the current original PDF
+  // and latest Front version have been independently verified.
   const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(incomingPdfText);
   const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(incomingPdfText) &&
     /coventry/i.test(incomingPdfText) && /CV1\s*2DL/i.test(incomingPdfText);
@@ -541,10 +544,12 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     const coding=await accountCode(api,history.account_code);
     // Historical coding provenance is audit evidence, not a human-review issue.
     const contact = await supplierContact(api,printedSupplier,incomingPdfText);
-    // Historical assessment strings are not unresolved warnings once the
-    // original supplier PDF, historical PDF and active account have passed.
+    // Historical coding is verified evidence; remove its provenance notes,
+    // but preserve sender discrepancies for human review.
     for(let i=issues.length-1;i>=0;i--){
-      if(/supplier identity:.*historical PDF|supplier match requires historical PDF|sender signs as|AMS Accountants Group|existing Xero contact .*historical.*verified|account 449 selected from latest approved|account \d+ selected from latest approved/i.test(issues[i])) issues.splice(i,1);
+      // Contact match and account verification have succeeded at this point.
+      // Preserve independent sender discrepancies (e.g. "sender signs as").
+      if (/account \d+ selected from latest approved|supplier identity:.*historical PDF|supplier match requires historical PDF|existing Xero contact .*historical.*verified/i.test(issues[i])) issues.splice(i,1);
     }
     // A successful historical PDF-to-PDF contact match is verified evidence, not a warning.
     // The contact matcher throws when verification fails; no new contact is created.
