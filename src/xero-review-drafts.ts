@@ -339,14 +339,42 @@ export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:str
 export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Record<string,unknown>> {
   if (!idOk(reviewId)) throw new Error('Invalid review ID');
   const data = await pool.query(`SELECT document_type, supplier_name, invoice_number, assessment_json,
+    front_conversation_id, front_message_id, attachment_id, review_status,
     xero_draft_id, xero_draft_status FROM pilot_invoice_reviews WHERE id=$1`,[reviewId]);
   if (data.rowCount !== 1) throw new Error('Review not found');
   const r = data.rows[0]; const a = r.assessment_json ?? {};
-  return {review_id:reviewId,preview_source:'postgres_review',
-    ...previewFields({document_type:r.document_type,supplier_name:r.supplier_name || a.xero_supplier,
-      invoice_number:r.invoice_number,invoice_date:a.invoice_date,gross_gbp:a.gross_gbp,
-      due_date:a.due_date,proposed_account:a.proposed_account,billed_to:a.billed_to,
-      exceptions:Array.isArray(a.exceptions)?a.exceptions:[]},r.xero_draft_id,r.xero_draft_status)};
+  const base = previewFields({document_type:r.document_type,supplier_name:r.supplier_name || a.xero_supplier,
+    invoice_number:r.invoice_number,invoice_date:a.invoice_date,gross_gbp:a.gross_gbp,
+    due_date:a.due_date,proposed_account:a.proposed_account,billed_to:a.billed_to,
+    exceptions:Array.isArray(a.exceptions)?a.exceptions:[]},r.xero_draft_id,r.xero_draft_status);
+  // A review preview must use the SAME PDF evidence and latest-bill coding as
+  // createReviewDraft. Stored names/proposed accounts are not verification.
+  const original=await originalFrontDocument({conversationId:String(r.front_conversation_id),
+    messageId:String(r.front_message_id),attachmentId:String(r.attachment_id)});
+  const pdf=await pdfText(original.bytes);
+  const api=await getPilotXeroReadSessionForLink();
+  const verified=await findSupplierContact(api,String(r.supplier_name??''),pdf);
+  const coding=verified?await inspectApprovedSupplierCoding(String(r.supplier_name??''),'',pdf):
+    {status:'contact_unresolved',account_code:null,issues:['Incoming and historical PDF supplier names did not match']};
+  const billedToPractice = /st\s*george[’\'s\s.-]*road\s*surgery/i.test(String(a.billed_to??'')) ||
+    /st\s*george[’\'s\s.-]*road\s*surgery/i.test(pdf);
+  const issues=(base.review_issues as string[]).filter(issue=>
+    !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
+    !(/supplier identity/i.test(issue) && !!verified) &&
+    !(/billing entity requires review/i.test(issue) && billedToPractice));
+  if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
+  if (!billedToPractice) issues.push('Billed-to practice not verified from invoice PDF or recorded recipient');
+  if (coding.status!=='latest_bill_account_selected') issues.push('Latest approved/paid supplier bill has no single active account code');
+  const explicitHold=r.review_status==='on_hold'||r.review_status==='rejected';
+  if (explicitHold) issues.push('Explicit human hold or rejection');
+  const essential=(base.essential_missing as string[]);
+  return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
+    supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
+    historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
+    selected_account_code:coding.account_code??null,tax_type:'NONE',
+    gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
+    review_issues:issues,requires_human_review:explicitHold||issues.length>0||essential.length>0,
+    note:'Read-only preview uses incoming PDF-to-historical-PDF identity and latest approved/paid bill account. Final draft creation independently checks duplicate, latest version, explicit holds, VAT and PDF attachment.'};
 }
 
 /** Resume the PDF + Sheet stages for an already linked Xero document.
