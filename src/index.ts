@@ -27,7 +27,6 @@ import {
 import {
   testPilotXeroConnection,
   testPilotXeroOrganisation,
-  assessPilotXeroInvoice,
   testPilotXeroAccountingSettings,
 } from "./xero-pilot-test.js";
 import {
@@ -1751,7 +1750,12 @@ Accept: isPdf
       invoice_number,
     }) => {
       try {
-        const assessment=await assessPilotXeroInvoice({supplier_name,invoice_number});
+        // Legacy exact-name verification is retired. Without a Front review/PDF,
+        // this tool performs duplicate detection only and never asserts identity.
+        const assessment={status:'supplier_pdf_verification_requires_review_id',
+          supplier_name_searched:supplier_name,invoice_number_searched:invoice_number,
+          supplier_verified:false, supplier_verification_authority:'check_pilot_xero_draft_readiness',
+          note:'Use review-based PDF-to-PDF readiness to verify the existing Xero ContactID.'};
         // Supplier verification must not prevent an independent Xero duplicate search.
         // Preserve all existing assessment evidence and add both bill and credit matches.
         const session=await getPilotXeroReadSession();
@@ -2263,7 +2267,7 @@ server.registerTool(
   // --------------------------------------------------
   server.registerTool('process_pilot_invoice_to_draft', {
     title:'Record And Draft A Supplier Invoice Or Credit Note',
-    description:'Single supervised intake-to-draft operation. In preview mode it performs no writes. In create mode it verifies the Front attachment, records or reuses its PostgreSQL review, then creates or reconciles the Xero DRAFT and syncs the review Sheet. Human holds and coding uncertainty do not block drafting. Create mode requires XERO_DRAFT_WRITES_ENABLED=true and pilot tenant/inbox scope. Never approves or pays.',
+    description:'Single supervised intake-to-draft operation. Preview is read-only. Create requires PDF-verified existing supplier, latest approved/paid historical account, no explicit human HOLD and all draft safety checks. Create mode requires XERO_DRAFT_WRITES_ENABLED=true and pilot tenant/inbox scope. Never approves or pays.',
     inputSchema:{
       mode:z.enum(['preview','create']).default('preview'),
       conversation_id:z.string().startsWith('cnv_').max(100),
@@ -2303,7 +2307,7 @@ server.registerTool(
           attachmentId:attachment_id,supplierName:supplier_name,invoiceNumber:invoice_number,documentType:document_type});
         const historicalCoding=await inspectApprovedSupplierCoding(supplier_name,assessment.evidence_notes??'').catch((error:unknown)=>({
           status:'history_unavailable',account_code:null,selection_method:null,
-          issues:[`Historical coding unavailable: ${error instanceof Error?error.message:String(error)}; verify ACTIVE fallback account`]
+          issues:[`Historical coding requires incoming PDF verification: ${error instanceof Error?error.message:String(error)}`]
         }));
         if(mode==='preview') {
           const base=previewDirectDraft(candidate);
