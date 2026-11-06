@@ -279,16 +279,15 @@ export async function inspectApprovedSupplierCoding(supplierName:string, descrip
     matching_description:description.slice(0,200),tax_type:'NONE'};
 }
 
-async function accountCode(api: Api, proposed: unknown): Promise<{code:string;issue?:string}> {
-  const preferred = typeof proposed === 'string' ? proposed.match(/^\s*([A-Za-z0-9_-]{1,20})(?:\s|$)/)?.[1] : undefined;
-  const fallback = process.env.XERO_REVIEW_FALLBACK_ACCOUNT_CODE?.trim();
-  const data = await xero(api,'Accounts');
-  const accounts = (data.Accounts ?? []).filter((a:any)=>a.Status === 'ACTIVE' && typeof a.Code === 'string');
-  if (preferred && accounts.some((a:any)=>a.Code === preferred)) return {code:preferred};
-  if (fallback && accounts.some((a:any)=>a.Code === fallback)) return {code:fallback,issue:`Coding uncertain; used configured review fallback account ${fallback}`};
-  const suspense = accounts.filter((a:any)=>/^(suspense|unallocated|uncategorised|uncategorized)( costs| expenses)?$/i.test(a.Name ?? ''));
-  if (suspense.length === 1) return {code:suspense[0].Code,issue:`Coding uncertain; used Xero suspense account ${suspense[0].Code}`};
-  throw new Error('No valid proposed or review fallback Xero account; configure XERO_REVIEW_FALLBACK_ACCOUNT_CODE');
+/** Fail closed: only the latest approved/paid supplier bill may supply a draft account. */
+async function accountCode(api: Api, historicallyVerified: unknown): Promise<{code:string}> {
+  if (typeof historicallyVerified !== 'string' || !/^[A-Za-z0-9_-]{1,20}$/.test(historicallyVerified))
+    throw new Error('No single account code from the latest approved/paid Xero supplier bill; draft blocked');
+  const data=await xero(api,'Accounts');
+  if (!Array.isArray(data.Accounts)) throw new Error('Xero accounts validation unavailable');
+  if (!data.Accounts.some((a:any)=>a.Status==='ACTIVE' && String(a.Code)===historicallyVerified))
+    throw new Error('Historical account code is not ACTIVE in Xero; draft blocked');
+  return {code:historicallyVerified};
 }
 
 export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:string;messageId:string;attachmentId:string;supplierName:string;invoiceNumber:string;documentType:'invoice'|'credit_note'}):Promise<Record<string,unknown>> {
@@ -442,6 +441,11 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const printedSupplier=pdfSupplierName(incomingPdfText);
   if(!printedSupplier) throw new Error('Cannot identify exactly one supplier on incoming PDF');
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
+  // Read-only coding verification precedes the atomic claim, so an unavailable
+  // or ambiguous latest bill cannot reserve a review unnecessarily.
+  const verifiedCoding=await inspectApprovedSupplierCoding(printedSupplier,String(a.evidence_notes??''),incomingPdfText);
+  if (verifiedCoding.status!=='latest_bill_account_selected' || typeof verifiedCoding.account_code!=='string')
+    throw new Error(`Latest supplier bill coding not verified: ${JSON.stringify(verifiedCoding.issues ?? [])}`);
 
   // Reserve the review BEFORE any Xero write. A failed/indeterminate request must be reconciled,
   // not blindly retried. Unique review record prevents concurrent draft creation.
@@ -467,20 +471,16 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
       }
       throw new Error(`Existing Xero document(s) ${matches.map(m=>m.id).join(', ')} match this number; reconcile supplier, document type or punctuation before drafting`);
     }
-    // Historical-coding lookup is advisory: a transient Xero history failure must
-    // not block drafting when an ACTIVE fallback nominal can be verified.
-    const history=await inspectApprovedSupplierCoding(printedSupplier,String(a.evidence_notes??''),incomingPdfText).catch((error:unknown)=>({
-      status:'history_unavailable',account_code:null,
-      issues:[`Historical coding lookup unavailable: ${error instanceof Error?error.message:String(error)}; fallback nominal requires review`]
-    }));
-    issues.push(...((history.issues as string[])??[]));
-    const historicalCode=typeof history.account_code==='string'?history.account_code:null;
-    const coding = await accountCode(api,historicalCode??a.proposed_account);
-    if (historicalCode) issues.push(`Nominal code ${historicalCode} selected from approved/paid Xero supplier bills; verify source descriptions`);
-    if (coding.issue) issues.push(coding.issue);
+    // Mandatory historical precedent: the most recent approved/paid bill wins.
+    // Older conflicting codes and proposed/suspense codes cannot override it.
+    const history=verifiedCoding;
+    const coding=await accountCode(api,history.account_code);
+    issues.push(`Account ${coding.code} selected from latest approved/paid Xero supplier bill ${String(history.source_bill_id ?? '')}`);
     const contact = await supplierContact(api,printedSupplier,incomingPdfText);
     if (contact.issue) issues.push(contact.issue);
-    if (!a.proposed_account && !historicalCode) issues.push('No historically supported nominal code supplied');
+    const taxRates=await xero(api,'TaxRates');
+    if (!Array.isArray(taxRates.TaxRates) || !taxRates.TaxRates.some((t:any)=>t.TaxType==='NONE' && t.Status==='ACTIVE'))
+      throw new Error('Xero TaxType NONE not verified as active; draft blocked');
     const common = {
       Status:'DRAFT',Contact:{ContactID:contact.id},Date:a.invoice_date,
       CurrencyCode:'GBP',LineAmountTypes:'Exclusive',
