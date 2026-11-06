@@ -65,7 +65,7 @@ export function assessHistoricalEvidence(history: HistoryResult) {
     const distinctInvoices = new Set(members.map(x => x.invoice_number)).size;
     const hasAmbiguousClassification = category === "other_or_unclassified";
     const validAccount = dominant?.name && dominant.account_status === "ACTIVE";
-    // Conservative, human-review-only suggestion; never authorises a draft.
+    // Diagnostic frequency only. Draft account selection is authoritative in inspectApprovedSupplierCoding (latest approved/paid bill).
     const sufficient = history.search_complete && !hasAmbiguousClassification &&
       distinctInvoices >= 5 && members.length >= 5 &&
       dominant?.line_count / members.length >= 0.9 && validAccount;
@@ -88,14 +88,15 @@ export function assessHistoricalEvidence(history: HistoryResult) {
         ...(distinctInvoices < 5 ? ["fewer_than_five_distinct_invoices"] : []),
         ...(hasAmbiguousClassification ? ["unclassified_description"] : []),
         ...(!validAccount ? ["active_account_name_not_verified"] : []),
-        ...(dominant && dominant.line_count / members.length < 0.9 ? ["conflicting_historical_codes"] : []),
+        ...(dominant && dominant.line_count / members.length < 0.9 ? ["historical_code_variation_diagnostic_only"] : []),
       ],
-      requires_human_accounting_validation: true,
+      requires_human_accounting_validation: false,
+      draft_account_selection_authority: "latest_approved_or_paid_supplier_bill_in_pdf_verified_draft_path",
     };
   });
   return {
     status: "ok",
-    analysis_type: "historical_evidence_with_conditional_human_review_suggestions",
+    analysis_type: "historical_frequency_diagnostic_not_draft_authority",
     search_complete: history.search_complete,
     stop_reason: history.stop_reason ?? (history.search_complete ? "end_of_history" : "unknown"),
     pages_scanned: history.pages_scanned ?? null,
@@ -113,6 +114,7 @@ export function assessHistoricalEvidence(history: HistoryResult) {
       "Inbox-specific VAT recovery rules remain unchanged",
     ],
     account_code_selected: false,
+    account_code_selection_deferred_to: "inspectApprovedSupplierCoding",
     bills_created: false,
     bills_modified: false,
   };
