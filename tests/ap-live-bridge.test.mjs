@@ -7,7 +7,7 @@ test('complete executing MCP tool is application-controlled and explicitly gated
  assert.match(s,/registerTool\("run_ap_inbox"/);
  assert.match(s,/AP_INBOX_RUNNER_ENABLED/);
  assert.match(s,/executeCompleteApInbox\(/);
- assert.match(s,/makeDraftCommand:\(conversation,attachment\)=>makeLiveDraftCommand\(conversation,attachment,runClient\)/);
+ assert.match(s,/makeDraftCommand:\(conversation,attachment\)=>makeLiveDraftCommand\(conversation,attachment,activeRunClient\)/);
  assert.match(s,/xero:makeLiveXeroDraftPort\(\)/);
 });
 test('live PDF extraction uses verified Front message and attachment IDs',()=>{
