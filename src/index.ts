@@ -1,3 +1,13 @@
+import { ensureApContactIntent } from './ap-contact-write-intent.js';
+import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
+import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-journal.js';
+import { executeCompleteApInbox } from "./ap-inbox-execution.js";
+import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
+import { makeLiveDraftCommand } from "./ap-live-document-ports.js";
+import { appendApInboxException } from "./google-sheets-review.js";
+import { scanApFrontInbox } from "./ap-front-inbox-scan.js";
+import { extractInvoiceCandidates } from "./invoice-candidates.js";
+import { collectFrontMessagePages } from "./front-message-pages.js";
 import { xeroFetch } from "./xero-rate-limit.js";
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { inspectApprovedSupplierCoding, resolveExistingXeroSupplierForReview } from './xero-review-drafts.js';
@@ -188,38 +198,18 @@ function attachmentId(
 
 async function getConversationMessages(
   conversationId: string,
-  limit: number
-): Promise<{
-  messages: FrontMessage[];
-  hasMore: boolean;
-}> {
-  const response = await frontGet(
-    `/conversations/${encodeURIComponent(
-      conversationId
-    )}/messages?limit=${limit}`
-  );
-
-  if (!response.ok) {
-    throw new Error(
-      `Unable to retrieve Front conversation messages (HTTP ${response.status})`
-    );
-  }
-
-  const data = (await response.json()) as {
-    _results?: FrontMessage[];
-    _pagination?: { next?: string };
-  };
-
-  if (!Array.isArray(data._results)) {
-    throw new Error(
-      "Front returned an unexpected messages response"
-    );
-  }
-
-  return {
-    messages: data._results,
-    hasMore: Boolean(data._pagination?.next),
-  };
+  _limit: number
+): Promise<{ messages: FrontMessage[]; hasMore: boolean }> {
+  return collectFrontMessagePages<FrontMessage>(conversationId, async (url) => {
+    const response = await frontGet(url);
+    if (!response.ok) {
+      throw new Error(`Unable to retrieve Front conversation messages (HTTP ${response.status})`);
+    }
+    return await response.json() as {
+      _results?: FrontMessage[];
+      _pagination?: {next?: string | null};
+    };
+  });
 }
 async function frontWrite(
   path: string,
@@ -244,8 +234,8 @@ async function frontWrite(
   });
 }
 const AP_FRONT_TAGS = {
-  reviewed: "AP agent reviewed",
-  human_review: "Human Review",
+  reviewed: "AP Agent reviewed",
+  human_review: "Human review",
   no_attachment: "No attachment - Human review",
 } as const;
 
@@ -353,6 +343,19 @@ async function archiveApFrontConversation(
     );
   }
 }
+/** Deterministic classification for attachment-free Front correspondence. */
+function classifyAttachmentFreeCorrespondence(messages: FrontMessage[], conversationSubject = ""):
+  "finance_correspondence" | "routine_non_finance" | "requires_attachment_review" {
+  // Unknown, unreadable or non-PDF attachments must not be archived as routine mail.
+  if (messages.some(message => (message.attachments ?? []).length > 0)) {
+    return "requires_attachment_review";
+  }
+  const financeWords = /\b(invoice|invoices|credit\s*note|statement|reminder|overdue|payment|bill|billing|accounts\s+payable|balance\s+due)\b/i;
+  return financeWords.test(conversationSubject) || messages.some(message => financeWords.test(
+    [message.subject, message.text, message.blurb, message.body].filter(Boolean).join(" ")
+  )) ? "finance_correspondence" : "routine_non_finance";
+}
+
 function safeError(
   label: string,
   error: unknown
@@ -536,8 +539,8 @@ function buildMcpServer() {
     {
       title: "Scan Enabled AP Inboxes",
       description:
-        "Read-only discovery of ONLY unassigned, open conversations in the configured Front inbox. Front filters status before pagination. Hard-capped at 6 pages. Previously assessed conversations are not assumed processed in Xero.",
-      inputSchema: { max_pages: z.number().int().min(1).max(40).default(6).describe("Requested pages for routine discovery. The server enforces a hard maximum of 6 pages regardless of the requested value; use a separate deliberate audit for deep history.") },
+        "Read-only discovery of ONLY unassigned, open conversations in the configured Front inbox. Front filters status before pagination. Traverses every available Front page up to a configurable operational ceiling; reports incomplete traversal explicitly. Previously assessed conversations are not assumed processed in Xero.",
+      inputSchema: { max_pages: z.number().int().min(1).max(1000).default(1000).describe("Maximum pages to traverse; defaults to 1000. If Front has more pages, queue_incomplete is true and no full-coverage claim is permitted.") },
     },
     async ({ max_pages }) => {
       try {
@@ -564,11 +567,11 @@ function buildMcpServer() {
         }> = [];
         const seenConversationIds = new Set<string>();
         const visitedPages = new Set<string>();
-        const maxPages = Math.min(max_pages, 6);
+        const maxPages = max_pages;
 
         // Front's inbox-list endpoint supports server-side status filtering.
         // Filtering BEFORE pagination prevents archived/assigned conversations
-        // from consuming the six-page routine AP discovery budget.
+        // from consuming the AP discovery budget.
         const inboxPath = `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
         const statusFilterKey = "q[statuses]";
         const statusFilterValue = "unassigned";
@@ -749,7 +752,7 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           front_page_size_observed: pageDiagnostics.map(page => page.returned),
           queue_incomplete: scanTruncated,
           queue_next_action: scanTruncated
-            ? "The six-page safety cap was reached. This is a partial queue; do not claim all unassigned conversations were reviewed."
+            ? "Front pagination exceeded the requested page limit. This is a partial queue; do not claim all unassigned conversations were reviewed."
             : "Front returned no additional page; eligible inbox queue traversal completed.",
           priority_conversations:
             priorityConversations,
@@ -758,7 +761,7 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           has_more: scanTruncated,
           requested_max_pages: max_pages,
           effective_max_pages: maxPages,
-          server_page_cap_applied: max_pages > maxPages,
+          server_page_cap_applied: false,
           scan_mode: "unassigned_open_inbox_only", 
           front_filter_applied_before_pagination: true,
           front_filter_parameter: "q[statuses]=unassigned",
@@ -768,8 +771,8 @@ const conversations = Array.from(new Map(allConversations.filter((c) => typeof c
           ordering: "updated_at_desc_within_fetched_pages",
           latest_in_inbox_guaranteed: false,
           ordering_verified_by_front: false,
-          ordering_limitation: "Only unassigned Front conversations are requested. Local updated_at sorting applies to fetched pages; ordering is not guaranteed if the six-page cap is reached.",
-          coverage_note: scanTruncated ? "Front returned another pagination link after six pages; eligibility of conversations beyond the cap is unknown. Queue coverage incomplete." : "All unassigned inbox conversations returned by Front were fetched.",
+          ordering_limitation: "Only unassigned Front conversations are requested. Local updated_at sorting applies to fetched pages; ordering is not guaranteed if the configured page limit is reached.",
+          coverage_note: scanTruncated ? "Front returned another pagination link after the page limit; eligibility of conversations beyond the cap is unknown. Queue coverage incomplete." : "All unassigned inbox conversations returned by Front were fetched.",
           assessed_does_not_mean_xero_processed: true,
           xero_status_reconciliation: "not_performed; previous assessment is not a Xero status check",
 pages_scanned: visitedPages.size,
@@ -794,6 +797,181 @@ pages_scanned: visitedPages.size,
   );
 
   // --------------------------------------------------
+  // SERVER-OWNED, BOUNDED CORRESPONDENCE TRIAGE
+  // This is deliberately NOT the full AP invoice runner: attachment-bearing
+  // conversations are left untouched until Xero reconciliation is implemented.
+  // --------------------------------------------------
+  // Read-only integration checkpoint: complete Front inbox enumeration.
+  // Do not expose an execute switch until the document writer and Sheet port
+  // have been connected and end-to-end verified.
+  server.registerTool("scan_ap_inbox_complete", {
+    title: "Scan complete AP inbox (read only)",
+    description: "Enumerate all unassigned AP conversations, all message pages and all attachment identities. No Front, Xero or Sheet writes.",
+    inputSchema: {},
+  }, async () => {
+    try {
+      const { inboxId } = frontConfig();
+      const conversations = await scanApFrontInbox({
+        inboxId,
+        fetchPage: async (url) => {
+          const response = await frontGet(url);
+          if (!response.ok) throw new Error(`Front inbox scan HTTP ${response.status}`);
+          return await response.json();
+        },
+      });
+      return toolResult({status:"ok",read_only:true,complete:true,
+        conversations:conversations.length,
+        attachments:conversations.reduce((sum,c)=>sum+c.attachments.length,0),
+        items:conversations.map(c=>({conversation_id:c.id,attachment_count:c.attachments.length,
+          attachments:c.attachments.map(a=>({id:a.id,filename:a.filename,message_id:a.messageId}))}))});
+    } catch (error) { return safeError("Complete Front inbox scan failed; no writes performed",error); }
+  });
+
+  // Application-owned complete scan and draft-only execution. Explicit opt-in,
+  // never triggered by the read-only scanner or by correspondence triage.
+  server.registerTool("run_ap_inbox", {
+    title: "Run complete AP inbox (draft only)",
+    description: "Scan all unassigned AP conversations and create/reconcile Xero DRAFT documents. Requires explicit execute=true and server-side write enablement.",
+    inputSchema: {execute:z.boolean().default(false)},
+  }, async ({execute}) => {
+    if (!execute) return toolResult({status:"dry_run_only",message:"Set execute=true to run the server-controlled AP inbox. No writes performed."});
+    if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
+    if (!process.env.DATABASE_URL) return toolFailure('DATABASE_URL required for exclusive inbox execution; no writes performed');
+    const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+    let runClient;
+    try {
+      runClient = await runPool.connect();
+      const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
+      if (lock.rows[0]?.acquired !== true) return toolFailure('Another AP inbox run holds the PostgreSQL execution lock');
+      await ensureApDocumentJournal(runClient);
+      await ensureApContactIntent(runClient);
+      await ensureApSheetOutbox(runClient);
+      const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
+      const sheetBefore=await sheetOutbox.flush();
+      const {inboxId}=frontConfig();
+      const result=await executeCompleteApInbox({
+        inboxId,
+        fetchFrontPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json();},
+        makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,runClient),
+        xero:makeLiveXeroDraftPort(),
+        applyTag:async (id,tag)=>{
+          if(tag==='AP Agent reviewed')await applyApFrontTag(id,'reviewed');
+          else if(tag==='Human review')await applyApFrontTag(id,'human_review');
+          else if(tag==='No attachment - Human review')await applyApFrontTag(id,'no_attachment');
+          else throw new Error('Unknown AP Front tag');
+        },
+        archive:archiveApFrontConversation,
+        reportReview:row=>sheetOutbox.enqueue(row),
+        journal:makeApDocumentJournal(runClient),
+      });
+      const sheetAfter=await sheetOutbox.flush();
+      return toolResult({status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}});
+    } catch(error){return safeError('AP inbox run failed; inspect for partial writes before retry',error);}
+    finally {
+      if (runClient) {
+        try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
+      }
+      await runPool.end();
+    }
+  });
+
+  server.registerTool("run_ap_correspondence_triage", {
+    title: "Run AP Attachment-Free Correspondence Triage",
+    description: "Application-controlled, paginated triage of attachment-free unassigned Front conversations. Defaults to dry run. Never archives any conversation containing attachments, or with incomplete message history. Does not process invoices or access Xero.",
+    inputSchema: {
+      execute: z.boolean().default(false),
+      max_pages: z.number().int().min(1).max(1000).default(1000),
+      max_conversations: z.number().int().min(1).max(1000).default(1000),
+    },
+  }, async ({ execute, max_pages, max_conversations }) => {
+    try {
+      const { inboxId } = frontConfig();
+      const inboxPath = `/inboxes/${encodeURIComponent(inboxId)}/conversations`;
+      const filter = "q[statuses]";
+      let nextPath: string | null = `${inboxPath}?${new URLSearchParams({[filter]:"unassigned",limit:"100"})}`;
+      const visited = new Set<string>();
+      const ids = new Set<string>();
+      const conversations: Array<{id:string;subject:string}> = [];
+      let incomplete = false;
+      while (nextPath !== null) {
+        if (visited.size >= max_pages) { incomplete = true; break; }
+        if (visited.has(nextPath)) throw new Error("Front repeated a conversation page");
+        visited.add(nextPath);
+        const response = await frontGet(nextPath);
+        if (!response.ok) throw new Error(`Front conversation listing HTTP ${response.status}`);
+        const data = await response.json() as {
+          _results?: Array<{id?:string;subject?:string;status?:string;assignee?:unknown}>;
+          _pagination?:{next?:string|null};
+        };
+        if (!Array.isArray(data._results)) throw new Error("Invalid Front conversation page");
+        for (const c of data._results) {
+          if (c.id && !ids.has(c.id) && c.status === "unassigned" && c.assignee == null) {
+            ids.add(c.id);
+            conversations.push({id:c.id,subject:c.subject??""});
+          }
+        }
+        const next = data._pagination?.next;
+        if (!next) {nextPath=null;break;}
+        const u = new URL(next,"https://api2.frontapp.com");
+        if (u.protocol!=="https:" || !["api2.frontapp.com","medicspot-limited.api.frontapp.com"].includes(u.hostname) ||
+            u.pathname!==inboxPath || u.username || u.password || u.searchParams.has("q") ||
+            u.searchParams.has("q[status_categories]") || u.searchParams.has("q[status_ids]") ||
+            u.searchParams.getAll(filter).some(v=>v!=="unassigned")) {
+          throw new Error("Unsafe Front pagination URL");
+        }
+        u.searchParams.set(filter,"unassigned");
+        nextPath=u.href;
+      }
+      if (conversations.length > max_conversations) incomplete = true;
+      // Never execute a partial queue: an operator must raise the limits or
+      // retry before any writes, rather than silently processing a subset.
+      if (execute && incomplete) return toolFailure("Correspondence queue incomplete; no Front writes performed");
+      const outcomes: Array<{conversation_id:string;outcome:string;action:string;error?:string;attachments?:Array<{message_id:string;attachment_id:string;filename:string;kind:string}>}> = [];
+      for (const c of conversations.slice(0,max_conversations)) {
+        try {
+          const listing = await getConversationMessages(c.id,100);
+          if (listing.hasMore || !listing.messages.length) {
+            outcomes.push({conversation_id:c.id,outcome:"incomplete_messages",action:"no_change"});continue;
+          }
+          const classification = classifyAttachmentFreeCorrespondence(listing.messages,c.subject);
+          if (classification === "requires_attachment_review") {
+            // Every attachment is enumerated and returned as an explicit pending
+            // work item. Never treat its Front conversation as completed merely
+            // because an assessment exists in PostgreSQL.
+            const attachments = listing.messages.flatMap(m => (m.attachments ?? []).map(a => ({
+              message_id: m.id ?? "",
+              attachment_id: attachmentId(a) ?? "",
+              filename: a.filename ?? "",
+              kind: a.content_type === "application/pdf" ? "pdf_pending_xero" : "unsupported_attachment_pending_review",
+            })));
+            outcomes.push({conversation_id:c.id,outcome:classification,action:"pending_xero_processing",attachments});continue;
+          }
+          if (execute) {
+            if (classification === "routine_non_finance") {
+              await applyApFrontTag(c.id,"reviewed");
+              await archiveApFrontConversation(c.id);
+            } else {
+              await applyApFrontTag(c.id,"no_attachment");
+            }
+          }
+          outcomes.push({conversation_id:c.id,outcome:classification,action:execute
+            ? classification === "routine_non_finance" ? "tagged_and_archived" : "tagged_kept_open"
+            : "dry_run"});
+        } catch (error) {
+          outcomes.push({conversation_id:c.id,outcome:"technical_failure",action:"no_change",
+            error:error instanceof Error?error.message:"Unknown failure"});
+        }
+      }
+      return toolResult({status:"ok",execute,queue_complete:!incomplete,pages_scanned:visited.size,
+        conversations_discovered:conversations.length,conversations_examined:outcomes.length,
+        outcomes,
+        pending_pdf_count:outcomes.reduce((n,o)=>n+(o.attachments??[]).filter(a=>a.kind==="pdf_pending_xero").length,0),
+        pending_unsupported_attachment_count:outcomes.reduce((n,o)=>n+(o.attachments??[]).filter(a=>a.kind!=="pdf_pending_xero").length,0),
+        invoice_processing_implemented:false});
+    } catch (error) {return safeError("AP correspondence batch triage failed",error);}
+  });
+
+  // --------------------------------------------------
   // FRONT: GET VERIFIED CONVERSATION MESSAGES
   // --------------------------------------------------
 
@@ -809,8 +987,8 @@ pages_scanned: visitedPages.size,
         "Applies the agreed human-review Front tags to conversations " +
         "in the permitted AP inbox. Does not archive conversations, " +
         "mark invoices as processed, or modify Xero. " +
-        "Routine non-finance archiving and completed-draft tagging " +
-        "are unavailable until independently verified.",
+        "Routine non-finance messages without attachments can be archived after server-side keyword verification. " +
+        "Draft verification still requires Xero reconciliation.",
       inputSchema: {
         conversation_id: z
           .string()
@@ -838,13 +1016,9 @@ pages_scanned: visitedPages.size,
           );
         }
 
-        if (
-          outcome === "routine_non_finance" ||
-          outcome === "draft_verified"
-        ) {
+        if (outcome === "draft_verified") {
           return toolFailure(
-            "This outcome requires independent verification " +
-            "and is not enabled for Front changes"
+            "Draft verification must reconcile every relevant document against Xero before archiving"
           );
         }
 
@@ -871,33 +1045,31 @@ pages_scanned: visitedPages.size,
             0
           );
 
-        if (
-          outcome === "no_attachment_human_review" &&
-          attachmentCount !== 0
-        ) {
-          return toolFailure(
-            "Conversation contains an attachment; " +
-            "use human_review instead"
-          );
+        const classification = classifyAttachmentFreeCorrespondence(messageListing.messages);
+        if (outcome === "routine_non_finance") {
+          if (classification !== "routine_non_finance") {
+            return toolFailure("Cannot archive: correspondence is finance-related or contains attachments");
+          }
+          await applyApFrontTag(conversation_id, "reviewed");
+          await archiveApFrontConversation(conversation_id);
+          return toolResult({
+            status: "ok", conversation_id, outcome, reason,
+            tag_applied: AP_FRONT_TAGS.reviewed,
+            attachment_count: 0, conversation_archived: true,
+            xero_accessed: false, bills_created: false,
+          });
         }
-
-        const tag =
-          outcome === "no_attachment_human_review"
-            ? "no_attachment"
-            : "human_review";
-
+        if (outcome === "no_attachment_human_review" && classification !== "finance_correspondence") {
+          return toolFailure("No-attachment finance triage requires finance keywords and zero attachments");
+        }
+        const tag = outcome === "no_attachment_human_review"
+          ? "no_attachment" : "human_review";
         await applyApFrontTag(conversation_id, tag);
-
         return toolResult({
-          status: "ok",
-          conversation_id,
-          outcome,
-          reason,
+          status: "ok", conversation_id, outcome, reason,
           tag_applied: AP_FRONT_TAGS[tag],
-          attachment_count: attachmentCount,
-          conversation_archived: false,
-          xero_accessed: false,
-          bills_created: false,
+          attachment_count: attachmentCount, conversation_archived: false,
+          xero_accessed: false, bills_created: false,
         });
       } catch (error) {
         return safeError(
@@ -1348,6 +1520,7 @@ Accept: isPdf
             extraction_method: "docx_text",
             extracted_characters: invoiceText.length,
             invoice_text: invoiceText,
+            extracted_candidates: extractInvoiceCandidates(invoiceText),
             requires_field_verification: true,
             invoice_ready_for_draft: false,
             bills_created: false,
@@ -1467,6 +1640,7 @@ Accept: isPdf
             invoiceText.length,
           invoice_text:
             invoiceText,
+          extracted_candidates: extractInvoiceCandidates(invoiceText),
           requires_field_verification:
             true,
           invoice_ready_for_draft:
@@ -2734,7 +2908,7 @@ server.registerTool(
         conversation_id: string;
         message_id: string;
         attachment_id: string;
-        action: "skip_existing" | "assess" | "manual_review";
+        action: "assess" | "manual_review";
         review_id: string | null;
         review_status: string | null;
         reason?: string;
@@ -2814,7 +2988,7 @@ server.registerTool(
             );
 
             if (row) {
-              item.action = "skip_existing";
+              item.action = "assess";
               item.review_id = row.id;
               item.review_status = row.review_status;
             }
@@ -2844,15 +3018,13 @@ server.registerTool(
         assessed_count: results.filter(
           (item) => item.action === "assess"
         ).length,
-        skipped_count: results.filter(
-          (item) => item.action === "skip_existing"
-        ).length,
+        skipped_count: 0,
         manual_review_count: results.filter(
           (item) => item.action === "manual_review"
         ).length,
         no_writes: true,
         note:
-          "PostgreSQL awaiting_review never overrides a Google Sheets human hold",
+          "An existing PostgreSQL assessment is not proof of Xero completion; the invoice must be reconciled against Xero before it can be considered processed",
       });
     }
   );

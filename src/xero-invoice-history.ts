@@ -1,3 +1,4 @@
+import { vatPolicyForInbox } from "./inbox-vat-policy.js";
 import { xeroFetch } from "./xero-rate-limit.js";
 import {
   createCipheriv,
@@ -567,7 +568,7 @@ const supplierQuery = search?.supplier_name?.trim() ?? "";
       historical_examples: examples,
       sample_limited: !reachedEnd || hitLineLimit,
       historical_data_is_evidence_only: true,
-      pilot_default_tax_type_for_future_proposals: "NONE",
+      pilot_default_tax_type_for_future_proposals: vatPolicyForInbox(PILOT_INBOX).purchaseTaxType,
       gross_cost_coding_requires_human_review: true,
       account_code_selected: false,
       bills_created: false,
