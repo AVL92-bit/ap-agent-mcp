@@ -840,7 +840,8 @@ pages_scanned: visitedPages.size,
     const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
     let runClient: PoolClient | undefined;
     try {
-      runClient = await runPool.connect();
+      const activeRunClient = await runPool.connect();
+      runClient = activeRunClient;
       const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
       if (lock.rows[0]?.acquired !== true) return toolFailure('Another AP inbox run holds the PostgreSQL execution lock');
       await ensureApDocumentJournal(runClient);
@@ -852,7 +853,7 @@ pages_scanned: visitedPages.size,
       const result=await executeCompleteApInbox({
         inboxId,
         fetchFrontPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as {_results?: unknown[]; _pagination?: {next?: string | null}};},
-        makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,runClient),
+        makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,activeRunClient),
         xero:makeLiveXeroDraftPort(),
         applyTag:async (id,tag)=>{
           if(tag==='AP Agent reviewed')await applyApFrontTag(id,'reviewed');
