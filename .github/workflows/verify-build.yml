@@ -1,4 +1,3 @@
-
 name: Verify AP Agent Build
 
 on:
@@ -10,18 +9,24 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
+          node-version: '22'
       - name: Install dependencies
-        run: npm install
-
+        run: npm install --no-audit --no-fund
       - name: Build TypeScript
         run: npm run build
+      - name: Run application tests
+        run: node --experimental-strip-types --test tests/*.test.mjs
+      - name: Verify OCR binaries in CI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils
+          tesseract --version
+          pdftoppm -v
+      - name: Build production container (includes OCR and TypeScript)
+        run: docker build -t ap-agent-build-check .
