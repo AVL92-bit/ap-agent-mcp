@@ -23,7 +23,7 @@ import { PDFParse } from "pdf-parse";
 import mammoth from "mammoth";
 import { pdfToPng } from "pdf-to-png-converter";
 import { getPilotXeroReadSession } from "./xero-pilot-test.js";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 import {
   findExistingPilotReview,
   recordPilotAssessment,
@@ -816,7 +816,7 @@ pages_scanned: visitedPages.size,
         fetchPage: async (url) => {
           const response = await frontGet(url);
           if (!response.ok) throw new Error(`Front inbox scan HTTP ${response.status}`);
-          return await response.json();
+          return await response.json() as {_results?: unknown[]; _pagination?: {next?: string | null}};
         },
       });
       return toolResult({status:"ok",read_only:true,complete:true,
@@ -838,7 +838,7 @@ pages_scanned: visitedPages.size,
     if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
     if (!process.env.DATABASE_URL) return toolFailure('DATABASE_URL required for exclusive inbox execution; no writes performed');
     const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
-    let runClient;
+    let runClient: PoolClient | undefined;
     try {
       runClient = await runPool.connect();
       const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
@@ -851,7 +851,7 @@ pages_scanned: visitedPages.size,
       const {inboxId}=frontConfig();
       const result=await executeCompleteApInbox({
         inboxId,
-        fetchFrontPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json();},
+        fetchFrontPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as {_results?: unknown[]; _pagination?: {next?: string | null}};},
         makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,runClient),
         xero:makeLiveXeroDraftPort(),
         applyTag:async (id,tag)=>{
