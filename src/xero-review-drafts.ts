@@ -417,16 +417,17 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     !(/supplier identity/i.test(issue) && !!verified) &&
     !(/billing entity|legal entity name/i.test(issue) && ((practiceRecipient||practiceAddress)&&!conflictingRecipient || historicalRecipientMatch)) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
-  if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
+  if (!verified) issues.push('Supplier verification required — draft may proceed with a provisional or best-candidate Xero contact; finance must verify');
   if (!(practiceRecipient||practiceAddress||historicalRecipientMatch) || (conflictingRecipient && !historicalRecipientMatch))
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
-  if (coding.status!=='latest_bill_account_selected') issues.push('Latest approved/paid supplier bill has no single active account code');
+  if (coding.status!=='latest_bill_account_selected') issues.push('Historical coding unverified — draft may proceed using a validated fallback expense account; finance must review');
   const explicitHold=r.review_status==='on_hold'||r.review_status==='rejected';
   if (explicitHold) issues.push('Explicit human hold or rejection');
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
+    supplier_verification_blocks_draft:false,
     latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:(practiceRecipient||practiceAddress)&&!conflictingRecipient,
     billed_to_historical_supplier_verified:historicalRecipientMatch,
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
@@ -588,6 +589,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     // Historical coding provenance is audit evidence, not a human-review issue.
     const contact = await supplierContact(api,printedSupplier || supplier,incomingPdfText);
     if (contact.issue) issues.push(contact.issue);
+    // A provisional or best-candidate contact is a finance review exception, not a draft veto.
     if (!contact.created) {
       const cleaned=reconcileInvoiceReviewIssues(issues,{supplierVerified:!contact.issue || !/without PDF-to-PDF confirmation|verify identity/i.test(contact.issue),vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
       issues.splice(0,issues.length,...cleaned);
