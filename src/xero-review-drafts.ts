@@ -12,6 +12,7 @@ import { originalFrontDocument, attachAndVerifyOriginal } from './xero-draft-bil
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 import { vatPolicyForInbox, grossExpenseLine } from './inbox-vat-policy.js';
+import { reconcileInvoiceReviewIssues, billingRecipientCheck } from './ap-invoice-review-rules.js';
 export { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 
 const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
@@ -52,8 +53,8 @@ function previewFields(data: DirectDraftPreview, linkedId?: string | null, attem
   if (!dateOk(data.invoice_date)) essential_missing.push('Valid document date not available');
   if (!money(Math.abs(data.gross_gbp ?? 0))) essential_missing.push('Valid non-zero gross amount not available');
   if (!data.proposed_account?.trim()) review_issues.push('Nominal code needs review; valid Xero fallback account required');
-  if (!dateOk(data.due_date) && dateOk(data.invoice_date)) review_issues.push('Due date defaults to invoice date + 30 days');
-  if (data.billed_to && data.billed_to !== "St George's Road Surgery") review_issues.push('Billing entity requires review');
+  // A standard due-date default is informational, not an approval exception.
+  if (data.billed_to && !/st\\s*george[’'s\\s.-]*road\\s*surgery/i.test(data.billed_to)) review_issues.push('Billing entity requires review');
   if (linkedId) essential_missing.push('Already linked to an existing Xero document');
   if (attempt && !linkedId) essential_missing.push('Previous draft attempt needs reconciliation');
   return {status:linkedId?'existing_xero_document':essential_missing.length?'requires_source_data_or_reconciliation':'draft_candidate',
@@ -202,6 +203,25 @@ async function historicalInvoiceNameMatches(api:Api,contactId:string,incomingPdf
     }
   }
   return {matched:false};
+}
+/** Compare the latest approved/paid supplier bill's original PDF, not the contact name. */
+async function latestHistoricalBillingPdf(api:Api,contactId:string):Promise<string|null> {
+  const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
+  const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);
+  const bills=(Array.isArray(response.Invoices)?response.Invoices:[])
+    .filter((b:any)=>['AUTHORISED','PAID'].includes(String(b.Status)) && b.InvoiceID);
+  const latest=bills[0];
+  if(!latest) return null;
+  const listing=await xero(api,`Invoices/${encodeURIComponent(latest.InvoiceID)}/Attachments`);
+  const attachment=(Array.isArray(listing.Attachments)?listing.Attachments:[])
+    .find((a:any)=>/\\.pdf$/i.test(String(a.FileName??'')));
+  if(!attachment) return null;
+  const path=`Invoices/${encodeURIComponent(latest.InvoiceID)}/Attachments/${encodeURIComponent(attachment.FileName)}`;
+  const responsePdf=await xeroFetch(API+path,{headers:{Authorization:`Bearer ${api.accessToken}`,'xero-tenant-id':api.tenantId,Accept:'application/pdf'},signal:AbortSignal.timeout(25000)});
+  if(!responsePdf.ok) return null;
+  const bytes=Buffer.from(await responsePdf.arrayBuffer());
+  if(!bytes.length||bytes.length>15*1024*1024) return null;
+  return pdfText(bytes);
 }
 async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:string):Promise<ContactMatch|null> {
   const contacts:any[]=[];let complete=false;
@@ -373,9 +393,12 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   // Resolve old assessment warnings using current source evidence, not stored guesses.
   // A missing legal-entity label is not itself a conflict when the PDF names the
   // practice as recipient. A different named recipient must still be reviewed.
-  const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(pdf);
+  const practiceRecipient=billingRecipientCheck(pdf)==='practice';
   const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(pdf) &&
     /coventry/i.test(pdf) && /CV1\s*2DL/i.test(pdf);
+  const historicalBilling=verified && !practiceRecipient && !practiceAddress
+    ? await latestHistoricalBillingPdf(api,verified.id).catch(()=>null) : null;
+  const historicalRecipientMatch=billingRecipientCheck(pdf,historicalBilling??undefined)==='historical_match';
   const recordedRecipient=String(a.billed_to??'').trim();
   const conflictingRecipient=!!recordedRecipient &&
     !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
@@ -389,27 +412,29 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   } catch (error) {
     latestVersionError=error instanceof Error?error.message:String(error);
   }
-  const issues=(base.review_issues as string[]).filter(issue=>
+  const issues=reconcileInvoiceReviewIssues((base.review_issues as string[]), {supplierVerified:!!verified, vatPolicyVerified:true, dueDateDefaulted:!dateOk(a.due_date)}).filter(issue=>
     !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
     !(/supplier identity/i.test(issue) && !!verified) &&
-    !(/billing entity|legal entity name/i.test(issue) && (practiceRecipient||practiceAddress) && !conflictingRecipient) &&
+    !(/billing entity|legal entity name/i.test(issue) && ((practiceRecipient||practiceAddress)&&!conflictingRecipient || historicalRecipientMatch)) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
-  if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
-  if (!(practiceRecipient||practiceAddress) || conflictingRecipient)
+  if (!verified) issues.push('Supplier verification required — draft may proceed with a provisional or best-candidate Xero contact; finance must verify');
+  if (!(practiceRecipient||practiceAddress||historicalRecipientMatch) || (conflictingRecipient && !historicalRecipientMatch))
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
-  if (coding.status!=='latest_bill_account_selected') issues.push('Latest approved/paid supplier bill has no single active account code');
-  const explicitHold=r.review_status==='on_hold'||r.review_status==='rejected';
-  if (explicitHold) issues.push('Explicit human hold or rejection');
+  if (coding.status!=='latest_bill_account_selected') issues.push('Historical coding unverified — draft may proceed using a validated fallback expense account; finance must review');
+  // Review statuses are Sheet reporting states, never pre-draft approval gates.
+  const explicitHold=false;
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
+    supplier_verification_blocks_draft:false,
     latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:(practiceRecipient||practiceAddress)&&!conflictingRecipient,
+    billed_to_historical_supplier_verified:historicalRecipientMatch,
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
     selected_account_code:coding.account_code??null,tax_type:vatPolicyForInbox(INBOX).purchaseTaxType,
     gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
-    review_issues:issues,requires_human_review:explicitHold||issues.length>0||essential.length>0,
-    note:'Read-only preview uses incoming PDF-to-historical-PDF identity and latest approved/paid bill account. Final draft creation independently checks duplicate, latest version, explicit holds, VAT and PDF attachment.'};
+    review_issues:issues,requires_human_review:issues.length>0||essential.length>0,
+    note:'Read-only preview reports accounting uncertainties for junior finance review; these do not prevent Xero DRAFT creation. Draft creation independently enforces duplicate and indeterminate-write safeguards.'};
 }
 
 /** Resume the PDF + Sheet stages for an already linked Xero document.
@@ -425,7 +450,7 @@ export async function completeExistingReviewDraft(pool:Pool, reviewId:string):Pr
   if(result.rowCount!==1) throw new Error('Review not found');
   const r=result.rows[0];
   // No Sheet HOLD gate: the finance Sheet is reporting only.
-  if(r.review_status==='on_hold' || r.review_status==='rejected') throw new Error('Human hold/rejection prevents Xero changes');
+  // Human review status is reporting only; attachment recovery must not be blocked.
   if(!r.xero_draft_id) throw new Error('No linked Xero document; reconcile and link before attachment recovery');
   const kind=r.document_type==='credit_note'?'CreditNotes':r.document_type==='invoice'?'Invoices':null;
   if(!kind) throw new Error('Invalid review document type');
@@ -467,6 +492,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   if (found.rowCount !== 1) throw new Error('Review not found');
   const r = found.rows[0];
   if (!['invoice','credit_note'].includes(r.document_type)) throw new Error('Not an invoice or credit note');
+  // Review status is not a draft-creation approval gate.
   if (r.xero_draft_id) return completeExistingReviewDraft(pool,reviewId);
   if (r.xero_draft_status && !['reconcile_required','creating'].includes(r.xero_draft_status))
     throw new Error(`Previous draft state ${r.xero_draft_status}; reconcile before retry`);
@@ -486,13 +512,13 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     throw new Error('Document cannot be represented in Xero: supplier, number, date or gross amount missing');
   if (supplier.length > 150 || number.length > 100) throw new Error('Supplier or document number too long');
   const gross = Math.abs(a.gross_gbp as number);
-  const issues:string[] = [...(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string' && !/\bvat\b|tax treatment|tax rate/i.test(x)) : [])];
+  const issues:string[] = reconcileInvoiceReviewIssues(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : [], {supplierVerified:false,vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
   // Billing-entity assessment happens against the original PDF below, not stale extraction text.
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
   const due = dateOk(a.due_date) ? a.due_date : onPresentation ? a.invoice_date : due30(a.invoice_date);
   if (!dateOk(a.due_date) && onPresentation) issues.push('Due on presentation: used invoice date as due date; verify source');
-  else if (!dateOk(a.due_date)) issues.push('Due date defaulted to invoice date + 30 days');
+  // Default due date is recorded in the draft but does not require human approval.
   // Inbox-wide policy: non-recoverable VAT is included in gross expense; Xero TaxType is NONE.
   // Never raise VAT queries even if an old assessment suggested another treatment.
   // Fetch and validate original attachment before any Xero write.
@@ -504,7 +530,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
   // Resolve assessment warnings only after the current original PDF
   // and latest Front version have been independently verified.
-  const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(incomingPdfText);
+  const practiceRecipient=billingRecipientCheck(incomingPdfText)==='practice';
   const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(incomingPdfText) &&
     /coventry/i.test(incomingPdfText) && /CV1\s*2DL/i.test(incomingPdfText);
   const recordedRecipient=String(a.billed_to??'').trim();
@@ -512,7 +538,13 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
     !/^(?:unknown|not stated|not extracted|none|n\/?a)$/i.test(recordedRecipient) &&
     !/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(recordedRecipient);
-  const recipientVerified=(practiceRecipient||practiceAddress)&&!conflictingRecipient;
+  const preflightApi=await getPilotXeroReadSessionForLink();
+  const historicalContact=!(practiceRecipient||practiceAddress)
+    ? await findSupplierContact(preflightApi,printedSupplier||supplier,incomingPdfText).catch(()=>null) : null;
+  const historicalBilling=historicalContact
+    ? await latestHistoricalBillingPdf(preflightApi,historicalContact.id).catch(()=>null) : null;
+  const historicalRecipientMatch=billingRecipientCheck(incomingPdfText,historicalBilling??undefined)==='historical_match';
+  const recipientVerified=((practiceRecipient||practiceAddress)&&!conflictingRecipient)||historicalRecipientMatch;
   for(let i=issues.length-1;i>=0;i--){
     const issue=issues[i];
     if (/latest.version copy|earlier copy|superseded copy/i.test(issue)) issues.splice(i,1);
@@ -557,6 +589,11 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     // Historical coding provenance is audit evidence, not a human-review issue.
     const contact = await supplierContact(api,printedSupplier || supplier,incomingPdfText);
     if (contact.issue) issues.push(contact.issue);
+    // A provisional or best-candidate contact is a finance review exception, not a draft veto.
+    if (!contact.created) {
+      const cleaned=reconcileInvoiceReviewIssues(issues,{supplierVerified:!contact.issue || !/without PDF-to-PDF confirmation|verify identity/i.test(contact.issue),vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
+      issues.splice(0,issues.length,...cleaned);
+    }
     // Historical coding is verified evidence; remove its provenance notes,
     // but preserve sender discrepancies for human review.
     for(let i=issues.length-1;i>=0;i--){
@@ -693,7 +730,7 @@ async function assertLatestRecordedFrontVersion(pool:Pool,r:any,bytes:Buffer):Pr
     invoice_number,review_status,xero_draft_id,assessment_json FROM pilot_invoice_reviews
     WHERE lower(trim(invoice_number))=lower(trim($1))`,[r.invoice_number]);
   const same=rows.rows.filter((v:any)=>supplierNameSimilarity(String(v.supplier_name??''),String(r.supplier_name??''))>=0.5);
-  if(same.some((v:any)=>['on_hold','rejected'].includes(v.review_status))) throw new Error('Another invoice copy is on human hold');
+  // Historical review statuses do not veto posting a readable invoice to DRAFT.
   const token=process.env.FRONT_API_TOKEN;
   if(!token) throw new Error('Front API token unavailable for version verification');
   const versions=[];
@@ -709,7 +746,7 @@ async function assertLatestRecordedFrontVersion(pool:Pool,r:any,bytes:Buffer):Pr
     versions.push({attachmentId:v.attachment_id,messageId:v.front_message_id,conversationId:v.front_conversation_id,
       receivedAt:new Date(Number(message.created_at)*1000).toISOString(),supplierKey:supplierKey(String(r.supplier_name)),
       invoiceNumber:String(r.invoice_number),contentFingerprint:createHash('sha256').update(attachment).digest('hex'),
-      statedGross:gross,explicitHumanHold:v.review_status==='on_hold',xeroDocumentId:v.xero_draft_id});
+      statedGross:gross,explicitHumanHold:false,xeroDocumentId:v.xero_draft_id});
   }
   if(!versions.some(v=>v.attachmentId===r.attachment_id && v.messageId===r.front_message_id))
     throw new Error('Current invoice missing from recorded-version check');
