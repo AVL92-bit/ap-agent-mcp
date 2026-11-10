@@ -15,27 +15,37 @@ export type FrontTriageMessage = {
 };
 
 const financeWords = /\b(invoice|invoices|credit\s*note|statement|reminder|overdue|payment|bill|billing|accounts\s+payable|balance\s+due)\b/i;
-const invoiceName = /\b(invoice|inv[-_ ]?\d|bill|receipt|statement|credit[-_ ]?note)\b/i;
+const supportedExtensions = /\.(pdf|doc|docx|xls|xlsx|xlsm)$/i;
+const supportedMimeTypes = new Set([
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel.sheet.macroenabled.12"
+]);
 
-/** Ignore only a demonstrably inline, referenced image asset, never an unverified image invoice. */
-export function isVerifiedInlineAsset(a: FrontTriageAttachment, message: FrontTriageMessage): boolean {
-  const type = (a.content_type ?? "").toLowerCase().split(";")[0].trim();
-  if (!type.startsWith("image/")) return false;
-  if (invoiceName.test(a.filename ?? "")) return false;
-  const cid = (a.content_id ?? a.contentId ?? "").replace(/^cid:/i, "").replace(/^<|>$/g, "").trim();
-  if (!cid) return false;
-  const html = message.body ?? "";
-  return html.toLowerCase().includes("cid:" + cid.toLowerCase());
+/** A supported document must be identifiable by its extension or declared MIME type. */
+export function isSupportedDocument(a: FrontTriageAttachment): boolean {
+  const filename = (a.filename ?? "").trim();
+  const mime = (a.content_type ?? "").toLowerCase().split(";")[0].trim();
+  return supportedExtensions.test(filename) || supportedMimeTypes.has(mime);
 }
 
+/** All attachments remain visible for human review; only supported documents enter assessment. */
 export function actionableAttachments(message: FrontTriageMessage): FrontTriageAttachment[] {
-  return (message.attachments ?? []).filter(a => !isVerifiedInlineAsset(a, message));
+  return (message.attachments ?? []).filter(isSupportedDocument);
 }
 
 export function classifyFrontCorrespondence(messages: FrontTriageMessage[], subject = ""):
   "finance_correspondence" | "routine_non_finance" | "requires_attachment_review" {
+  // Supported documents always require assessment, even when the email has no finance keywords.
   if (messages.some(m => actionableAttachments(m).length > 0)) return "requires_attachment_review";
-  return financeWords.test(subject) || messages.some(m =>
+  const finance = financeWords.test(subject) || messages.some(m =>
     financeWords.test([m.subject,m.text,m.blurb,m.body].filter(Boolean).join(" "))
-  ) ? "finance_correspondence" : "routine_non_finance";
+  );
+  if (finance) return "finance_correspondence";
+  // Unsupported attachments without finance signals are ambiguous, never auto-archive.
+  if (messages.some(m => (m.attachments ?? []).length > 0)) return "requires_attachment_review";
+  return "routine_non_finance";
 }
