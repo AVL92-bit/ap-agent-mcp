@@ -1,35 +1,39 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyFrontCorrespondence, actionableAttachments } from "../dist/front-triage-classification.js";
+import { classifyFrontCorrespondence, actionableAttachments, isSupportedDocument } from "../dist/front-triage-classification.js";
 
-const finance = { subject: "Invoice attached", body: '<img src="cid:logo-123"> Please see invoice.', attachments: [] };
-test("finance mail with no attachments requires review", () => {
+const finance = { subject: "Invoice attached", body: "Please see invoice.", attachments: [] };
+const attachment = (filename, content_type = "application/octet-stream") => ({ filename, content_type });
+
+test("finance mail with no attachments requires human review", () => {
   assert.equal(classifyFrontCorrespondence([finance]), "finance_correspondence");
 });
-test("verified inline signature image does not block no-attachment triage", () => {
-  const msg = {...finance, attachments:[{content_type:"image/png", filename:"logo.png",content_id:"<logo-123>"}]};
-  assert.equal(actionableAttachments(msg).length,0);
-  assert.equal(classifyFrontCorrespondence([msg]),"finance_correspondence");
+test("finance mail with only a signature logo is missing a supported document", () => {
+  assert.equal(classifyFrontCorrespondence([{...finance, attachments:[attachment("logo.png","image/png")]}]),"finance_correspondence");
 });
-test("unverified image is never silently ignored", () => {
-  const msg = {...finance, attachments:[{content_type:"image/png",filename:"scan.png"}]};
-  assert.equal(classifyFrontCorrespondence([msg]),"requires_attachment_review");
+test("finance mail with image invoice is missing a supported document", () => {
+  assert.equal(classifyFrontCorrespondence([{...finance, attachments:[attachment("invoice.jpg","image/jpeg")]}]),"finance_correspondence");
 });
-test("inline image invoice is retained", () => {
-  const msg = {...finance, attachments:[{content_type:"image/jpeg",filename:"invoice.jpg",content_id:"logo-123"}]};
-  assert.equal(classifyFrontCorrespondence([msg]),"requires_attachment_review");
+test("finance mail with unsupported file is missing a supported document", () => {
+  assert.equal(classifyFrontCorrespondence([{...finance, attachments:[attachment("invoice.zip","application/zip")]}]),"finance_correspondence");
 });
-test("PDF and Word invoices remain actionable", () => {
-  for (const type of ["application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document"]) {
-    const msg = {...finance, attachments:[{content_type:type,filename:"invoice.pdf",content_id:"logo-123"}]};
-    assert.equal(classifyFrontCorrespondence([msg]),"requires_attachment_review");
+test("PDF, Word and Excel documents trigger assessment regardless of keywords", () => {
+  for (const name of ["invoice.pdf","invoice.doc","invoice.docx","invoice.xls","invoice.xlsx","invoice.xlsm"]) {
+    assert.equal(isSupportedDocument(attachment(name)),true);
+    assert.equal(classifyFrontCorrespondence([{subject:"Hello",text:"See attached",attachments:[attachment(name)]}]),"requires_attachment_review");
   }
 });
-test("mixed signature and real invoice remains actionable", () => {
-  const msg = {...finance,attachments:[{content_type:"image/png",filename:"logo.png",content_id:"logo-123"},{content_type:"application/pdf",filename:"invoice.pdf"}]};
+test("MIME type can identify a supported document with a generic filename", () => {
+  assert.equal(isSupportedDocument(attachment("download","application/pdf")),true);
+});
+test("supported document plus signature is assessed", () => {
+  const msg={...finance,attachments:[attachment("logo.png","image/png"),attachment("invoice.pdf","application/pdf")]};
   assert.equal(actionableAttachments(msg).length,1);
   assert.equal(classifyFrontCorrespondence([msg]),"requires_attachment_review");
 });
-test("routine non-finance with no attachments remains routine", () => {
+test("routine nonfinance without attachments is archived candidate", () => {
   assert.equal(classifyFrontCorrespondence([{subject:"Hello",text:"Meeting tomorrow"}]),"routine_non_finance");
+});
+test("nonfinance with unsupported attachment is ambiguous, not archived", () => {
+  assert.equal(classifyFrontCorrespondence([{subject:"Hello",text:"See attached",attachments:[attachment("scan.jpg","image/jpeg")]}]),"requires_attachment_review");
 });
