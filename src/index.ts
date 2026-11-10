@@ -3301,6 +3301,30 @@ const httpServer =
             return;
           }
 
+          // Transport-level telemetry only: never inspect or log MCP payloads,
+          // Authorization headers, session IDs, or tool arguments.
+          const startedAt = Date.now();
+          const requestMethod = req.method ?? 'UNKNOWN';
+          const hasSessionHeader = typeof req.headers['mcp-session-id'] === 'string';
+          res.once('finish', () => {
+            console.log('MCP HTTP response', JSON.stringify({
+              method: requestMethod,
+              status: res.statusCode,
+              duration_ms: Date.now() - startedAt,
+              has_session_header: hasSessionHeader,
+              response_session_header: res.hasHeader('mcp-session-id'),
+              content_type: String(res.getHeader('content-type') ?? '').split(';')[0],
+            }));
+          });
+          res.once('close', () => {
+            if (!res.writableFinished) {
+              console.warn('MCP HTTP connection closed before response completed', JSON.stringify({
+                method: requestMethod,
+                duration_ms: Date.now() - startedAt,
+                has_session_header: hasSessionHeader,
+              }));
+            }
+          });
           await nodeMcpHandler(
             req,
             res
