@@ -1,0 +1,25 @@
+name: AP draft regression
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'package*.json'
+      - 'tsconfig.json'
+      - '.github/workflows/ap-draft-regression.yml'
+  push:
+    branches:
+      - fix/invoice-review-exception-reconciliation
+jobs:
+  build-and-regression:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - run: npm run build
+      - run: node --experimental-strip-types --test tests/ap-invoice-review-rules.test.mjs
