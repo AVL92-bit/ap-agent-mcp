@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 const source=readFileSync(new URL('../src/index.ts',import.meta.url),'utf8');
+const classifier=readFileSync(new URL('../src/front-triage-classification.ts',import.meta.url),'utf8');
 const runner=source.slice(source.indexOf('server.registerTool("run_ap_correspondence_triage"'),source.indexOf('// FRONT: GET VERIFIED CONVERSATION MESSAGES'));
 test('batch runner is server-owned and dry-run by default',()=>{
   assert.match(runner,/execute: z\.boolean\(\)\.default\(false\)/);
@@ -19,5 +20,5 @@ test('batch runner only archives routine non-finance mail',()=>{
   assert.match(runner,/await applyApFrontTag\(c\.id,"no_attachment"\)/);
 });
 test('correspondence classifier includes conversation subject',()=>{
-  assert.match(source,/financeWords\.test\(conversationSubject\)/);
+  assert.match(classifier,/financeWords\.test\(subject\)/);
 });
