@@ -1,3 +1,4 @@
+import { classifyFrontCorrespondence, actionableAttachments } from "./front-triage-classification.js";
 import { ensureApContactIntent } from './ap-contact-write-intent.js';
 import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
 import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-journal.js';
@@ -161,6 +162,9 @@ type FrontAttachment = {
   filename?: string;
   url?: string;
   content_type?: string;
+  content_id?: string;
+  contentId?: string;
+  is_inline?: boolean;
   size?: number;
 };
 
@@ -344,17 +348,7 @@ async function archiveApFrontConversation(
   }
 }
 /** Deterministic classification for attachment-free Front correspondence. */
-function classifyAttachmentFreeCorrespondence(messages: FrontMessage[], conversationSubject = ""):
-  "finance_correspondence" | "routine_non_finance" | "requires_attachment_review" {
-  // Unknown, unreadable or non-PDF attachments must not be archived as routine mail.
-  if (messages.some(message => (message.attachments ?? []).length > 0)) {
-    return "requires_attachment_review";
-  }
-  const financeWords = /\b(invoice|invoices|credit\s*note|statement|reminder|overdue|payment|bill|billing|accounts\s+payable|balance\s+due)\b/i;
-  return financeWords.test(conversationSubject) || messages.some(message => financeWords.test(
-    [message.subject, message.text, message.blurb, message.body].filter(Boolean).join(" ")
-  )) ? "finance_correspondence" : "routine_non_finance";
-}
+const classifyAttachmentFreeCorrespondence = classifyFrontCorrespondence;
 
 function safeError(
   label: string,
@@ -939,7 +933,7 @@ pages_scanned: visitedPages.size,
             // Every attachment is enumerated and returned as an explicit pending
             // work item. Never treat its Front conversation as completed merely
             // because an assessment exists in PostgreSQL.
-            const attachments = listing.messages.flatMap(m => (m.attachments ?? []).map(a => ({
+            const attachments = listing.messages.flatMap(m => actionableAttachments(m).map(a => ({
               message_id: m.id ?? "",
               attachment_id: attachmentId(a) ?? "",
               filename: a.filename ?? "",
@@ -1041,8 +1035,7 @@ pages_scanned: visitedPages.size,
 
         const attachmentCount =
           messageListing.messages.reduce(
-            (count, message) =>
-              count + (message.attachments ?? []).length,
+            (count, message) => count + actionableAttachments(message).length,
             0
           );
 
@@ -1061,7 +1054,7 @@ pages_scanned: visitedPages.size,
           });
         }
         if (outcome === "no_attachment_human_review" && classification !== "finance_correspondence") {
-          return toolFailure("No-attachment finance triage requires finance keywords and zero attachments");
+          return toolFailure("No-attachment finance triage requires finance keywords and zero non-inline attachments");
         }
         const tag = outcome === "no_attachment_human_review"
           ? "no_attachment" : "human_review";
