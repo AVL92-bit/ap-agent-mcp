@@ -415,7 +415,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const issues=reconcileInvoiceReviewIssues((base.review_issues as string[]), {supplierVerified:!!verified, vatPolicyVerified:true, dueDateDefaulted:!dateOk(a.due_date)}).filter(issue=>
     !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
     !(/supplier identity/i.test(issue) && !!verified) &&
-    !(/billing entity|legal entity name/i.test(issue) && (practiceRecipient||practiceAddress) && !conflictingRecipient) &&
+    !(/billing entity|legal entity name/i.test(issue) && ((practiceRecipient||practiceAddress)&&!conflictingRecipient || historicalRecipientMatch)) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
   if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
   if (!(practiceRecipient||practiceAddress||historicalRecipientMatch) || (conflictingRecipient && !historicalRecipientMatch))
