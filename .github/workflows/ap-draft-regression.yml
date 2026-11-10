@@ -22,4 +22,4 @@ jobs:
           node-version: '22'
       - run: npm install --no-audit --no-fund
       - run: npm run build
-      - run: node --experimental-strip-types --test tests/ap-invoice-review-rules.test.mjs
+      - run: node --experimental-strip-types --test tests/*.test.mjs
