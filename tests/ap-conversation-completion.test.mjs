@@ -1,0 +1,10 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {decideDocumentConversation} from '../src/ap-conversation-completion.ts';
+const d=(id,disposition)=>({attachmentId:id,disposition});
+test('all drafts attached can archive',()=>assert.equal(decideDocumentConversation([d('a','xero_draft_attached'),d('b','xero_existing_verified')]).archive,true));
+test('one unprocessed attachment prevents archive',()=>assert.equal(decideDocumentConversation([d('a','xero_draft_attached'),d('b','unprocessed')]).archive,false));
+test('uncertain draft keeps conversation open',()=>assert.equal(decideDocumentConversation([d('a','draft_uncertain_attached')]).tag,'Human review'));
+test('processing failure keeps conversation open',()=>assert.equal(decideDocumentConversation([d('a','processing_failure')]).archive,false));
+test('no attachments cannot count as Xero completion',()=>assert.equal(decideDocumentConversation([]).archive,false));
+test('duplicate attachment identity cannot count twice',()=>assert.equal(decideDocumentConversation([d('a','xero_draft_attached'),d('a','xero_existing_verified')]).archive,false));
