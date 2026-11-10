@@ -1,3 +1,4 @@
+import { reconcileInvoiceReviewIssues, billingRecipientCheck } from './ap-invoice-review-rules.js';
 import { createHash } from 'node:crypto';
 import { xeroFetch } from "./xero-rate-limit.js";
 import { PDFParse } from 'pdf-parse';
@@ -52,8 +53,8 @@ function previewFields(data: DirectDraftPreview, linkedId?: string | null, attem
   if (!dateOk(data.invoice_date)) essential_missing.push('Valid document date not available');
   if (!money(Math.abs(data.gross_gbp ?? 0))) essential_missing.push('Valid non-zero gross amount not available');
   if (!data.proposed_account?.trim()) review_issues.push('Nominal code needs review; valid Xero fallback account required');
-  if (!dateOk(data.due_date) && dateOk(data.invoice_date)) review_issues.push('Due date defaults to invoice date + 30 days');
-  if (data.billed_to && data.billed_to !== "St George's Road Surgery") review_issues.push('Billing entity requires review');
+  // A standard due-date default is informational, not an approval exception.
+  if (data.billed_to && !/st\\s*george[’'s\\s.-]*road\\s*surgery/i.test(data.billed_to)) review_issues.push('Billing entity requires review');
   if (linkedId) essential_missing.push('Already linked to an existing Xero document');
   if (attempt && !linkedId) essential_missing.push('Previous draft attempt needs reconciliation');
   return {status:linkedId?'existing_xero_document':essential_missing.length?'requires_source_data_or_reconciliation':'draft_candidate',
@@ -389,7 +390,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   } catch (error) {
     latestVersionError=error instanceof Error?error.message:String(error);
   }
-  const issues=(base.review_issues as string[]).filter(issue=>
+  const issues=reconcileInvoiceReviewIssues((base.review_issues as string[]), {supplierVerified:!!verified, vatPolicyVerified:true, dueDateDefaulted:!dateOk(a.due_date)}).filter(issue=>
     !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
     !(/supplier identity/i.test(issue) && !!verified) &&
     !(/billing entity|legal entity name/i.test(issue) && (practiceRecipient||practiceAddress) && !conflictingRecipient) &&
@@ -467,6 +468,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   if (found.rowCount !== 1) throw new Error('Review not found');
   const r = found.rows[0];
   if (!['invoice','credit_note'].includes(r.document_type)) throw new Error('Not an invoice or credit note');
+  if (r.review_status==='on_hold' || r.review_status==='rejected') throw new Error('Human hold/rejection prevents Xero changes');
   if (r.xero_draft_id) return completeExistingReviewDraft(pool,reviewId);
   if (r.xero_draft_status && !['reconcile_required','creating'].includes(r.xero_draft_status))
     throw new Error(`Previous draft state ${r.xero_draft_status}; reconcile before retry`);
@@ -492,7 +494,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
   const due = dateOk(a.due_date) ? a.due_date : onPresentation ? a.invoice_date : due30(a.invoice_date);
   if (!dateOk(a.due_date) && onPresentation) issues.push('Due on presentation: used invoice date as due date; verify source');
-  else if (!dateOk(a.due_date)) issues.push('Due date defaulted to invoice date + 30 days');
+  // Default due date is recorded in the draft but does not require human approval.
   // Inbox-wide policy: non-recoverable VAT is included in gross expense; Xero TaxType is NONE.
   // Never raise VAT queries even if an old assessment suggested another treatment.
   // Fetch and validate original attachment before any Xero write.
@@ -557,6 +559,10 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     // Historical coding provenance is audit evidence, not a human-review issue.
     const contact = await supplierContact(api,printedSupplier || supplier,incomingPdfText);
     if (contact.issue) issues.push(contact.issue);
+    if (!contact.created) {
+      const cleaned=reconcileInvoiceReviewIssues(issues,{supplierVerified:!contact.issue || !/without PDF-to-PDF confirmation|verify identity/i.test(contact.issue),vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
+      issues.splice(0,issues.length,...cleaned);
+    }
     // Historical coding is verified evidence; remove its provenance notes,
     // but preserve sender discrepancies for human review.
     for(let i=issues.length-1;i>=0;i--){
