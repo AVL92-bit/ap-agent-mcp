@@ -37,7 +37,7 @@ test('MCP HTTP initialize and tools/list expose registered tools', async () => {
       });
       const text = await response.text();
       const data = text.includes('data: ')
-        ? JSON.parse(text.split('\\n').find(line => line.startsWith('data: ')).slice(6))
+        ? JSON.parse(text.split('\n').find(line => line.startsWith('data: ')).slice(6))
         : JSON.parse(text);
       return { response, data };
     };
