@@ -1,4 +1,4 @@
-import { classifyFrontCorrespondence, actionableAttachments } from "./front-triage-classification.js";
+import { classifyFrontCorrespondence, actionableAttachments, isSupportedDocument } from "./front-triage-classification.js";
 import { ensureApContactIntent } from './ap-contact-write-intent.js';
 import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
 import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-journal.js';
@@ -872,7 +872,7 @@ pages_scanned: visitedPages.size,
 
   server.registerTool("run_ap_correspondence_triage", {
     title: "Run AP Attachment-Free Correspondence Triage",
-    description: "Application-controlled, paginated triage of attachment-free unassigned Front conversations. Defaults to dry run. Never archives any conversation containing attachments, or with incomplete message history. Does not process invoices or access Xero.",
+    description: "Application-controlled, paginated triage of unassigned Front conversations. Defaults to dry run. Never archives any conversation containing attachments, or with incomplete message history. Does not process invoices or access Xero.",
     inputSchema: {
       execute: z.boolean().default(false),
       max_pages: z.number().int().min(1).max(1000).default(1000),
@@ -933,11 +933,11 @@ pages_scanned: visitedPages.size,
             // Every attachment is enumerated and returned as an explicit pending
             // work item. Never treat its Front conversation as completed merely
             // because an assessment exists in PostgreSQL.
-            const attachments = listing.messages.flatMap(m => actionableAttachments(m).map(a => ({
+            const attachments = listing.messages.flatMap(m => (m.attachments ?? []).map(a => ({
               message_id: m.id ?? "",
               attachment_id: attachmentId(a) ?? "",
               filename: a.filename ?? "",
-              kind: a.content_type === "application/pdf" ? "pdf_pending_xero" : "unsupported_attachment_pending_review",
+              kind: isSupportedDocument(a) && (a.filename ?? "").toLowerCase().endsWith(".pdf") || a.content_type === "application/pdf" ? "pdf_pending_xero" : "unsupported_attachment_pending_review",
             })));
             outcomes.push({conversation_id:c.id,outcome:classification,action:"pending_xero_processing",attachments});continue;
           }
@@ -1054,7 +1054,7 @@ pages_scanned: visitedPages.size,
           });
         }
         if (outcome === "no_attachment_human_review" && classification !== "finance_correspondence") {
-          return toolFailure("No-attachment finance triage requires finance keywords and zero non-inline attachments");
+          return toolFailure("No-readable-attachment triage requires finance keywords and zero supported PDF, Word or Excel documents");
         }
         const tag = outcome === "no_attachment_human_review"
           ? "no_attachment" : "human_review";
@@ -1116,25 +1116,8 @@ pages_scanned: visitedPages.size,
 
    const messages = result.messages.map(
           (message) => {
-            const documentAttachments = (
-              message.attachments ?? []
-            )
-              .filter((attachment) => {
-                const filename = (
-                  attachment.filename ?? ""
-                ).toLowerCase();
-
-                const contentType = (
-                  attachment.content_type ?? ""
-                ).toLowerCase();
-
-                return (
-                  /\.(pdf|docx)$/i.test(filename) ||
-                  contentType === "application/pdf" ||
-                  contentType ===
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                );
-              })
+            const documentAttachments = (message.attachments ?? [])
+              .filter(isSupportedDocument)
               .map((attachment) => ({
                 id: attachmentId(attachment),
                 filename:
