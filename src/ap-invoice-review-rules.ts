@@ -2,7 +2,7 @@
 export type ReviewEvidence = {supplierVerified:boolean;vatPolicyVerified:boolean;dueDateDefaulted:boolean};
 export function reconcileInvoiceReviewIssues(issues:readonly string[], evidence:ReviewEvidence):string[] {
   return issues.filter(issue=>{
-    if (/direct[ -]?debit|\bDD\b|payment initiated|payment status|already settled or in progress/i.test(issue)) return false;
+    if (/direct[ -]?debit|\bDD\b|payment initiated by direct debit/i.test(issue)) return false;
     if (evidence.vatPolicyVerified && /\bVAT\b|tax treatment|tax rate|net or VAT breakdown/i.test(issue)) return false;
     if (evidence.dueDateDefaulted && /due date defaults?|due date defaulted|30.day default/i.test(issue)) return false;
     if (evidence.supplierVerified && /supplier (?:not matched|unmatched|identity|verification required)|no matching (?:xero )?contact/i.test(issue)) return false;
@@ -16,7 +16,7 @@ export function billingRecipientCheck(incoming:string,historical?:string):'pract
   if(practice.test(incoming)) return 'practice';
   if(!historical) return 'unverified';
   const extract=(text:string)=>{
-    const m=text.match(/\bbilled\s+to\b\s*:?\s*\n+([^\n]+)(?:\n+([^\n]+))?/i);
+    const m=text.match(/\bbilled[ \t]+to\b[ \t]*:?[ \t]*\r?\n[ \t]*([^\r\n]+)(?:\r?\n[ \t]*([^\r\n]+))?/i);
     return m ? [m[1],m[2]??''].map(v=>v.trim().toLowerCase().replace(/[^a-z0-9]/g,'')).filter(Boolean).join('|') : '';
   };
   const a=extract(incoming),b=extract(historical);
