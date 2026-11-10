@@ -204,6 +204,25 @@ async function historicalInvoiceNameMatches(api:Api,contactId:string,incomingPdf
   }
   return {matched:false};
 }
+/** Compare the latest approved/paid supplier bill's original PDF, not the contact name. */
+async function latestHistoricalBillingPdf(api:Api,contactId:string):Promise<string|null> {
+  const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
+  const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);
+  const bills=(Array.isArray(response.Invoices)?response.Invoices:[])
+    .filter((b:any)=>['AUTHORISED','PAID'].includes(String(b.Status)) && b.InvoiceID);
+  const latest=bills[0];
+  if(!latest) return null;
+  const listing=await xero(api,`Invoices/${encodeURIComponent(latest.InvoiceID)}/Attachments`);
+  const attachment=(Array.isArray(listing.Attachments)?listing.Attachments:[])
+    .find((a:any)=>/\\.pdf$/i.test(String(a.FileName??'')));
+  if(!attachment) return null;
+  const path=`Invoices/${encodeURIComponent(latest.InvoiceID)}/Attachments/${encodeURIComponent(attachment.FileName)}`;
+  const responsePdf=await xeroFetch(API+path,{headers:{Authorization:`Bearer ${api.accessToken}`,'xero-tenant-id':api.tenantId,Accept:'application/pdf'},signal:AbortSignal.timeout(25000)});
+  if(!responsePdf.ok) return null;
+  const bytes=Buffer.from(await responsePdf.arrayBuffer());
+  if(!bytes.length||bytes.length>15*1024*1024) return null;
+  return pdfText(bytes);
+}
 async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:string):Promise<ContactMatch|null> {
   const contacts:any[]=[];let complete=false;
   for(let page=1;page<=20;page++) {
@@ -374,9 +393,12 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   // Resolve old assessment warnings using current source evidence, not stored guesses.
   // A missing legal-entity label is not itself a conflict when the PDF names the
   // practice as recipient. A different named recipient must still be reviewed.
-  const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(pdf);
+  const practiceRecipient=billingRecipientCheck(pdf)==='practice';
   const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(pdf) &&
     /coventry/i.test(pdf) && /CV1\s*2DL/i.test(pdf);
+  const historicalBilling=verified && !practiceRecipient && !practiceAddress
+    ? await latestHistoricalBillingPdf(api,verified.id).catch(()=>null) : null;
+  const historicalRecipientMatch=billingRecipientCheck(pdf,historicalBilling??undefined)==='historical_match';
   const recordedRecipient=String(a.billed_to??'').trim();
   const conflictingRecipient=!!recordedRecipient &&
     !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
@@ -396,7 +418,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     !(/billing entity|legal entity name/i.test(issue) && (practiceRecipient||practiceAddress) && !conflictingRecipient) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
   if (!verified) issues.push('PDF-to-PDF supplier identity verification failed');
-  if (!(practiceRecipient||practiceAddress) || conflictingRecipient)
+  if (!(practiceRecipient||practiceAddress||historicalRecipientMatch) || (conflictingRecipient && !historicalRecipientMatch))
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
   if (coding.status!=='latest_bill_account_selected') issues.push('Latest approved/paid supplier bill has no single active account code');
@@ -406,6 +428,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
     latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:(practiceRecipient||practiceAddress)&&!conflictingRecipient,
+    billed_to_historical_supplier_verified:historicalRecipientMatch,
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
     selected_account_code:coding.account_code??null,tax_type:vatPolicyForInbox(INBOX).purchaseTaxType,
     gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
@@ -506,7 +529,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
   // Resolve assessment warnings only after the current original PDF
   // and latest Front version have been independently verified.
-  const practiceRecipient=/st\s*george[’\'s\s.-]*road\s*surgery/i.test(incomingPdfText);
+  const practiceRecipient=billingRecipientCheck(incomingPdfText)==='practice';
   const practiceAddress=/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(incomingPdfText) &&
     /coventry/i.test(incomingPdfText) && /CV1\s*2DL/i.test(incomingPdfText);
   const recordedRecipient=String(a.billed_to??'').trim();
@@ -514,7 +537,13 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     !/st\s*george[’\'s\s.-]*road\s*surgery/i.test(recordedRecipient) &&
     !/^(?:unknown|not stated|not extracted|none|n\/?a)$/i.test(recordedRecipient) &&
     !/102\s+st\.?\s*george[’\'s\s.-]*road/i.test(recordedRecipient);
-  const recipientVerified=(practiceRecipient||practiceAddress)&&!conflictingRecipient;
+  const preflightApi=await getPilotXeroReadSessionForLink();
+  const historicalContact=!(practiceRecipient||practiceAddress)
+    ? await findSupplierContact(preflightApi,printedSupplier||supplier,incomingPdfText).catch(()=>null) : null;
+  const historicalBilling=historicalContact
+    ? await latestHistoricalBillingPdf(preflightApi,historicalContact.id).catch(()=>null) : null;
+  const historicalRecipientMatch=billingRecipientCheck(incomingPdfText,historicalBilling??undefined)==='historical_match';
+  const recipientVerified=((practiceRecipient||practiceAddress)&&!conflictingRecipient)||historicalRecipientMatch;
   for(let i=issues.length-1;i>=0;i--){
     const issue=issues[i];
     if (/latest.version copy|earlier copy|superseded copy/i.test(issue)) issues.splice(i,1);
