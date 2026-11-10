@@ -13,6 +13,7 @@ import { originalFrontDocument, attachAndVerifyOriginal } from './xero-draft-bil
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 import { vatPolicyForInbox, grossExpenseLine } from './inbox-vat-policy.js';
+import { reconcileInvoiceReviewIssues, billingRecipientCheck } from './ap-invoice-review-rules.js';
 export { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 
 const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
@@ -422,8 +423,8 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
   if (coding.status!=='latest_bill_account_selected') issues.push('Historical coding unverified — draft may proceed using a validated fallback expense account; finance must review');
-  const explicitHold=r.review_status==='on_hold'||r.review_status==='rejected';
-  if (explicitHold) issues.push('Explicit human hold or rejection');
+  // Review statuses are Sheet reporting states, never pre-draft approval gates.
+  const explicitHold=false;
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
@@ -433,8 +434,8 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     historical_coding:coding,account_code_selected:coding.status==='latest_bill_account_selected',
     selected_account_code:coding.account_code??null,tax_type:vatPolicyForInbox(INBOX).purchaseTaxType,
     gross_expense_gbp:typeof a.gross_gbp==='number'?Math.abs(a.gross_gbp):null,
-    review_issues:issues,requires_human_review:explicitHold||issues.length>0||essential.length>0,
-    note:'Read-only preview uses incoming PDF-to-historical-PDF identity and latest approved/paid bill account. Final draft creation independently checks duplicate, latest version, explicit holds, VAT and PDF attachment.'};
+    review_issues:issues,requires_human_review:issues.length>0||essential.length>0,
+    note:'Read-only preview reports accounting uncertainties for junior finance review; these do not prevent Xero DRAFT creation. Draft creation independently enforces duplicate and indeterminate-write safeguards.'};
 }
 
 /** Resume the PDF + Sheet stages for an already linked Xero document.
@@ -450,7 +451,7 @@ export async function completeExistingReviewDraft(pool:Pool, reviewId:string):Pr
   if(result.rowCount!==1) throw new Error('Review not found');
   const r=result.rows[0];
   // No Sheet HOLD gate: the finance Sheet is reporting only.
-  if(r.review_status==='on_hold' || r.review_status==='rejected') throw new Error('Human hold/rejection prevents Xero changes');
+  // Human review status is reporting only; attachment recovery must not be blocked.
   if(!r.xero_draft_id) throw new Error('No linked Xero document; reconcile and link before attachment recovery');
   const kind=r.document_type==='credit_note'?'CreditNotes':r.document_type==='invoice'?'Invoices':null;
   if(!kind) throw new Error('Invalid review document type');
@@ -492,7 +493,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
   if (found.rowCount !== 1) throw new Error('Review not found');
   const r = found.rows[0];
   if (!['invoice','credit_note'].includes(r.document_type)) throw new Error('Not an invoice or credit note');
-  if (r.review_status==='on_hold' || r.review_status==='rejected') throw new Error('Human hold/rejection prevents Xero changes');
+  // Review status is not a draft-creation approval gate.
   if (r.xero_draft_id) return completeExistingReviewDraft(pool,reviewId);
   if (r.xero_draft_status && !['reconcile_required','creating'].includes(r.xero_draft_status))
     throw new Error(`Previous draft state ${r.xero_draft_status}; reconcile before retry`);
@@ -730,7 +731,7 @@ async function assertLatestRecordedFrontVersion(pool:Pool,r:any,bytes:Buffer):Pr
     invoice_number,review_status,xero_draft_id,assessment_json FROM pilot_invoice_reviews
     WHERE lower(trim(invoice_number))=lower(trim($1))`,[r.invoice_number]);
   const same=rows.rows.filter((v:any)=>supplierNameSimilarity(String(v.supplier_name??''),String(r.supplier_name??''))>=0.5);
-  if(same.some((v:any)=>['on_hold','rejected'].includes(v.review_status))) throw new Error('Another invoice copy is on human hold');
+  // Historical review statuses do not veto posting a readable invoice to DRAFT.
   const token=process.env.FRONT_API_TOKEN;
   if(!token) throw new Error('Front API token unavailable for version verification');
   const versions=[];
@@ -746,7 +747,7 @@ async function assertLatestRecordedFrontVersion(pool:Pool,r:any,bytes:Buffer):Pr
     versions.push({attachmentId:v.attachment_id,messageId:v.front_message_id,conversationId:v.front_conversation_id,
       receivedAt:new Date(Number(message.created_at)*1000).toISOString(),supplierKey:supplierKey(String(r.supplier_name)),
       invoiceNumber:String(r.invoice_number),contentFingerprint:createHash('sha256').update(attachment).digest('hex'),
-      statedGross:gross,explicitHumanHold:v.review_status==='on_hold',xeroDocumentId:v.xero_draft_id});
+      statedGross:gross,explicitHumanHold:false,xeroDocumentId:v.xero_draft_id});
   }
   if(!versions.some(v=>v.attachmentId===r.attachment_id && v.messageId===r.front_message_id))
     throw new Error('Current invoice missing from recorded-version check');
