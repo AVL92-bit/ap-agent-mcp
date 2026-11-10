@@ -512,7 +512,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     throw new Error('Document cannot be represented in Xero: supplier, number, date or gross amount missing');
   if (supplier.length > 150 || number.length > 100) throw new Error('Supplier or document number too long');
   const gross = Math.abs(a.gross_gbp as number);
-  const issues:string[] = [...(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string' && !/\bvat\b|tax treatment|tax rate/i.test(x)) : [])];
+  const issues:string[] = reconcileInvoiceReviewIssues(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : [], {supplierVerified:false,vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
   // Billing-entity assessment happens against the original PDF below, not stale extraction text.
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
