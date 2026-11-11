@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runApInbox } from '../src/ap-inbox-runner.ts';
+import { runApInbox } from '../dist/ap-inbox-runner.js';
 const pdf = {filename:'a.pdf',contentType:'application/pdf',bytes:new TextEncoder().encode('%PDF-example')};
 function fixture(conversations, uncertainFields=[]) {
   const calls=[];
