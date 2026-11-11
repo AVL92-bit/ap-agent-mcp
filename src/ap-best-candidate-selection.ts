@@ -17,8 +17,8 @@ export function chooseSupplier(source: string, contacts: ContactCandidate[]): Se
   const ranked = valid.map(value => ({value, score: supplierScore(source, value.name)}))
     .sort((a,b) => b.score - a.score || a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
   const first = ranked[0];
-  // A weak match is not grounds to bind an unrelated supplier: caller should create a provisional contact.
-  if (first.score < 0.72) return null;
+  // Only existing Xero contacts with strictly greater than 50% similarity qualify.
+  if (first.score <= 0.50) return null;
   const ambiguous = first.score < 1 || (ranked[1] && ranked[1].score === first.score);
   return {value:first.value, uncertainFields: ambiguous ? ['supplier'] : [],
     explanation: ambiguous ? 'Best available supplier contact; finance to verify' : 'Normalised supplier name match'};
