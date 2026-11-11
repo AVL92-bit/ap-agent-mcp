@@ -42,7 +42,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   if (reference) {
     const evidenceLine = rawLines.find(line => clean(line) === reference.evidence);
     const token = evidenceLine?.match(/\b(?:receipt|invoice|credit\s*note)\s*(?:(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*)?([A-Z0-9][A-Z0-9/_-]{1,60})/i);
-    if (token && /[\x00-\x1f\x7f]/.test((evidenceLine??'').slice(token.index!+token[0].length).slice(0,2))) reference.uncertain = true;
+    if (token && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test((evidenceLine??'').slice(token.index!+token[0].length).slice(0,1))) reference.uncertain = true;
   }
   const linkedInvoiceReference=receipt
     ? matchField(lines,/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
@@ -50,7 +50,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   if (linkedInvoiceReference) {
     const raw = text.split(/\r?\n/).find(line => clean(line) === linkedInvoiceReference.evidence);
     const token=raw?.match(/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})/i);
-    if (token && /[\x00-\x1f\x7f]/.test((raw??'').slice(token.index!+token[0].length).slice(0,2))) linkedInvoiceReference.uncertain=true;
+    if (token && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test((raw??'').slice(token.index!+token[0].length).slice(0,1))) linkedInvoiceReference.uncertain=true;
   }
   let invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date|issue\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b/i);
   if (!invoiceDate) {
