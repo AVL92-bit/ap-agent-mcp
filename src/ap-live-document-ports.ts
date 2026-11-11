@@ -60,7 +60,6 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     if (!/No usable embedded PDF text/.test(String(error))) throw error;
     // OCR or correspondence text is not sufficient to authorise automatic drafting.
     throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
-    throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
   }
   // Missing gross may be recovered from explicit payable totals in the originating
   // conversation. The amount is advisory and always requires human review.
