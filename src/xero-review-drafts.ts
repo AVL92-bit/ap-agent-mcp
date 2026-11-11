@@ -276,13 +276,9 @@ async function supplierContact(api: Api, supplier: string, incomingPdfText: stri
   const ranked = contacts.filter((c:any)=>c.ContactID && c.Name)
     .map((c:any)=>({contact:c, score:supplierNameSimilarity(supplier,String(c.Name))}))
     .sort((a:any,b:any)=>b.score-a.score);
-  if (ranked[0]?.score >= 0.72) return {id:String(ranked[0].contact.ContactID),created:false,
-    issue:`Best-candidate supplier ${ranked[0].contact.Name} selected without PDF-to-PDF confirmation; finance must verify`};
-  const created = await xero(api,'Contacts','POST',{Contacts:[{Name:supplier.slice(0,150)}]});
-  const contact=created.Contacts?.[0];
-  if (!contact?.ContactID || contact.HasErrors || contact.ValidationErrors?.length)
-    throw new Error('Xero provisional supplier contact creation did not succeed; reconcile before retry');
-  return {id:String(contact.ContactID),created:true,issue:'Provisional supplier contact created; finance must verify'};
+  if (ranked[0]?.score > 0.50) return {id:String(ranked[0].contact.ContactID),created:false,
+    issue:`Supplier uncertain: existing Xero contact ${ranked[0].contact.Name} selected at similarity ${ranked[0].score.toFixed(2)}; finance must verify`};
+  throw new Error('No existing Xero contact exceeds 50% supplier-name similarity; no contact created');
 }
 
 /** Approved/paid Xero purchase bills are the supplier's authorised coding precedent.
