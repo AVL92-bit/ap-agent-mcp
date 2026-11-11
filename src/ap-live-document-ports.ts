@@ -1,7 +1,6 @@
 import { PDFParse } from 'pdf-parse';
 import { verifyInvoiceDocumentText, DocumentNeedsHumanReview, requireVerifiedCriticalFields } from './ap-document-verification.js';
 import type { PoolClient } from 'pg';
-import { makeApContactIntent, resolveProvisionalContact } from './ap-contact-write-intent.js';
 import { xeroFetch } from './xero-rate-limit.js';
 import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { extractInvoiceCandidates } from './invoice-candidates.js';
@@ -82,23 +81,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   const rawAccounts=await readPaged<{Code?:string;Name?:string;Type?:string;Status?:string}>('Accounts','Accounts');
   const contacts:ContactCandidate[]=rawContacts.filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!}));
   const accounts:AccountCandidate[]=rawAccounts.map(a=>({code:a.Code||'',name:a.Name||'',type:a.Type||'',status:a.Status||''}));
-  async function postProvisionalContact(name:string):Promise<ContactCandidate> {
-    const cleaned=name.replace(/[\x00-\x1f]/g,' ').trim().slice(0,200);
-    if (!cleaned) throw new Error('No provisional supplier name available');
-    const r=await xeroFetch(`${API}/Contacts`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({Contacts:[{Name:cleaned}]}),signal:AbortSignal.timeout(25000)});
-    if(!r.ok) throw new Error(`Xero provisional contact POST HTTP ${r.status}; reconcile before retry`);
-    const body=await r.json() as {Contacts?:Array<{ContactID?:string;Name?:string}>};
-    const contact=body.Contacts?.[0];
-    if(!contact?.ContactID) throw new Error('Provisional contact outcome uncertain; reconcile before retry');
-    return {id:contact.ContactID,name:contact.Name||cleaned};
-  }
-  const createProvisionalContact=(name:string)=>resolveProvisionalContact({
-    name, intent:makeApContactIntent(client),
-    listContacts:async()=> (await readPaged<{ContactID?:string;Name?:string}>('Contacts','Contacts'))
-      .filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!})),
-    postContact:postProvisionalContact,
-  });
-  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,createProvisionalContact,pdf,
+  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
     fallbackAccountCode:process.env.AP_FALLBACK_ACCOUNT_CODE,
