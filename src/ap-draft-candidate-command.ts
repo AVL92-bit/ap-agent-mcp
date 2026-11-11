@@ -22,6 +22,8 @@ export function buildDraftCommand(input: {
   candidates: InvoiceCandidates;
   supplierContactId: string;
   supplierName?: string;
+  extractedSupplierName?: string;
+  supplierMatchScore?: number;
   accountCode: string;
   pdf: OriginalPdf;
   fallbackDate?: string;
@@ -43,36 +45,37 @@ export function buildDraftCommand(input: {
   if (c.currency.value !== 'GBP') throw new Error('Non-GBP invoice needs currency-specific Xero handling');
   return {
     kind: c.documentType.value === 'credit_note' ? 'CreditNotes' : 'Invoices',
-    number, supplierContactId: input.supplierContactId, supplierName:input.supplierName, accountCode: input.accountCode,
+    number, supplierContactId: input.supplierContactId, supplierName:input.supplierName, extractedSupplierName:input.extractedSupplierName, supplierMatchScore:input.supplierMatchScore, accountCode: input.accountCode,
     invoiceDate, dueDate, gross, pdf: input.pdf, uncertainFields: [...uncertain],
   };
 }
 
 /** Resolve available Xero candidates in application code, then construct the draft.
- * A missing supplier match requests a provisional contact from the caller, not a HOLD.
+ * Only existing Xero contacts are eligible; supplier uncertainty is advisory.
  */
 export async function buildDraftFromAvailableCandidates(input: {
   candidates: InvoiceCandidates;
   contacts: ContactCandidate[];
   accounts: AccountCandidate[];
-  createProvisionalContact: (name: string) => Promise<ContactCandidate>;
   pdf: OriginalPdf;
   preferredAccountCode?: string;
   fallbackAccountCode?: string;
   fallbackDate?: string;
   fallbackReference?: string;
   fallbackGross?: number;
+  recentAccountCodeForContact?: (contactId:string)=>Promise<string|undefined>;
 }): Promise<DraftCommand> {
   const name = input.candidates.supplier?.value?.trim() || input.pdf.filename.replace(/\.pdf$/i, '').slice(0, 100);
   const matched = chooseSupplier(name, input.contacts);
-  // Automatic processing may not create provisional supplier contacts.
-  // Unmatched or ambiguous supplier identity must be reviewed by a human.
-  if (!matched || matched.uncertainFields.length) throw new DocumentNeedsHumanReview('unclear','Supplier contact match requires human verification; no Xero contact created');
+  // Supplier uncertainty is recorded, not a draft veto. No new contacts are created.
+  if (!matched) throw new DocumentNeedsHumanReview('unclear','No existing Xero supplier contact exceeded 50% similarity; no Xero contact created');
   const supplier = matched;
-  const account = chooseAccount(input.accounts, input.preferredAccountCode, input.fallbackAccountCode);
-  if (account.uncertainFields.length) throw new DocumentNeedsHumanReview('unclear','Expense account coding requires human verification; no Xero draft created');
-  return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,
+  const historicalCode = input.recentAccountCodeForContact ? await input.recentAccountCodeForContact(supplier.value.id) : undefined;
+  const account = chooseAccount(input.accounts, historicalCode, input.fallbackAccountCode);
+  // All drafts receive normal finance review; account-code selection alone does not
+  // trigger an additional uncertainty exception. Historical codes must still be active and expense-eligible.
+  return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,extractedSupplierName:input.candidates.supplier?.value,supplierMatchScore:supplier.score,
     accountCode:account.value.code,pdf:input.pdf,fallbackDate:input.fallbackDate,
     fallbackReference:input.fallbackReference,fallbackGross:input.fallbackGross,
-    extraUncertainty:[...supplier.uncertainFields,...account.uncertainFields]});
+    extraUncertainty:[...supplier.uncertainFields]});
 }

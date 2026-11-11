@@ -29,17 +29,28 @@ test('unmatched supplier cannot create provisional Xero contact',async()=>{
    accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],
    preferredAccountCode:'449',pdf,
    createProvisionalContact:async()=>{created++;throw Error('MUST NOT CREATE');}
- }),/Supplier contact match requires human verification/);
+ }),/No existing Xero supplier contact exceeded 50%/);
  assert.equal(created,0);
 });
-test('fallback account coding cannot automatically create a Xero draft',async()=>{
+test('fallback account coding creates draft without separate coding review',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
- await assert.rejects(buildDraftFromAvailableCandidates({
-   candidates,contacts:[{id:'known',name:'Example Limited'}],
-   accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],
-   fallbackAccountCode:'449',pdf,
-   createProvisionalContact:async()=>{throw Error('MUST NOT CREATE');}
- }),/Expense account coding requires human verification/);
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],fallbackAccountCode:'449',pdf});
+ assert.equal(command.accountCode,'449');
+ assert.ok(!command.uncertainFields.includes('accountCode'));
+});
+test('most recent matched supplier invoice code overrides fallback',async()=>{
+ const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
+ let matchedId;
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Historical',type:'EXPENSE',status:'ACTIVE'}],fallbackAccountCode:'449',recentAccountCodeForContact:async id=>{matchedId=id;return '450'},pdf});
+ assert.equal(matchedId,'known');
+ assert.equal(command.accountCode,'450');
+ assert.ok(!command.uncertainFields.includes('accountCode'));
+});
+test('inactive historical account never overrides valid fallback',async()=>{
+ const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Inactive',type:'EXPENSE',status:'ARCHIVED'}],fallbackAccountCode:'449',recentAccountCodeForContact:async()=> '450',pdf});
+ assert.equal(command.accountCode,'449');
+ assert.ok(!command.uncertainFields.includes('accountCode'));
 });
 
 test('Healthtech payment receipt is not an invoice and invoice number is not receipt reference',()=>{
@@ -59,4 +70,14 @@ test('Water Plus period charges are distinguished from negative account balance'
 test('negative account balance alone is never extracted as positive gross',()=>{
  const c=extractInvoiceCandidates('Invoice\nInvoice No: A123\nCredit brought forward -£59.27\nTotal amount -£10.60');
  assert.equal(c.grossAmount,null);
+});
+
+test('existing Xero contact match carries source and score into draft audit',async()=>{
+ const candidates=extractInvoiceCandidates('Invoice\nPayable to: Water Plus Limited\nInvoice No: WP-123\nTotal Due: £48.67');
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'approved',name:'Water Plus Ltd'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],preferredAccountCode:'449',pdf});
+ assert.equal(command.supplierContactId,'approved');
+ assert.equal(command.supplierName,'Water Plus Ltd');
+ assert.equal(command.extractedSupplierName,'Water Plus Limited');
+ assert.equal(command.supplierMatchScore,1);
+ assert.ok(command.uncertainFields.includes('supplier'));
 });

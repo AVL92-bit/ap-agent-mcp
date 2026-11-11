@@ -1,7 +1,6 @@
 import { PDFParse } from 'pdf-parse';
 import { verifyInvoiceDocumentText, DocumentNeedsHumanReview, requireVerifiedCriticalFields } from './ap-document-verification.js';
 import type { PoolClient } from 'pg';
-import { makeApContactIntent, resolveProvisionalContact } from './ap-contact-write-intent.js';
 import { xeroFetch } from './xero-rate-limit.js';
 import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { extractInvoiceCandidates } from './invoice-candidates.js';
@@ -44,7 +43,7 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
   } finally { await parser.destroy(); }
 }
 
-/** Live read-only Xero candidate listing and narrowly scoped provisional-contact creation. */
+/** Live read-only Xero candidate listing. Never creates supplier contacts. */
 export async function makeLiveDraftCommand(conversation: InboxConversation, attachment: InboxAttachment, client: PoolClient): Promise<DraftCommand> {
   if (process.env.FRONT_ENABLED_INBOX_ID !== INBOX || process.env.XERO_PILOT_TENANT_ID !== TENANT || process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
     throw new Error('AP draft-only live processing is disabled for this inbox/tenant');
@@ -82,25 +81,23 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   const rawAccounts=await readPaged<{Code?:string;Name?:string;Type?:string;Status?:string}>('Accounts','Accounts');
   const contacts:ContactCandidate[]=rawContacts.filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!}));
   const accounts:AccountCandidate[]=rawAccounts.map(a=>({code:a.Code||'',name:a.Name||'',type:a.Type||'',status:a.Status||''}));
-  async function postProvisionalContact(name:string):Promise<ContactCandidate> {
-    const cleaned=name.replace(/[\x00-\x1f]/g,' ').trim().slice(0,200);
-    if (!cleaned) throw new Error('No provisional supplier name available');
-    const r=await xeroFetch(`${API}/Contacts`,{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({Contacts:[{Name:cleaned}]}),signal:AbortSignal.timeout(25000)});
-    if(!r.ok) throw new Error(`Xero provisional contact POST HTTP ${r.status}; reconcile before retry`);
-    const body=await r.json() as {Contacts?:Array<{ContactID?:string;Name?:string}>};
-    const contact=body.Contacts?.[0];
-    if(!contact?.ContactID) throw new Error('Provisional contact outcome uncertain; reconcile before retry');
-    return {id:contact.ContactID,name:contact.Name||cleaned};
+  // Read-only history: use the newest purchase bill for this exact existing Xero contact.
+  // Ignore credit notes, voided/deleted bills and accounts not active/expense eligible.
+  async function recentAccountCodeForContact(contactId:string):Promise<string|undefined> {
+    type HistoricalBill = {Type?:string;Status?:string;DateString?:string;Date?:string;InvoiceID?:string;
+      Contact?:{ContactID?:string};LineItems?:Array<{AccountCode?:string}>};
+    const bills=await readPaged<HistoricalBill>('Invoices','Invoices');
+    const eligible=bills.filter(b=>b.Type==='ACCPAY' && b.Contact?.ContactID===contactId &&
+      !['VOIDED','DELETED'].includes((b.Status??'').toUpperCase()) &&
+      (b.DateString || b.Date) && b.LineItems?.some(line=>line.AccountCode));
+    eligible.sort((a,b)=>String(b.DateString??b.Date).localeCompare(String(a.DateString??a.Date)) ||
+      String(b.InvoiceID??'').localeCompare(String(a.InvoiceID??'')));
+    return eligible[0]?.LineItems?.find(line=>line.AccountCode)?.AccountCode;
   }
-  const createProvisionalContact=(name:string)=>resolveProvisionalContact({
-    name, intent:makeApContactIntent(client),
-    listContacts:async()=> (await readPaged<{ContactID?:string;Name?:string}>('Contacts','Contacts'))
-      .filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!})),
-    postContact:postProvisionalContact,
-  });
-  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,createProvisionalContact,pdf,
+  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
+    recentAccountCodeForContact,
     fallbackAccountCode:process.env.AP_FALLBACK_ACCOUNT_CODE,
   });
 }

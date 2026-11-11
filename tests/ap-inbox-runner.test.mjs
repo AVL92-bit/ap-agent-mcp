@@ -16,3 +16,17 @@ test('mixed attachments never prematurely archive',async()=>{const f=fixture([{i
 test('finance and non-finance no-attachment outcomes',async()=>{const f=fixture([{id:'a',subject:'invoice overdue',body:'',attachments:[]},{id:'b',subject:'hello',body:'',attachments:[]}]);const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,1);assert.deepEqual(f.calls,[['tag','a','No attachment - Human review'],['tag','b','AP Agent reviewed'],['archive','b']]);});
 test('Sheet outage does not undo draft',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}],['supplier']);f.port.reportReview=async()=>{throw Error('unavailable')};const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,0);assert.equal(r.items[0].tag,'Human review');assert.match(r.items[0].failures[0],/Sheet report pending/);});
 test('incomplete enumeration aborts before any changes',async()=>{const f=fixture([]);f.port.listAllOpenConversations=async()=>{throw Error('truncated')};await assert.rejects(runApInbox(f.port,f.xero),/truncated/);assert.equal(f.calls.length,0);});
+
+test('supplier uncertainty report preserves extracted name, selected Xero contact and similarity',async()=>{
+ const f=fixture([{id:'cnv_a',subject:'',body:'',attachments:[{id:'fil_a',filename:'a.pdf',messageId:'msg_a'}]}],['supplier']);
+ f.port.makeDraftCommand=async()=>({kind:'Invoices',number:'WP-123',supplierContactId:'existing-contact',supplierName:'Water Plus Limited',extractedSupplierName:'Water Plus Group Limited',supplierMatchScore:2/3,accountCode:'449',invoiceDate:'2026-11-09',dueDate:'2026-11-09',gross:48.67,pdf,uncertainFields:['supplier']});
+ let review;
+ f.port.reportReview=async row=>{review=row};
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(r.archived,0);
+ assert.equal(review.outcome,'draft_uncertain');
+ assert.equal(review.supplier,'Water Plus Limited');
+ assert.equal(review.extractedSupplier,'Water Plus Group Limited');
+ assert.equal(review.supplierMatchScore,2/3);
+ assert.match(review.reason,/supplier/);
+});

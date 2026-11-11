@@ -95,20 +95,33 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
   const rejectName=(x:string)=>/^(?:page\s+\d+\s+of\s+\d+|invoice|receipt|issue\s+date|registered\s+office|cheques?\s+payable|vat\s+(?:registration|number)|company\s+(?:number|registration)|account\s+number|total|amount|summary|date)\b/i.test(x)
     || /\b(?:road|street|postcode|telephone|email|www\.|@)\b/i.test(x);
-  const companyEvidence:CandidateField[]=[];
+  // General payment-recipient evidence identifies the billing entity more strongly than a group
+  // registration footer. Never choose the first company in a multi-entity list.
+  const payeeEvidence:CandidateField[]=[];
+  const legalEvidence:CandidateField[]=[];
+  const legalPattern=/\b([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*\(\s*company\s+(?:number|no\.?)\s+[A-Za-z0-9]+\s*\)/gi;
   for(const line of lines) {
-    const legal=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*(?:\(\s*company\s+(?:number|no\.?)\s+\w+\s*\)|$)/i);
-    if(legal && !/\b(?:cheques?|payable\s+to|should\s+be\s+made)\b/i.test(line) && !rejectName(legal[1])) companyEvidence.push(field(clean(legal[1]),line,true));
-    const payee=line.match(/\bcheques?\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to\s+([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
-    if(payee) companyEvidence.push(field(clean(payee[1]),line,true));
+    const payee=line.match(/\b(?:(?:cheques?|payments?)\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to|(?:please\s+)?(?:make\s+)?payments?\s+to|(?:remit|remittance)\s+to|payable\s+to)\s*[:\-]?\s*([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
+    if(payee) payeeEvidence.push(field(clean(payee[1]),line,true));
+    for(const legal of line.matchAll(legalPattern)) {
+      const name=clean(legal[1]).replace(/^(?:and|or)\s+/i,'');
+      if(!rejectName(name)) legalEvidence.push(field(name,line,true));
+    }
+    if(!payee && !/\b(?:cheques?|payable\s+to)\b/i.test(line)) {
+      const standalone=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))$/i);
+      if(standalone && !rejectName(standalone[1])) legalEvidence.push(field(clean(standalone[1]),line,true));
+    }
   }
-  const distinctCompanies=[...new Set(companyEvidence.map(c=>c.value.toLowerCase()))];
-  const unambiguousCompany=distinctCompanies.length===1?companyEvidence[0]:null;
+  const distinct=(values:CandidateField[])=>[...new Set(values.map(c=>c.value.toLowerCase()))];
+  const payeeNames=distinct(payeeEvidence);
+  const legalNames=distinct(legalEvidence);
   const receiptName=receipt?header.find(line=>!rejectName(line) && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line)):null;
   const supplier=supplierLine
     ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
-    : distinctCompanies.length>1?null
-    : unambiguousCompany?unambiguousCompany
+    : payeeNames.length===1 ? payeeEvidence[0]
+    : payeeNames.length>1 ? payeeEvidence[0]
+    : legalNames.length===1 ? legalEvidence[0]
+    : legalEvidence.length ? legalEvidence[0]
     : receiptName?field(receiptName,receiptName,true):null;
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
   const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};
