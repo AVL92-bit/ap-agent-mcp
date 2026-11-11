@@ -96,3 +96,12 @@ test('group registration list without payee supplies uncertain candidate',()=>{
  assert.equal(c.supplier?.uncertain,true);
  assert.ok(c.supplier?.value);
 });
+
+test('general payable-to and payment recipient wording outranks group footer',()=>{
+ for(const instruction of ['Payable to: Water Plus Limited','Payments should be made payable to Water Plus Limited','Please make payment to Water Plus Limited','Remittance to: Water Plus Limited']) {
+  const c=extractInvoiceCandidates('Invoice No: WP-123\\nWater Plus Group Limited (company number 10012579), Water Plus Limited (company number 04141390) and Water Plus Select Limited (company number 03511659).\\n'+instruction+'\\nTotal Due: £48.67');
+  assert.equal(c.supplier?.value,'Water Plus Limited',instruction);
+  assert.equal(c.supplier?.uncertain,true,instruction);
+  assert.equal(c.supplier?.evidence,instruction);
+ }
+});
