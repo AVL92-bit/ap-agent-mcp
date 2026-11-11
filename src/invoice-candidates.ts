@@ -98,7 +98,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const companyEvidence:CandidateField[]=[];
   for(const line of lines) {
     const legal=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*(?:\(\s*company\s+(?:number|no\.?)\s+\w+\s*\)|$)/i);
-    if(legal && !rejectName(legal[1])) companyEvidence.push(field(clean(legal[1]),line,true));
+    if(legal && !/\b(?:cheques?|payable\s+to|should\s+be\s+made)\b/i.test(line) && !rejectName(legal[1])) companyEvidence.push(field(clean(legal[1]),line,true));
     const payee=line.match(/\bcheques?\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to\s+([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
     if(payee) companyEvidence.push(field(clean(payee[1]),line,true));
   }
