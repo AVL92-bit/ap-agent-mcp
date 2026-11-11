@@ -50,6 +50,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
     if (raw && /[\x00-\x1f\x7f]/.test(raw)) linkedInvoiceReference.uncertain=true;
   }
   const invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date|issue\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b/i);
+  if (invoiceDate && /[A-Za-z]/.test(invoiceDate.value)) invoiceDate.uncertain=true;
   const dueDate=matchField(lines,/\b(?:due\s*date|payment\s*due)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
   // Prefer explicitly payable/gross totals. Never infer gross from a VAT, subtotal,
   // unit price or arbitrary line-item amount. Accept whole-pound and UK comma amounts.
