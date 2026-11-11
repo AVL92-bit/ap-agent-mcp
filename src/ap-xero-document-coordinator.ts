@@ -11,6 +11,8 @@ export type DraftCommand = {
   number: string;
   supplierContactId: string;
   supplierName?: string;
+  extractedSupplierName?: string;
+  supplierMatchScore?: number;
   accountCode: string;
   invoiceDate: string;
   dueDate: string;
