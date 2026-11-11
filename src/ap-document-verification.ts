@@ -33,3 +33,19 @@ export function verifyInvoiceDocumentText(text: string): void {
   if (!type && !reference && !total) throw new DocumentNeedsHumanReview('not_invoice','No invoice or credit-note identifiers or payable total in document text');
   if (!type || !reference || !total) throw new DocumentNeedsHumanReview('unclear','Insufficient invoice evidence in document body: type, reference and payable total are required');
 }
+
+/** Critical PDF-derived fields must be certain before any live Xero access. */
+export function requireVerifiedCriticalFields(candidates: {
+  supplier: {uncertain:boolean}|null;
+  reference: {uncertain:boolean}|null;
+  grossAmount: {uncertain:boolean}|null;
+  documentType: {uncertain:boolean}|null;
+  currency: {uncertain:boolean}|null;
+  uncertainFields: string[];
+}): void {
+  const critical = ['supplier','reference','grossAmount','documentType','currency'] as const;
+  const missing = critical.filter(key=>!candidates[key] || candidates[key]!.uncertain);
+  const flagged = candidates.uncertainFields.filter(key=>critical.some(k=>k===key));
+  if (missing.length || flagged.length) throw new DocumentNeedsHumanReview('unclear',
+    `Critical invoice fields require verification before Xero access: ${[...new Set([...missing,...flagged])].join(', ')}`);
+}
