@@ -95,13 +95,13 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
   const rejectName=(x:string)=>/^(?:page\s+\d+\s+of\s+\d+|invoice|receipt|issue\s+date|registered\s+office|cheques?\s+payable|vat\s+(?:registration|number)|company\s+(?:number|registration)|account\s+number|total|amount|summary|date)\b/i.test(x)
     || /\b(?:road|street|postcode|telephone|email|www\.|@)\b/i.test(x);
-  // Payee evidence identifies the billing entity more strongly than a group
+  // General payment-recipient evidence identifies the billing entity more strongly than a group
   // registration footer. Never choose the first company in a multi-entity list.
   const payeeEvidence:CandidateField[]=[];
   const legalEvidence:CandidateField[]=[];
   const legalPattern=/\b([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*\(\s*company\s+(?:number|no\.?)\s+[A-Za-z0-9]+\s*\)/gi;
   for(const line of lines) {
-    const payee=line.match(/\bcheques?\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to\s+([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
+    const payee=line.match(/\b(?:(?:cheques?|payments?)\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to|(?:please\s+)?(?:make\s+)?payments?\s+to|(?:remit|remittance)\s+to|payable\s+to)\s*[:\-]?\s*([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
     if(payee) payeeEvidence.push(field(clean(payee[1]),line,true));
     for(const legal of line.matchAll(legalPattern)) {
       const name=clean(legal[1]).replace(/^(?:and|or)\s+/i,'');
