@@ -1,4 +1,5 @@
 import { PDFParse } from 'pdf-parse';
+import { verifyInvoiceDocumentText, DocumentNeedsHumanReview } from './ap-document-verification.js';
 import { ocrInvoicePdf } from './ap-pdf-ocr.js';
 import type { PoolClient } from 'pg';
 import { makeApContactIntent, resolveProvisionalContact } from './ap-contact-write-intent.js';
@@ -39,6 +40,7 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
     const result = await parser.getText();
     const text = result.text?.trim() || '';
     if (text.length < 10 || text.length > 250000) throw new Error('No usable embedded PDF text; image-only PDF extraction unavailable');
+    verifyInvoiceDocumentText(text);
     return extractInvoiceCandidates(text);
   } finally { await parser.destroy(); }
 }
@@ -55,7 +57,10 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   try {
     candidates = await extractPdfCandidates(pdf);
   } catch (error) {
+    if (error instanceof DocumentNeedsHumanReview) throw error;
     if (!/No usable embedded PDF text/.test(String(error))) throw error;
+    // OCR or correspondence text is not sufficient to authorise automatic drafting.
+    throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
     // Optional OCR is deliberately never treated as verified document data.
     // If OCR is unavailable, preserve the existing Front-message fallback.
     let ocrText: string | null = null;
