@@ -79,8 +79,20 @@ test('cheque payee is usable evidence without standalone company line',()=>{
  assert.equal(c.supplier?.value,'Water Plus Limited');
  assert.equal(c.supplier?.uncertain,true);
 });
-test('conflicting legal names do not select a supplier',()=>{
+test('payee takes precedence over a conflicting legal-name footer',()=>{
  const c=extractInvoiceCandidates('Invoice No: B22\nWater Plus Limited (company number 04141390)\nCheques should be made payable to Other Company Limited\nTotal Due: £20.00');
- assert.equal(c.supplier,null);
- assert.ok(c.uncertainFields.includes('supplier'));
+ assert.equal(c.supplier?.value,'Other Company Limited');
+ assert.equal(c.supplier?.uncertain,true);
+});
+
+test('three registered group entities do not override the cheque payee',()=>{
+ const c=extractInvoiceCandidates('Summary of Charges: invoice wp-INV13861043\\nWater Plus Group Limited (company number 10012579), Water Plus Limited (company number 04141390) and Water Plus Select Limited (company number 03511659).\\nCheques should be made payable to Water Plus Limited\\nTotal charges for this period £48.67');
+ assert.equal(c.supplier?.value,'Water Plus Limited');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.match(c.supplier?.evidence,/Cheques should be made payable/);
+});
+test('group registration list without payee supplies uncertain candidate',()=>{
+ const c=extractInvoiceCandidates('Invoice No: 123\\nWater Plus Group Limited (company number 10012579), Water Plus Limited (company number 04141390) and Water Plus Select Limited (company number 03511659).');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.ok(c.supplier?.value);
 });
