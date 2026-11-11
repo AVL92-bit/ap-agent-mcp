@@ -43,7 +43,7 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
   } finally { await parser.destroy(); }
 }
 
-/** Live read-only Xero candidate listing and narrowly scoped provisional-contact creation. */
+/** Live read-only Xero candidate listing. Never creates supplier contacts. */
 export async function makeLiveDraftCommand(conversation: InboxConversation, attachment: InboxAttachment, client: PoolClient): Promise<DraftCommand> {
   if (process.env.FRONT_ENABLED_INBOX_ID !== INBOX || process.env.XERO_PILOT_TENANT_ID !== TENANT || process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
     throw new Error('AP draft-only live processing is disabled for this inbox/tenant');
@@ -84,6 +84,9 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
+    // Only an explicitly operator-approved account code can authorise automatic coding.
+    // The previous generic fallback remains review-only and cannot silently create a bill.
+    preferredAccountCode:process.env.AP_APPROVED_ACCOUNT_CODE,
     fallbackAccountCode:process.env.AP_FALLBACK_ACCOUNT_CODE,
   });
 }
