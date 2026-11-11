@@ -95,7 +95,6 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
   const rejectName=(x:string)=>/^(?:page\s+\d+\s+of\s+\d+|invoice|receipt|issue\s+date|registered\s+office|cheques?\s+payable|vat\s+(?:registration|number)|company\s+(?:number|registration)|account\s+number|total|amount|summary|date)\b/i.test(x)
     || /\b(?:road|street|postcode|telephone|email|www\.|@)\b/i.test(x);
-  const companyPattern=/([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i;
   const companyEvidence:CandidateField[]=[];
   for(const line of lines) {
     const legal=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*(?:\(\s*company\s+(?:number|no\.?)\s+\w+\s*\)|$)/i);
