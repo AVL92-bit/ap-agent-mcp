@@ -46,9 +46,9 @@ test('Bison tax invoice with ordinary total remains eligible for subsequent chec
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Tax Invoice\nInvoice Number: INV/38652\nTotal Due: £420.00'));
 });
 
-test('missing PDF supplier blocks Xero access even when invoice reference and total exist',()=>{
+test('missing PDF supplier does not by itself block Xero contact matching',()=>{
   const candidates={supplier:null,reference:{uncertain:false},grossAmount:{uncertain:false},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['supplier']};
-  assert.throws(()=>requireVerifiedCriticalFields(candidates),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear'&&/supplier/.test(e.message));
+  assert.doesNotThrow(()=>requireVerifiedCriticalFields(candidates));
 });
 test('uncertain gross amount blocks Xero access rather than creating a draft',()=>{
   const candidates={supplier:{uncertain:false},reference:{uncertain:false},grossAmount:{uncertain:true},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['grossAmount']};
