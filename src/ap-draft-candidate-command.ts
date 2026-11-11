@@ -1,3 +1,4 @@
+import { DocumentNeedsHumanReview } from './ap-document-verification.js';
 import { chooseAccount, chooseSupplier, type ContactCandidate, type AccountCandidate } from './ap-best-candidate-selection.js';
 import type { InvoiceCandidates } from './invoice-candidates.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
@@ -64,9 +65,12 @@ export async function buildDraftFromAvailableCandidates(input: {
 }): Promise<DraftCommand> {
   const name = input.candidates.supplier?.value?.trim() || input.pdf.filename.replace(/\.pdf$/i, '').slice(0, 100);
   const matched = chooseSupplier(name, input.contacts);
-  const supplier = matched ?? {value: await input.createProvisionalContact(name),
-    uncertainFields:['supplier'], explanation:'Provisional Xero contact created'};
+  // Automatic processing may not create provisional supplier contacts.
+  // Unmatched or ambiguous supplier identity must be reviewed by a human.
+  if (!matched || matched.uncertainFields.length) throw new DocumentNeedsHumanReview('unclear','Supplier contact match requires human verification; no Xero contact created');
+  const supplier = matched;
   const account = chooseAccount(input.accounts, input.preferredAccountCode, input.fallbackAccountCode);
+  if (account.uncertainFields.length) throw new DocumentNeedsHumanReview('unclear','Expense account coding requires human verification; no Xero draft created');
   return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,
     accountCode:account.value.code,pdf:input.pdf,fallbackDate:input.fallbackDate,
     fallbackReference:input.fallbackReference,fallbackGross:input.fallbackGross,

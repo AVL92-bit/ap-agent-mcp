@@ -1,5 +1,5 @@
 import { PDFParse } from 'pdf-parse';
-import { verifyInvoiceDocumentText, DocumentNeedsHumanReview } from './ap-document-verification.js';
+import { verifyInvoiceDocumentText, DocumentNeedsHumanReview, requireVerifiedCriticalFields } from './ap-document-verification.js';
 import type { PoolClient } from 'pg';
 import { makeApContactIntent, resolveProvisionalContact } from './ap-contact-write-intent.js';
 import { xeroFetch } from './xero-rate-limit.js';
@@ -61,16 +61,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     // OCR or correspondence text is not sufficient to authorise automatic drafting.
     throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
   }
-  // Missing gross may be recovered from explicit payable totals in the originating
-  // conversation. The amount is advisory and always requires human review.
-  if (!candidates.grossAmount && conversation.body) {
-    const fallback = extractInvoiceCandidates(conversation.body);
-    if (fallback.grossAmount) {
-      candidates.grossAmount = {...fallback.grossAmount, uncertain:true};
-      candidates.uncertainFields = [...new Set([...candidates.uncertainFields,
-        'grossAmount', 'grossFromConversationNotPdf'])];
-    }
-  }
+  requireVerifiedCriticalFields(candidates);
   const session = await getPilotXeroWriteSession();
   if (session.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
   const headers = {Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'};

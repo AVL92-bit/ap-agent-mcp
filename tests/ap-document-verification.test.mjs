@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {verifyInvoiceDocumentText,DocumentNeedsHumanReview} from '../dist/ap-document-verification.js';
+import {verifyInvoiceDocumentText,DocumentNeedsHumanReview,requireVerifiedCriticalFields} from '../dist/ap-document-verification.js';
 import {runApInbox} from '../dist/ap-inbox-runner.js';
 
 test('non-invoice letter is rejected without invoice evidence',()=>{
@@ -26,4 +26,35 @@ test('review-only document does not invoke Xero or journal and remains open',asy
   const report=await runApInbox(port,xero);
   assert.deepEqual(actions,[['sheet','not_invoice','letter.pdf'],['tag','Human review']]);
   assert.equal(report.archived,0);
+});
+
+test('Healthtech payment receipt referencing an invoice cannot pass the evidence gate',()=>{
+  const body='Receipt\nHealthtech 1\nReceipt Number: 2874-6222\nPaid by Bacs Direct Debit\nInvoice Number: HT1-35587\nTotal Due: £771.12';
+  assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='not_invoice');
+});
+test('ordinary Healthtech invoice with payable total still passes evidence gate',()=>{
+  assert.doesNotThrow(()=>verifyInvoiceDocumentText('Invoice\nHealthtech 1\nInvoice Number: HT1-35587\nTotal Due: £771.12'));
+});
+test('Water Plus account in credit cannot be drafted from the account balance',()=>{
+  const body='Summary of Charges: invoice wp-INV13861043\nInvoice Number: wp-INV13861043\nTotal Due: £48.67\nCredit brought forward £59.27\nAccount balance -£10.60';
+  assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+});
+test('conflicting receipt and invoice headings require human review',()=>{
+  assert.throws(()=>verifyInvoiceDocumentText('Receipt\nInvoice Number: HT1-35587\nInvoice\nTotal Due: £771.12'),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+});
+test('Bison tax invoice with ordinary total remains eligible for subsequent checks',()=>{
+  assert.doesNotThrow(()=>verifyInvoiceDocumentText('Tax Invoice\nInvoice Number: INV/38652\nTotal Due: £420.00'));
+});
+
+test('missing PDF supplier blocks Xero access even when invoice reference and total exist',()=>{
+  const candidates={supplier:null,reference:{uncertain:false},grossAmount:{uncertain:false},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['supplier']};
+  assert.throws(()=>requireVerifiedCriticalFields(candidates),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear'&&/supplier/.test(e.message));
+});
+test('uncertain gross amount blocks Xero access rather than creating a draft',()=>{
+  const candidates={supplier:{uncertain:false},reference:{uncertain:false},grossAmount:{uncertain:true},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['grossAmount']};
+  assert.throws(()=>requireVerifiedCriticalFields(candidates),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear'&&/grossAmount/.test(e.message));
+});
+test('verified critical PDF fields pass the Xero preflight guard',()=>{
+  const certain={uncertain:false};
+  assert.doesNotThrow(()=>requireVerifiedCriticalFields({supplier:certain,reference:certain,grossAmount:certain,documentType:certain,currency:certain,uncertainFields:[]}));
 });
