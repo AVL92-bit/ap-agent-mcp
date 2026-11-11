@@ -105,3 +105,13 @@ test('general payable-to and payment recipient wording outranks group footer',()
   assert.equal(c.supplier?.evidence,instruction);
  }
 });
+
+
+test('Water Plus real PDF payee split across lines outranks registration footer',()=>{
+ const body='Summary \\t of \\t Charges: invoice wp-INV13861043\\nTotal \\tcharges \\tfor \\tthis \\tperiod \\t£48.67\\nTotal \\tamount \\t-£10.60\\nRegistered \\tin \\tEngland \\t& \\tWales.\\nWater \\tPlus \\tGroup \\tLimited \\t(company \\tnumber \\t10012579), \\tWater \\tPlus \\tLimited \\t(company \\tnumber \\t04141390) \\tand \\tWater \\tPlus \\tSelect \\tLimited \\t(company \\tnumber \\t03511659).\\nIf \\tyou \\thave \\tnot \\talready \\tagreed \\ta \\tspecific \\tcontract \\twith \\tWater \\tPlus\\nLimited \\t(we \\t/ \\tus \\t/ \\tour)\\nCheques \\tshould \\tbe \\tmade \\tpayable \\tto \\tWater\\nPlus \\tLimited. \\tThis \\tservice \\tis \\tfree';
+ const c=extractInvoiceCandidates(body);
+ assert.equal(c.supplier?.value,'Water Plus Limited');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.match(c.supplier?.evidence,/Cheques should be made payable to Water Plus Limited/);
+ assert.equal(c.grossAmount?.value,'£48.67');
+});
