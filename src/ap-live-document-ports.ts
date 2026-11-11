@@ -1,5 +1,5 @@
 import { PDFParse } from 'pdf-parse';
-import { verifyInvoiceDocumentText, DocumentNeedsHumanReview } from './ap-document-verification.js';
+import { verifyInvoiceDocumentText, DocumentNeedsHumanReview, requireVerifiedCriticalFields } from './ap-document-verification.js';
 import type { PoolClient } from 'pg';
 import { makeApContactIntent, resolveProvisionalContact } from './ap-contact-write-intent.js';
 import { xeroFetch } from './xero-rate-limit.js';
@@ -61,15 +61,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     // OCR or correspondence text is not sufficient to authorise automatic drafting.
     throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
   }
-  // No provisional contact, Xero API call or draft may be attempted when
-  // the PDF does not independently establish critical accounting fields.
-  // Email-body values are not acceptable substitutes for invoice evidence.
-  const critical = ['supplier','reference','grossAmount','documentType','currency'] as const;
-  const missing = critical.filter(key => !candidates[key] || candidates[key]!.uncertain);
-  if (missing.length || candidates.uncertainFields.some(key=>critical.includes(key as typeof critical[number]))) {
-    throw new DocumentNeedsHumanReview('unclear',
-      `Critical invoice fields require verification before Xero access: ${[...new Set([...missing,...candidates.uncertainFields.filter(key=>critical.includes(key as typeof critical[number]))])].join(', ')}`);
-  }
+  requireVerifiedCriticalFields(candidates);
   const session = await getPilotXeroWriteSession();
   if (session.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
   const headers = {Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'};
