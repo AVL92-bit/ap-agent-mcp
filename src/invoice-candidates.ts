@@ -99,25 +99,25 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   // registration footer. Never choose the first company in a multi-entity list.
   const payeeEvidence:CandidateField[]=[];
   const legalEvidence:CandidateField[]=[];
-  const legalPattern=/\\b([A-Z][A-Za-z0-9 &'().-]{2,80}?\\s+(?:Limited|Ltd|LLP|PLC))\\s*\\(\\s*company\\s+(?:number|no\\.?)\\s+[A-Za-z0-9]+\\s*\\)/gi;
+  const legalPattern=/\b([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*\(\s*company\s+(?:number|no\.?)\s+[A-Za-z0-9]+\s*\)/gi;
   for(const line of lines) {
-    const payee=line.match(/\\bcheques?\\s+(?:should\\s+be\\s+)?(?:made\\s+)?payable\\s+to\\s+([A-Z][A-Za-z0-9 &'().-]{2,80}?\\s+(?:Limited|Ltd|LLP|PLC))\\b/i);
+    const payee=line.match(/\bcheques?\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to\s+([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
     if(payee) payeeEvidence.push(field(clean(payee[1]),line,true));
     for(const legal of line.matchAll(legalPattern)) {
-      const name=clean(legal[1]).replace(/^(?:and|or)\\s+/i,'');
+      const name=clean(legal[1]).replace(/^(?:and|or)\s+/i,'');
       if(!rejectName(name)) legalEvidence.push(field(name,line,true));
     }
-    if(!payee && !/\\b(?:cheques?|payable\\s+to)\\b/i.test(line)) {
-      const standalone=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\\s+(?:Limited|Ltd|LLP|PLC))$/i);
+    if(!payee && !/\b(?:cheques?|payable\s+to)\b/i.test(line)) {
+      const standalone=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))$/i);
       if(standalone && !rejectName(standalone[1])) legalEvidence.push(field(clean(standalone[1]),line,true));
     }
   }
   const distinct=(values:CandidateField[])=>[...new Set(values.map(c=>c.value.toLowerCase()))];
   const payeeNames=distinct(payeeEvidence);
   const legalNames=distinct(legalEvidence);
-  const receiptName=receipt?header.find(line=>!rejectName(line) && /^[A-Z][A-Za-z]+(?:\\s+[A-Za-z0-9]+){1,3}$/.test(line)):null;
+  const receiptName=receipt?header.find(line=>!rejectName(line) && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line)):null;
   const supplier=supplierLine
-    ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\\s+by)\\s*:/i,'')),supplierLine)
+    ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
     : payeeNames.length===1 ? payeeEvidence[0]
     : payeeNames.length>1 ? payeeEvidence[0]
     : legalNames.length===1 ? legalEvidence[0]
