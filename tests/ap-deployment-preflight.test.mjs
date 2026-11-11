@@ -17,8 +17,9 @@ test('CI runs TypeScript, application tests and production Docker build',()=>{
   assert.match(ci,/node --experimental-strip-types --test tests\/\*\.test\.mjs/);
   assert.match(ci,/docker build -t ap-agent-build-check/);
 });
-test('OCR remains opt-in and uncertain',()=>{
+test('Unreadable PDF requires human review and cannot trigger OCR drafting',()=>{
   const live=read('src/ap-live-document-ports.ts');
-  assert.match(live,/AP_PDF_OCR_ENABLED/);
-  assert.match(live,/fieldsFromOcrRequireReview/);
+  assert.match(live,/DocumentNeedsHumanReview/);
+  assert.match(live,/PDF text is unreadable; human review required/);
+  assert.doesNotMatch(live,/fieldsFromOcrRequireReview/);
 });

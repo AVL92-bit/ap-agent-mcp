@@ -1,16 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runApInbox } from '../src/ap-inbox-runner.ts';
+import { runApInbox } from '../dist/ap-inbox-runner.js';
 const pdf = {filename:'a.pdf',contentType:'application/pdf',bytes:new TextEncoder().encode('%PDF-example')};
 function fixture(conversations, uncertainFields=[]) {
   const calls=[];
   const port={listAllOpenConversations:async()=>conversations,makeDraftCommand:async(c,a)=>({kind:'Invoices',number:a.id,supplierContactId:'c',accountCode:'449',invoiceDate:'2026-11-09',dueDate:'2026-11-09',gross:12,pdf,uncertainFields}),applyTag:async(id,tag)=>calls.push(['tag',id,tag]),archive:async(id)=>calls.push(['archive',id]),reportReview:async(row)=>calls.push(['sheet',row.outcome])};
-  const xero={lookup:async()=>[],createDraft:async()=> 'xero1',attachOriginal:async()=>{}};
+  const xero={lookup:async()=>[],createDraft:async()=> 'xero1',attachOriginal:async()=>{},verifyOriginal:async()=>true};
   return {port,xero,calls};
 }
 test('clean invoice drafts, tags and archives',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,1);assert.equal(r.documents,1);assert.deepEqual(f.calls,[['tag','a','AP Agent reviewed'],['archive','a']]);});
 test('uncertain draft reports once and remains open',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}],['supplier']);const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,0);assert.deepEqual(f.calls,[['sheet','draft_uncertain'],['tag','a','Human review']]);});
-test('technical failure stays open and reports',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.doc',messageId:'m'}]}]);const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,0);assert.equal(r.items[0].failures.length,1);assert.equal(f.calls[0][1],'technical_failure');});
+test('technical failure stays open and reports',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);f.port.makeDraftCommand=async()=>{throw Error('PDF download failed')};const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,0);assert.equal(r.items[0].failures.length,1);assert.equal(f.calls[0][1],'technical_failure');});
 test('existing Xero invoice archives without new draft',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);f.xero.lookup=async()=>[{id:'existing',kind:'Invoices',exact:true}];f.xero.createDraft=async()=>{throw Error('duplicate')};f.xero.verifyOriginal=async()=>true;const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,1);assert.equal(f.calls.some(x=>x[0]==='sheet'),false);});
 test('mixed attachments never prematurely archive',async()=>{const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'},{id:'i2',filename:'b.txt',messageId:'m'}]}]);const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,0);assert.equal(r.documents,2);});
 test('finance and non-finance no-attachment outcomes',async()=>{const f=fixture([{id:'a',subject:'invoice overdue',body:'',attachments:[]},{id:'b',subject:'hello',body:'',attachments:[]}]);const r=await runApInbox(f.port,f.xero);assert.equal(r.archived,1);assert.deepEqual(f.calls,[['tag','a','No attachment - Human review'],['tag','b','AP Agent reviewed'],['archive','b']]);});

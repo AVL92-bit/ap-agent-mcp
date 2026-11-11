@@ -138,7 +138,7 @@ export async function assertReviewNotHeldInSheet(_reviewId:string,_conversationI
  * This never controls whether Xero may create a draft. */
 export async function appendApInboxException(input: {
   conversationId:string; attachmentId:string; xeroId?:string; reason:string;
-  outcome:'draft_uncertain'|'technical_failure'; supplier?:string; reference?:string; gross?:number;
+  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?:string; supplier?:string; reference?:string; gross?:number;
 }):Promise<void> {
   if(SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID || SHEET_NAME!=='Finance review') throw new Error('Finance review Sheet target mismatch');
   if(!/^cnv_[\w-]+$/.test(input.conversationId)||!/^fil_[\w-]+$/.test(input.attachmentId)) throw new Error('Invalid review source IDs');
@@ -150,9 +150,10 @@ export async function appendApInboxException(input: {
   if(expected.some((h,i)=>rows[0]?.[i]!==h)) throw new Error('Finance review Sheet headers do not match');
   const key=`inbox:${input.conversationId}:${input.attachmentId}:${input.outcome}`;
   if(rows.some(r=>r[7]?.includes(key))) return;
-  const row=[new Date().toISOString(),input.outcome==='draft_uncertain'?'Draft with uncertainty':'Technical failure',
+  const reviewOnly=input.outcome==='not_invoice'||input.outcome==='unclear';
+  const row=[new Date().toISOString(),reviewOnly?(input.outcome==='not_invoice'?'Not an invoice':'Unclear document'):(input.outcome==='draft_uncertain'?'Draft with uncertainty':'Technical failure'),
     input.xeroId?`https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${input.xeroId}`:'',
-    input.supplier??'',input.reference??'',input.gross===undefined?'':String(input.gross),input.outcome==='draft_uncertain'?'Uncertain fields':'Processing failure',
-    `${key} | ${input.reason}`,`https://app.frontapp.com/open/${input.conversationId}`];
+    input.supplier??'',input.reference??'',input.gross===undefined?'':String(input.gross),reviewOnly?'Document review':(input.outcome==='draft_uncertain'?'Uncertain fields':'Processing failure'),
+    `${key} | ${input.filename ? `Document: ${input.filename} | ` : ''}${input.reason}`,`https://app.frontapp.com/open/${input.conversationId}`];
   await sheetsRequest(token,`/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,'POST',{values:[row]});
 }
