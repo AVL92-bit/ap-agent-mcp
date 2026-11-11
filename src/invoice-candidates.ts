@@ -93,19 +93,22 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const amountPaid=receipt?matchField(lines,/\bamount\s+paid\s*[:=]?\s*([£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i):null;
   const accountBalance=matchField(lines,/\b(?:total\s+amount|account\s+balance|balance\s+carried\s+forward)\s*[:=]?\s*([-−]?[£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i);
   const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
-  // Do not treat pagination, addresses or remittance instructions as company names.
-  // Labelled legal/payment names are review-only and must be verified by a person.
   const rejectName=(x:string)=>/^(?:page\s+\d+\s+of\s+\d+|invoice|receipt|issue\s+date|registered\s+office|cheques?\s+payable|vat\s+(?:registration|number)|company\s+(?:number|registration)|account\s+number|total|amount|summary|date)\b/i.test(x)
     || /\b(?:road|street|postcode|telephone|email|www\.|@)\b/i.test(x);
-  const labelled=lines.map((line,i)=>({line,i})).find(({line})=>/^(?:registered\s+office|cheques?\s+payable\s+to)\s*:/i.test(line));
-  const legalName=lines.find(line=>!rejectName(line) && /^[A-Z][A-Za-z0-9 &'().-]{2,80}\s+(?:Limited|Ltd|LLP|PLC)$/i.test(line));
-  const labelledName=labelled && clean(labelled.line.replace(/^(?:registered\s+office|cheques?\s+payable\s+to)\s*:/i,''));
+  const companyEvidence:CandidateField[]=[];
+  for(const line of lines) {
+    const legal=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*(?:\(\s*company\s+(?:number|no\.?)\s+\w+\s*\)|$)/i);
+    if(legal && !/\b(?:cheques?|payable\s+to|should\s+be\s+made)\b/i.test(line) && !rejectName(legal[1])) companyEvidence.push(field(clean(legal[1]),line,true));
+    const payee=line.match(/\bcheques?\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to\s+([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
+    if(payee) companyEvidence.push(field(clean(payee[1]),line,true));
+  }
+  const distinctCompanies=[...new Set(companyEvidence.map(c=>c.value.toLowerCase()))];
+  const unambiguousCompany=distinctCompanies.length===1?companyEvidence[0]:null;
   const receiptName=receipt?header.find(line=>!rejectName(line) && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line)):null;
   const supplier=supplierLine
     ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
-    : legalName?field(legalName,legalName,true)
-    : labelledName && !rejectName(labelledName) && /^[A-Z][A-Za-z0-9 &'().-]{2,80}\s+(?:Limited|Ltd|LLP|PLC)$/.test(labelledName)
-      ?field(labelledName,labelled!.line,true)
+    : distinctCompanies.length>1?null
+    : unambiguousCompany?unambiguousCompany
     : receiptName?field(receiptName,receiptName,true):null;
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
   const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};

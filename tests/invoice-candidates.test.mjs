@@ -65,3 +65,22 @@ test('unrelated tab characters do not taint intact invoice references',()=>{
  assert.equal(c.reference?.value,'ABC-123');
  assert.equal(c.reference?.uncertain,false);
 });
+
+test('Water Plus tab-separated company number and cheque payee identify uncertain supplier',()=>{
+ const c=extractInvoiceCandidates('Summary of Charges: invoice wp-INV13861043\nIssue date:\n03 November 2026\nTotal charges for this period £48.67\nWater\tPlus\tLimited (company number 04141390)\nCheques should be made payable to Water\tPlus\tLimited\nTotal amount -£10.60');
+ assert.equal(c.supplier?.value,'Water Plus Limited');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.match(c.supplier?.evidence,/company number 04141390/);
+ assert.equal(c.grossAmount?.value,'£48.67');
+ assert.equal(c.accountBalance?.value,'-£10.60');
+});
+test('cheque payee is usable evidence without standalone company line',()=>{
+ const c=extractInvoiceCandidates('Invoice No: B22\nCheques should be made payable to Water\tPlus\tLimited\nTotal Due: £20.00');
+ assert.equal(c.supplier?.value,'Water Plus Limited');
+ assert.equal(c.supplier?.uncertain,true);
+});
+test('conflicting legal names do not select a supplier',()=>{
+ const c=extractInvoiceCandidates('Invoice No: B22\nWater Plus Limited (company number 04141390)\nCheques should be made payable to Other Company Limited\nTotal Due: £20.00');
+ assert.equal(c.supplier,null);
+ assert.ok(c.uncertainFields.includes('supplier'));
+});
