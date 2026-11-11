@@ -121,7 +121,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
     : payeeNames.length===1 ? payeeEvidence[0]
     : payeeNames.length>1 ? payeeEvidence[0]
     : legalNames.length===1 ? legalEvidence[0]
-    : legalEvidence.length ? legalEvidence.find(c=>/\\bWater Plus Limited\\b/i.test(c.value))??legalEvidence[0]
+    : legalEvidence.length ? legalEvidence[0]
     : receiptName?field(receiptName,receiptName,true):null;
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
   const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};
