@@ -45,3 +45,23 @@ test('ordinary explicit supplier and numeric dates remain verified',()=>{
  assert.equal(r.supplier.uncertain,false);
  assert.equal(r.invoiceDate.uncertain,false);
 });
+
+test('receipt pagination cannot be a supplier',()=>{
+ const c=extractInvoiceCandidates('Page 1 of 1\nReceipt\nHealthtech 1\nReceipt number 2874\u00006222\nInvoice number HT1\u000035587\nAmount paid £771.12');
+ assert.equal(c.supplier?.value,'Healthtech 1');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.equal(c.reference?.uncertain,true);
+});
+test('split issue date and full-document legal supplier are advisory',()=>{
+ const c=extractInvoiceCandidates('Page 1 of 4\nSummary of Charges: invoice wp-INV13861043\nIssue date:\t\n03 November 2026\nTotal charges for this period £48.67\n'+Array(22).fill('Account information').join('\n')+'\nWater Plus Limited\nTotal amount -£10.60');
+ assert.equal(c.invoiceDate?.value,'03 November 2026');
+ assert.equal(c.invoiceDate?.uncertain,true);
+ assert.equal(c.supplier?.value,'Water Plus Limited');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.equal(c.reference?.uncertain,false);
+});
+test('unrelated tab characters do not taint intact invoice references',()=>{
+ const c=extractInvoiceCandidates('Invoice No: ABC-123\tAccount details\nSupplier: Acme Ltd\nInvoice Date: 01/11/2026\nTotal Due: £20.00');
+ assert.equal(c.reference?.value,'ABC-123');
+ assert.equal(c.reference?.uncertain,false);
+});

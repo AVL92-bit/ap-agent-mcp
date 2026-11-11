@@ -25,6 +25,7 @@ const matchField = (lines:string[],regex:RegExp):CandidateField|null => {
 };
 export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const lines=text.split(/\r?\n/).map(clean).filter(Boolean);
+  const rawLines=text.split(/\r?\n/);
   const header=lines.slice(0,18);
   const receipt = header.some(line=>/^(?:payment\s+)?receipt(?:\s*(?:number|no\.?|#|[:#-]).*)?$/i.test(line))
     || /^(?:payment\s+)?receipt\b/i.test(header[0]??'');
@@ -39,17 +40,25 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   // Embedded PDF text may contain a control character in place of a reference separator.
   // Do not invent the missing character or present a partial identifier as certain.
   if (reference) {
-    const evidenceLine = text.split(/\r?\n/).find(line => clean(line) === reference.evidence);
-    if (evidenceLine && /[\x00-\x1f\x7f]/.test(evidenceLine)) reference.uncertain = true;
+    const evidenceLine = rawLines.find(line => clean(line) === reference.evidence);
+    const token = evidenceLine?.match(/\b(?:receipt|invoice|credit\s*note)\s*(?:(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*)?([A-Z0-9][A-Z0-9/_-]{1,60})/i);
+    if (token && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test((evidenceLine??'').slice(token.index!+token[0].length).slice(0,1))) reference.uncertain = true;
   }
   const linkedInvoiceReference=receipt
     ? matchField(lines,/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
     : null;
   if (linkedInvoiceReference) {
     const raw = text.split(/\r?\n/).find(line => clean(line) === linkedInvoiceReference.evidence);
-    if (raw && /[\x00-\x1f\x7f]/.test(raw)) linkedInvoiceReference.uncertain=true;
+    const token=raw?.match(/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})/i);
+    if (token && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test((raw??'').slice(token.index!+token[0].length).slice(0,1))) linkedInvoiceReference.uncertain=true;
   }
-  const invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date|issue\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b/i);
+  let invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date|issue\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b/i);
+  if (!invoiceDate) {
+    const dateValue=/^(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})$/i;
+    for(let i=0;i<lines.length-1;i++) if(/^(?:issue\s*date|invoice\s*date|date\s*of\s*invoice)\s*[:#-]?$/i.test(lines[i]) && dateValue.test(lines[i+1])) {
+      invoiceDate=field(lines[i+1],lines[i]+' | '+lines[i+1],true);break;
+    }
+  }
   if (invoiceDate && /[A-Za-z]/.test(invoiceDate.value)) invoiceDate.uncertain=true;
   const dueDate=matchField(lines,/\b(?:due\s*date|payment\s*due)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
   // Prefer explicitly payable/gross totals. Never infer gross from a VAT, subtotal,
@@ -84,9 +93,20 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const amountPaid=receipt?matchField(lines,/\bamount\s+paid\s*[:=]?\s*([£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i):null;
   const accountBalance=matchField(lines,/\b(?:total\s+amount|account\s+balance|balance\s+carried\s+forward)\s*[:=]?\s*([-−]?[£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i);
   const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
+  // Do not treat pagination, addresses or remittance instructions as company names.
+  // Labelled legal/payment names are review-only and must be verified by a person.
+  const rejectName=(x:string)=>/^(?:page\s+\d+\s+of\s+\d+|invoice|receipt|issue\s+date|registered\s+office|cheques?\s+payable|vat\s+(?:registration|number)|company\s+(?:number|registration)|account\s+number|total|amount|summary|date)\b/i.test(x)
+    || /\b(?:road|street|postcode|telephone|email|www\.|@)\b/i.test(x);
+  const labelled=lines.map((line,i)=>({line,i})).find(({line})=>/^(?:registered\s+office|cheques?\s+payable\s+to)\s*:/i.test(line));
+  const legalName=lines.find(line=>!rejectName(line) && /^[A-Z][A-Za-z0-9 &'().-]{2,80}\s+(?:Limited|Ltd|LLP|PLC)$/i.test(line));
+  const labelledName=labelled && clean(labelled.line.replace(/^(?:registered\s+office|cheques?\s+payable\s+to)\s*:/i,''));
+  const receiptName=receipt?header.find(line=>!rejectName(line) && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line)):null;
   const supplier=supplierLine
     ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
-    : (()=>{const name=header.find(line=>/^[A-Z][A-Za-z0-9 &'().-]{2,80}\s+(?:Limited|Ltd|LLP|PLC)$/i.test(line) || (receipt && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line) && !/^(?:payment\s+)?receipt\b/i.test(line)));return name?field(name,name,true):null;})();
+    : legalName?field(legalName,legalName,true)
+    : labelledName && !rejectName(labelledName) && /^[A-Z][A-Za-z0-9 &'().-]{2,80}\s+(?:Limited|Ltd|LLP|PLC)$/.test(labelledName)
+      ?field(labelledName,labelled!.line,true)
+    : receiptName?field(receiptName,receiptName,true):null;
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
   const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};
   const critical={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency};
