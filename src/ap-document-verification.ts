@@ -24,9 +24,9 @@ export function verifyInvoiceDocumentText(text: string): void {
   // Carried-forward credits are not the new invoice amount. Permit drafting only
   // when an explicitly labelled positive current-period charge is present;
   // the extraction layer marks that amount uncertain for human review.
-  const accountCredit=/\\b(?:account\\s+(?:is\\s+)?in\\s+credit|balance\\s+(?:brought|carried)\\s+forward|credit\\s+brought\\s+forward)\\b/i.test(t)
-    || /\\b(?:account\\s+balance|balance\\s+due)\\s*[:=–-]?\\s*(?:-\\s*[£$€]?|[£$€]\\s*-|\\(\\s*[£$€])/i.test(t);
-  const periodCharge=/\\b(?:total\\s+charges\\s+for\\s+(?:this|the)\\s+period|total\\s+invoice\\s+charges)\\s*[:=–-]?\\s*[£$€]?\\s*\\d+(?:[,.]\\d+)*\\b/i.test(t);
+  const accountCredit=/\b(?:account\s+(?:is\s+)?in\s+credit|balance\s+(?:brought|carried)\s+forward|credit\s+brought\s+forward)\b/i.test(t)
+    || /\b(?:account\s+balance|balance\s+due)\s*[:=–-]?\s*(?:-\s*[£$€]?|[£$€]\s*-|\(\s*[£$€])/i.test(t);
+  const periodCharge=/\b(?:total\s+charges\s+for\s+(?:this|the)\s+period|total\s+invoice\s+charges)\s*[:=–-]?\s*[£$€]?\s*\d+(?:[,.]\d+)*\b/i.test(t);
   if(accountCredit && !periodCharge) throw new DocumentNeedsHumanReview('unclear',
     'Carried-forward credit present but no explicit positive current-period charges; human review required');
   const type = /\b(?:tax\s+invoice|invoice|credit\s+note)\b/i.test(t);
@@ -48,7 +48,7 @@ export function requireVerifiedCriticalFields(candidates: {
 }): void {
   const critical = ['reference','grossAmount','documentType','currency'] as const;
   const creditPeriodAmount=!!candidates.accountBalance && !!candidates.grossAmount?.uncertain &&
-    /\\b(?:total\\s+charges\\s+for\\s+(?:this|the)\\s+period|total\\s+invoice\\s+charges)\\b/i.test(candidates.grossAmount.evidence??'');
+    /\b(?:total\s+charges\s+for\s+(?:this|the)\s+period|total\s+invoice\s+charges)\b/i.test(candidates.grossAmount.evidence??'');
   const missing = critical.filter(key=>!candidates[key] || (candidates[key]!.uncertain && !(key==='grossAmount' && creditPeriodAmount)));
   const flagged = candidates.uncertainFields.filter(key=>critical.some(k=>k===key) && !(key==='grossAmount' && creditPeriodAmount));
   if (missing.length || flagged.length) throw new DocumentNeedsHumanReview('unclear',
