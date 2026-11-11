@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {verifyInvoiceDocumentText,DocumentNeedsHumanReview} from '../dist/ap-document-verification.js';
+import {verifyInvoiceDocumentText,DocumentNeedsHumanReview,requireVerifiedCriticalFields} from '../dist/ap-document-verification.js';
 import {runApInbox} from '../dist/ap-inbox-runner.js';
 
 test('non-invoice letter is rejected without invoice evidence',()=>{
@@ -44,4 +44,17 @@ test('conflicting receipt and invoice headings require human review',()=>{
 });
 test('Bison tax invoice with ordinary total remains eligible for subsequent checks',()=>{
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Tax Invoice\nInvoice Number: INV/38652\nTotal Due: £420.00'));
+});
+
+test('missing PDF supplier blocks Xero access even when invoice reference and total exist',()=>{
+  const candidates={supplier:null,reference:{uncertain:false},grossAmount:{uncertain:false},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['supplier']};
+  assert.throws(()=>requireVerifiedCriticalFields(candidates),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear'&&/supplier/.test(e.message));
+});
+test('uncertain gross amount blocks Xero access rather than creating a draft',()=>{
+  const candidates={supplier:{uncertain:false},reference:{uncertain:false},grossAmount:{uncertain:true},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['grossAmount']};
+  assert.throws(()=>requireVerifiedCriticalFields(candidates),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear'&&/grossAmount/.test(e.message));
+});
+test('verified critical PDF fields pass the Xero preflight guard',()=>{
+  const certain={uncertain:false};
+  assert.doesNotThrow(()=>requireVerifiedCriticalFields({supplier:certain,reference:certain,grossAmount:certain,documentType:certain,currency:certain,uncertainFields:[]}));
 });
