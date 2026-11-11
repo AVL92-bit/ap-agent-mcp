@@ -41,3 +41,22 @@ test('fallback account coding cannot automatically create a Xero draft',async()=
    createProvisionalContact:async()=>{throw Error('MUST NOT CREATE');}
  }),/Expense account coding requires human verification/);
 });
+
+test('Healthtech payment receipt is not an invoice and invoice number is not receipt reference',()=>{
+ const c=extractInvoiceCandidates('Healthtech 1\nReceipt\nReceipt number: 2874-6222\nInvoice Number: HT1-35587\nDate paid: 10/11/2026\nAmount paid: £771.12');
+ assert.equal(c.documentType.value,'receipt');
+ assert.equal(c.reference?.value,'2874-6222');
+ assert.equal(c.grossAmount,null);
+ assert.ok(c.uncertainFields.includes('documentType'));
+});
+test('Water Plus period charges are distinguished from negative account balance',()=>{
+ const c=extractInvoiceCandidates('Water Plus Limited\nSummary of Charges: invoice wp-INV13861043\nCredit brought forward -£59.27\nTotal charges for this period: £48.67\nTotal amount -£10.60');
+ assert.equal(c.documentType.value,'invoice');
+ assert.equal(c.reference?.value,'wp-INV13861043');
+ assert.equal(c.grossAmount?.value,'£48.67');
+ assert.ok(c.uncertainFields.includes('grossAmount'));
+});
+test('negative account balance alone is never extracted as positive gross',()=>{
+ const c=extractInvoiceCandidates('Invoice\nInvoice No: A123\nCredit brought forward -£59.27\nTotal amount -£10.60');
+ assert.equal(c.grossAmount,null);
+});
