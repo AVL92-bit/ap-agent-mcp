@@ -13,7 +13,7 @@ export type InboxPort = {
   makeDraftCommand(conversation: InboxConversation, attachment: InboxAttachment): Promise<DraftCommand>;
   applyTag(conversationId: string, tag: string): Promise<void>;
   archive(conversationId: string): Promise<void>;
-  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?: string; supplier?: string; reference?: string; gross?: number }): Promise<void>;
+  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
   journal?: { begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
 };
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
@@ -72,7 +72,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
           await port.journal?.complete(conversation.id, attachment.id, uncertain ? 'draft_uncertain' : 'draft_verified', xeroId);
           dispositions.push({ attachmentId: attachment.id, disposition: uncertain ? 'draft_uncertain_attached' : 'xero_draft_attached' });
           if (uncertain) {
-            try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: `Uncertain fields: ${command.uncertainFields.join(', ')}`, outcome: 'draft_uncertain', supplier:command.supplierName, reference:command.number, gross:command.gross }); }
+            try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: `Uncertain fields: ${command.uncertainFields.join(', ')}`, outcome: 'draft_uncertain', supplier:command.supplierName, extractedSupplier:command.extractedSupplierName, supplierMatchScore:command.supplierMatchScore, reference:command.number, gross:command.gross }); }
             catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
           }
           continue;
