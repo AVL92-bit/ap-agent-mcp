@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {verifyInvoiceDocumentText,DocumentNeedsHumanReview,requireVerifiedCriticalFields} from '../dist/ap-document-verification.js';
+import {extractInvoiceCandidates} from '../dist/invoice-candidates.js';
 import {runApInbox} from '../dist/ap-inbox-runner.js';
 
 test('non-invoice letter is rejected without invoice evidence',()=>{
@@ -35,7 +36,7 @@ test('Healthtech payment receipt referencing an invoice cannot pass the evidence
 test('ordinary Healthtech invoice with payable total still passes evidence gate',()=>{
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Invoice\nHealthtech 1\nInvoice Number: HT1-35587\nTotal Due: £771.12'));
 });
-test('Water Plus account in credit cannot be drafted from the account balance',()=>{
+test('Water Plus carried-forward credit permits draft with explicitly labelled period charges',()=>{
   const body='Summary of Charges: invoice wp-INV13861043\nInvoice Number: wp-INV13861043\nTotal Due: £48.67\nCredit brought forward £59.27\nAccount balance -£10.60';
   assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
 });
@@ -57,4 +58,9 @@ test('uncertain gross amount blocks Xero access rather than creating a draft',()
 test('verified critical PDF fields pass the Xero preflight guard',()=>{
   const certain={uncertain:false};
   assert.doesNotThrow(()=>requireVerifiedCriticalFields({supplier:certain,reference:certain,grossAmount:certain,documentType:certain,currency:certain,uncertainFields:[]}));
+});
+
+test('credit balance without explicit period charges remains blocked',()=>{
+ const body='Invoice\\nInvoice Number: INV-1\\nTotal amount -£10.60\\nCredit brought forward £59.27';
+ assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
 });
