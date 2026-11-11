@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { DocumentNeedsHumanReview } from './ap-document-verification.js';
 import { classifyNoAttachment, FRONT_OUTCOME_POLICY } from './ap-outcome-policy.js';
 import { decideDocumentConversation, type DocumentDisposition } from './ap-conversation-completion.js';
 import { reconcileCreateAndAttach, type DraftCommand, type XeroDraftPort } from './ap-xero-document-coordinator.js';
@@ -12,7 +13,7 @@ export type InboxPort = {
   makeDraftCommand(conversation: InboxConversation, attachment: InboxAttachment): Promise<DraftCommand>;
   applyTag(conversationId: string, tag: string): Promise<void>;
   archive(conversationId: string): Promise<void>;
-  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'; supplier?: string; reference?: string; gross?: number }): Promise<void>;
+  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?: string; supplier?: string; reference?: string; gross?: number }): Promise<void>;
   journal?: { begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
 };
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
@@ -78,7 +79,17 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
         }
         xeroId = outcome.status === 'attachment_failed' ? outcome.xeroId : undefined;
         failure = outcome.error;
-      } catch (e) { failure = String(e); }
+      } catch (e) {
+        if (e instanceof DocumentNeedsHumanReview) {
+          // No journal or Xero call is made for a non-invoice/unclear document.
+          dispositions.push({ attachmentId: attachment.id, disposition: 'processing_failure' });
+          try { await port.reportReview({conversationId:conversation.id,attachmentId:attachment.id,
+            filename:attachment.filename,reason:e.message,outcome:e.kind}); }
+          catch (sheetError) { item.failures.push(`Sheet review log failed: ${String(sheetError)}`); }
+          continue;
+        }
+        failure = String(e);
+      }
       try { await port.journal?.complete(conversation.id, attachment.id, 'technical_failure', xeroId); } catch (e) { item.failures.push(`Journal failure: ${String(e)}`); }
       dispositions.push({ attachmentId: attachment.id, disposition: 'processing_failure' });
       item.failures.push(`${attachment.id}: ${failure}`);
