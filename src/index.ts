@@ -856,7 +856,9 @@ pages_scanned: visitedPages.size,
           else throw new Error('Unknown AP Front tag');
         },
         archive:archiveApFrontConversation,
-        reportReview:row=>sheetOutbox.enqueue(row),
+        reportReview:row=>row.outcome==='not_invoice'||row.outcome==='unclear'
+          ? appendApInboxException(row) // Sheet direct: never journal non-invoices in PostgreSQL.
+          : sheetOutbox.enqueue(row),
         journal:makeApDocumentJournal(runClient),
       });
       const sheetAfter=await sheetOutbox.flush();
