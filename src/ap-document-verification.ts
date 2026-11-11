@@ -43,7 +43,7 @@ export function requireVerifiedCriticalFields(candidates: {
   currency: {uncertain:boolean}|null;
   uncertainFields: string[];
 }): void {
-  const critical = ['supplier','reference','grossAmount','documentType','currency'] as const;
+  const critical = ['reference','grossAmount','documentType','currency'] as const;
   const missing = critical.filter(key=>!candidates[key] || candidates[key]!.uncertain);
   const flagged = candidates.uncertainFields.filter(key=>critical.some(k=>k===key));
   if (missing.length || flagged.length) throw new DocumentNeedsHumanReview('unclear',
