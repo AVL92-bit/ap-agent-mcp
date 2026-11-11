@@ -33,13 +33,13 @@ test('unmatched supplier cannot create provisional Xero contact',async()=>{
  assert.equal(created,0);
 });
 test('fallback account coding creates draft without separate coding review',async()=>{
- const candidates=extractInvoiceCandidates('Invoice\\nSupplier: Example Limited\\nInvoice No: 12345\\nTotal Due: £20.00');
+ const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
  const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],fallbackAccountCode:'449',pdf});
  assert.equal(command.accountCode,'449');
  assert.ok(!command.uncertainFields.includes('accountCode'));
 });
 test('most recent matched supplier invoice code overrides fallback',async()=>{
- const candidates=extractInvoiceCandidates('Invoice\\nSupplier: Example Limited\\nInvoice No: 12345\\nTotal Due: £20.00');
+ const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
  let matchedId;
  const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Historical',type:'EXPENSE',status:'ACTIVE'}],fallbackAccountCode:'449',recentAccountCodeForContact:async id=>{matchedId=id;return '450'},pdf});
  assert.equal(matchedId,'known');
@@ -47,7 +47,7 @@ test('most recent matched supplier invoice code overrides fallback',async()=>{
  assert.ok(!command.uncertainFields.includes('accountCode'));
 });
 test('inactive historical account never overrides valid fallback',async()=>{
- const candidates=extractInvoiceCandidates('Invoice\\nSupplier: Example Limited\\nInvoice No: 12345\\nTotal Due: £20.00');
+ const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
  const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Inactive',type:'EXPENSE',status:'ARCHIVED'}],fallbackAccountCode:'449',recentAccountCodeForContact:async()=> '450',pdf});
  assert.equal(command.accountCode,'449');
  assert.ok(!command.uncertainFields.includes('accountCode'));
