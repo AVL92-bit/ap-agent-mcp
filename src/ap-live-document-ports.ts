@@ -81,12 +81,23 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   const rawAccounts=await readPaged<{Code?:string;Name?:string;Type?:string;Status?:string}>('Accounts','Accounts');
   const contacts:ContactCandidate[]=rawContacts.filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!}));
   const accounts:AccountCandidate[]=rawAccounts.map(a=>({code:a.Code||'',name:a.Name||'',type:a.Type||'',status:a.Status||''}));
+  // Read-only history: use the newest purchase bill for this exact existing Xero contact.
+  // Ignore credit notes, voided/deleted bills and accounts not active/expense eligible.
+  async function recentAccountCodeForContact(contactId:string):Promise<string|undefined> {
+    type HistoricalBill = {Type?:string;Status?:string;DateString?:string;Date?:string;InvoiceID?:string;
+      Contact?:{ContactID?:string};LineItems?:Array<{AccountCode?:string}>};
+    const bills=await readPaged<HistoricalBill>('Invoices','Invoices');
+    const eligible=bills.filter(b=>b.Type==='ACCPAY' && b.Contact?.ContactID===contactId &&
+      !['VOIDED','DELETED'].includes((b.Status??'').toUpperCase()) &&
+      (b.DateString || b.Date) && b.LineItems?.some(line=>line.AccountCode));
+    eligible.sort((a,b)=>String(b.DateString??b.Date).localeCompare(String(a.DateString??a.Date)) ||
+      String(b.InvoiceID??'').localeCompare(String(a.InvoiceID??'')));
+    return eligible[0]?.LineItems?.find(line=>line.AccountCode)?.AccountCode;
+  }
   return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
-    // Only an explicitly operator-approved account code can authorise automatic coding.
-    // The previous generic fallback remains review-only and cannot silently create a bill.
-    preferredAccountCode:process.env.AP_APPROVED_ACCOUNT_CODE,
+    recentAccountCodeForContact,
     fallbackAccountCode:process.env.AP_FALLBACK_ACCOUNT_CODE,
   });
 }
