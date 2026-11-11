@@ -108,7 +108,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const supplier=supplierLine
     ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
     : distinctCompanies.length>1?null
-    : unambiguousCompany
+    : unambiguousCompany?unambiguousCompany
     : receiptName?field(receiptName,receiptName,true):null;
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
   const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};
