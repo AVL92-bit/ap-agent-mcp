@@ -14,7 +14,7 @@ export type FrontTriageMessage = {
   attachments?: FrontTriageAttachment[];
 };
 
-const financeWords = /\b(invoice|invoices|credit\s*note|statement|reminder|overdue|payment|bill|billing|accounts\s+payable|balance\s+due)\b/i;
+const financeWords = /\b(invoice|invoices|credit\s*note|statement|reminder|overdue|payment|bill|billing|accounts\s+payable|balance\s+due|account\s+balance|outstanding\s+balance|account\s+overdue|remittance\s+advice|purchase\s+order)\b/i;
 const supportedExtensions = /\.(pdf|doc|docx|xls|xlsx|xlsm)$/i;
 const supportedMimeTypes = new Set([
   "application/pdf",
