@@ -72,7 +72,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
           await port.journal?.complete(conversation.id, attachment.id, uncertain ? 'draft_uncertain' : 'draft_verified', xeroId);
           dispositions.push({ attachmentId: attachment.id, disposition: uncertain ? 'draft_uncertain_attached' : 'xero_draft_attached' });
           if (uncertain) {
-            try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: `Uncertain fields: ${command.uncertainFields.join(', ')}`, outcome: 'draft_uncertain', supplier:command.supplierName, extractedSupplier:command.extractedSupplierName, supplierMatchScore:command.supplierMatchScore, reference:command.number, gross:command.gross }); }
+            try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: `Uncertain fields: ${command.uncertainFields.join(', ')}${command.uncertainFields.includes('grossAmount') ? ' | Amount uncertain due to carried-forward credit or ambiguous invoice total; verify current-period charges against original PDF' : ''}`, outcome: 'draft_uncertain', supplier:command.supplierName, extractedSupplier:command.extractedSupplierName, supplierMatchScore:command.supplierMatchScore, reference:command.number, gross:command.gross }); }
             catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
           }
           continue;
