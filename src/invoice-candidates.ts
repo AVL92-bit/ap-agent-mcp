@@ -116,7 +116,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   // Match the complete payment instruction after collapsing whitespace across lines,
   // but retain a bounded excerpt as audit evidence rather than a group footer.
   const continuousText=clean(text);
-  const multilinePayee=/\\b(?:(?:cheques?|payments?)\\s+(?:should\\s+be\\s+)?(?:made\\s+)?payable\\s+to|(?:please\\s+)?(?:make\\s+)?payments?\\s+to|(?:remit|remittance)\\s+to|payable\\s+to)\\s*[:\\-]?\\s*([A-Z][A-Za-z0-9 &'().-]{2,80}?\\s+(?:Limited|Ltd|LLP|PLC))\\b/gi;
+  const multilinePayee=/\b(?:(?:cheques?|payments?)\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to|(?:please\s+)?(?:make\s+)?payments?\s+to|(?:remit|remittance)\s+to|payable\s+to)\s*[:\-]?\s*([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/gi;
   for(const match of continuousText.matchAll(multilinePayee)) {
     const name=clean(match[1]);
     if(!rejectName(name)) payeeEvidence.push(field(name,match[0],true));
