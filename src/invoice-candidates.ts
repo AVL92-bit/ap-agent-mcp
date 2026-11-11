@@ -23,28 +23,40 @@ const matchField = (lines:string[],regex:RegExp):CandidateField|null => {
 export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const lines=text.split(/\r?\n/).map(clean).filter(Boolean);
   const header=lines.slice(0,18);
-  const isCredit=/\bcredit\s+note\b/i.test(text);
-  const documentType=field(isCredit?'credit_note':'invoice',isCredit?'Credit note wording found':'No credit note wording found',!isCredit && !/\binvoice\b/i.test(text));
-  const reference=matchField(lines,/\b(?:invoice|credit\s*note)\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i);
+  const receipt = header.some(line=>/^(?:payment\\s+)?receipt(?:\\s*(?:number|no\\.?|#|[:#-]).*)?$/i.test(line))
+    || /^(?:payment\\s+)?receipt\\b/i.test(header[0]??'');
+  const isCredit=/\\bcredit\\s+note\\b/i.test(text);
+  const documentType=field(receipt?'receipt':isCredit?'credit_note':'invoice',
+    receipt?'Receipt heading found':isCredit?'Credit note wording found':'Invoice wording assessed',
+    receipt || (!isCredit && !/\\binvoice\\b/i.test(text)));
+  const reference=receipt
+    ? matchField(lines,/\\breceipt\\s*(?:number|no\\.?|#|ref(?:erence)?\\.?)\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9/_-]{1,60})\\b/i)
+    : matchField(lines,/\\b(?:invoice|credit\\s*note)\\s*(?:number|no\\.?|#|ref(?:erence)?\\.?)\\s*[:#-]?\\s*([A-Z0-9][A-Z0-9/_-]{1,60})\\b/i)
+      ?? matchField(lines,/\\b(?:summary\\s+of\\s+charges\\s*:\\s*)?invoice\\s+([A-Z][A-Z0-9/_-]{3,60})\\b/i);
   const invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
   const dueDate=matchField(lines,/\b(?:due\s*date|payment\s*due)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
   // Prefer explicitly payable/gross totals. Never infer gross from a VAT, subtotal,
   // unit price or arbitrary line-item amount. Accept whole-pound and UK comma amounts.
-  const money = '([£$€]?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)';
-  const totalLabels = /\b(?:grand\s+total|total\s+(?:due|payable|amount|inc(?:luding)?\.?\s*vat|gross)|amount\s+(?:due|payable)|balance\s+due|total\s+to\s+pay)\b/i;
+  const money = '([£$€]?\\\\s*[+-]?\\\\s*(?:\\\\d{1,3}(?:,\\\\d{3})+|\\\\d+)(?:\\\\.\\\\d{1,2})?)';
+  const accountCredit=/\\b(?:credit\\s+brought\\s+forward|balance\\s+carried\\s+forward|account\\s+in\\s+credit)\\b|\\b(?:total\\s+amount|account\\s+balance)\\s*[:=–-]?\\s*-£/i.test(text);
+  const totalLabels = accountCredit
+    ? /\\b(?:total\\s+charges\\s+for\\s+(?:this|the)\\s+period|total\\s+invoice\\s+charges)\\b/i
+    : /\\b(?:total\\s+charges\\s+for\\s+(?:this|the)\\s+period|grand\\s+total|total\\s+(?:due|payable|amount|inc(?:luding)?\\.?\\s*vat|gross)|amount\\s+(?:due|payable)|balance\\s+due|total\\s+to\\s+pay)\\b/i;
   let grossAmount: CandidateField | null = null;
-  for (const line of lines) {
+  if (!receipt) for (const line of lines) {
     const label = totalLabels.exec(line);
     if (!label) continue;
-    const after = line.slice(label.index + label[0].length).replace(/^\s*[:=–-]\s*/, '');
-    const m = after.match(new RegExp('^' + money + '(?=\\s|$|\\b)', 'i'));
-    if (m && Number(m[1].replace(/[^\d.]/g,'')) > 0) {
-      grossAmount = field(clean(m[1]),line); break;
+    const after = line.slice(label.index + label[0].length).replace(/^\\s*[:=–]\\s*/, '').trim();
+    const m = after.match(new RegExp('^' + money + '(?=\\s|$)', 'i'));
+    if (!m) continue;
+    const signed = Number(m[1].replace(/[^\\d.+-]/g,''));
+    if (Number.isFinite(signed) && signed > 0) {
+      grossAmount = field(clean(m[1]),line,accountCredit); break;
     }
   }
   // An unqualified TOTAL is common but potentially ambiguous when VAT is separate.
   // Retain it as a candidate and explicitly flag the uncertainty.
-  if (!grossAmount) {
+  if (!grossAmount && !accountCredit && !receipt) {
     for (const line of lines) {
       const m = line.match(new RegExp('^total\\s*[:=–-]\\s*' + money + '(?=\\s|$)', 'i'));
       if (m && Number(m[1].replace(/[^\d.]/g,'')) > 0) {
