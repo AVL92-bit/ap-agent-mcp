@@ -62,7 +62,7 @@ test('negative account balance alone is never extracted as positive gross',()=>{
 });
 
 test('existing Xero contact match carries source and score into draft audit',async()=>{
- const candidates=extractInvoiceCandidates('Invoice\\nPayable to: Water Plus Limited\\nInvoice No: WP-123\\nTotal Due: £48.67');
+ const candidates=extractInvoiceCandidates('Invoice\nPayable to: Water Plus Limited\nInvoice No: WP-123\nTotal Due: £48.67');
  const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'approved',name:'Water Plus Ltd'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],preferredAccountCode:'449',pdf});
  assert.equal(command.supplierContactId,'approved');
  assert.equal(command.supplierName,'Water Plus Ltd');
