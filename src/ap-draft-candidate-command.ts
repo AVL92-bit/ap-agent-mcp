@@ -72,10 +72,10 @@ export async function buildDraftFromAvailableCandidates(input: {
   const supplier = matched;
   const historicalCode = input.recentAccountCodeForContact ? await input.recentAccountCodeForContact(supplier.value.id) : undefined;
   const account = chooseAccount(input.accounts, historicalCode, input.fallbackAccountCode);
-  // Coding uncertainty is reviewable on a DRAFT, not an approval or payment.
-  // Historical codes must still be validated against active expense accounts.
+  // All drafts receive normal finance review; account-code selection alone does not
+  // trigger an additional uncertainty exception. Historical codes must still be active and expense-eligible.
   return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,extractedSupplierName:input.candidates.supplier?.value,supplierMatchScore:supplier.score,
     accountCode:account.value.code,pdf:input.pdf,fallbackDate:input.fallbackDate,
     fallbackReference:input.fallbackReference,fallbackGross:input.fallbackGross,
-    extraUncertainty:[...supplier.uncertainFields,...account.uncertainFields]});
+    extraUncertainty:[...supplier.uncertainFields]});
 }
