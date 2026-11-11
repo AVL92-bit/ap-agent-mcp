@@ -29,7 +29,7 @@ test('unmatched supplier cannot create provisional Xero contact',async()=>{
    accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],
    preferredAccountCode:'449',pdf,
    createProvisionalContact:async()=>{created++;throw Error('MUST NOT CREATE');}
- }),/Supplier contact match requires human verification/);
+ }),/No existing Xero supplier contact exceeded 50%/);
  assert.equal(created,0);
 });
 test('fallback account coding cannot automatically create a Xero draft',async()=>{
