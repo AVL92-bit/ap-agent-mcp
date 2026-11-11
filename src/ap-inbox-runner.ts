@@ -54,7 +54,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
       let xeroId: string | undefined;
       let uncertain = false;
       try {
-        if (!/\.pdf$/i.test(attachment.filename)) throw new Error('Unsupported attachment format');
+        if (!/\.pdf$/i.test(attachment.filename)) throw new DocumentNeedsHumanReview('unclear','This document format is not yet supported for invoice-content verification');
         const command = await port.makeDraftCommand(conversation, attachment);
         uncertain = command.uncertainFields.length > 0;
         await port.journal?.begin(conversation.id, attachment.id, createHash('sha256').update(command.pdf.bytes).digest('hex'));
