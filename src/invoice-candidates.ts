@@ -12,6 +12,9 @@ export type InvoiceCandidates = {
   dueDate: CandidateField | null;
   grossAmount: CandidateField | null;
   currency: CandidateField;
+  accountBalance: CandidateField | null;
+  amountPaid: CandidateField | null;
+  linkedInvoiceReference: CandidateField | null;
   uncertainFields: string[];
 };
 const field = (value:string,evidence:string,uncertain=false):CandidateField => ({value,evidence,uncertain});
@@ -33,7 +36,21 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
     ? matchField(lines,/\breceipt\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
     : matchField(lines,/\b(?:invoice|credit\s*note)\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
       ?? matchField(lines,/\b(?:summary\s+of\s+charges\s*:\s*)?invoice\s+([A-Z][A-Z0-9/_-]{3,60})\b/i);
-  const invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
+  // Embedded PDF text may contain a control character in place of a reference separator.
+  // Do not invent the missing character or present a partial identifier as certain.
+  if (reference) {
+    const evidenceLine = text.split(/\r?\n/).find(line => clean(line) === reference.evidence);
+    if (evidenceLine && /[\x00-\x1f\x7f]/.test(evidenceLine)) reference.uncertain = true;
+  }
+  const linkedInvoiceReference=receipt
+    ? matchField(lines,/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
+    : null;
+  if (linkedInvoiceReference) {
+    const raw = text.split(/\r?\n/).find(line => clean(line) === linkedInvoiceReference.evidence);
+    if (raw && /[\x00-\x1f\x7f]/.test(raw)) linkedInvoiceReference.uncertain=true;
+  }
+  const invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date|issue\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b/i);
+  if (invoiceDate && /[A-Za-z]/.test(invoiceDate.value)) invoiceDate.uncertain=true;
   const dueDate=matchField(lines,/\b(?:due\s*date|payment\s*due)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
   // Prefer explicitly payable/gross totals. Never infer gross from a VAT, subtotal,
   // unit price or arbitrary line-item amount. Accept whole-pound and UK comma amounts.
@@ -64,10 +81,16 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
       }
     }
   }
+  const amountPaid=receipt?matchField(lines,/\bamount\s+paid\s*[:=]?\s*([£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i):null;
+  const accountBalance=matchField(lines,/\b(?:total\s+amount|account\s+balance|balance\s+carried\s+forward)\s*[:=]?\s*([-−]?[£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i);
   const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
-  const supplier=supplierLine?field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine):null;
+  const supplier=supplierLine
+    ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
+    : (()=>{const name=header.find(line=>/^[A-Z][A-Za-z0-9 &'().-]{2,80}\s+(?:Limited|Ltd|LLP|PLC)$/i.test(line) || (receipt && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line) && !/^(?:payment\s+)?receipt\b/i.test(line)));return name?field(name,name,true):null;})();
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
-  const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency};
-  const uncertainFields=Object.entries(result).filter(([k,v])=>v===null || v.uncertain).map(([k])=>k);
+  const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};
+  const critical={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency};
+  const uncertainFields=Object.entries(critical).filter(([k,v])=>v===null || v.uncertain).map(([k])=>k);
+  for(const [key,value] of Object.entries({accountBalance,amountPaid,linkedInvoiceReference})) if(value?.uncertain) uncertainFields.push(key);
   return {...result,uncertainFields};
 }
