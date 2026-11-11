@@ -71,7 +71,7 @@ export async function buildDraftFromAvailableCandidates(input: {
   const supplier = matched;
   const account = chooseAccount(input.accounts, input.preferredAccountCode, input.fallbackAccountCode);
   if (account.uncertainFields.length) throw new DocumentNeedsHumanReview('unclear','Expense account coding requires human verification; no Xero draft created');
-  return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,extractedSupplierName:input.candidates.supplier?.value,supplierMatchScore:undefined,
+  return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,extractedSupplierName:input.candidates.supplier?.value,supplierMatchScore:supplier.score,
     accountCode:account.value.code,pdf:input.pdf,fallbackDate:input.fallbackDate,
     fallbackReference:input.fallbackReference,fallbackGross:input.fallbackGross,
     extraUncertainty:[...supplier.uncertainFields,...account.uncertainFields]});
