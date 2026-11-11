@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import { strict as assert } from 'node:assert';
-import { extractInvoiceCandidates } from '../src/invoice-candidates.ts';
-import { buildDraftCommand, buildDraftFromAvailableCandidates } from '../src/ap-draft-candidate-command.ts';
+import { extractInvoiceCandidates } from '../dist/invoice-candidates.js';
+import { buildDraftCommand, buildDraftFromAvailableCandidates } from '../dist/ap-draft-candidate-command.js';
 const pdf = { filename:'bill.pdf',bytes:new TextEncoder().encode('%PDF-1.4'),contentType:'application/pdf' };
 test('maps extracted invoice and preserves uncertainty without veto',()=>{
  const c=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: A123\nInvoice Date: 01/11/2026\nTotal: £48.67');
