@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 
 export type ReviewRow = {
   conversationId:string; attachmentId:string; xeroId?:string; reason:string;
-  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?:string; supplier?:string; reference?:string; gross?:number;
+  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
 };
 /** Persist before sending; replay pending rows on each runner invocation.
  * The Google Sheet writer's stable source key makes repeats idempotent when its
