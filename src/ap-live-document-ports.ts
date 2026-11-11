@@ -61,15 +61,14 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     // OCR or correspondence text is not sufficient to authorise automatic drafting.
     throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
   }
-  // Missing gross may be recovered from explicit payable totals in the originating
-  // conversation. The amount is advisory and always requires human review.
-  if (!candidates.grossAmount && conversation.body) {
-    const fallback = extractInvoiceCandidates(conversation.body);
-    if (fallback.grossAmount) {
-      candidates.grossAmount = {...fallback.grossAmount, uncertain:true};
-      candidates.uncertainFields = [...new Set([...candidates.uncertainFields,
-        'grossAmount', 'grossFromConversationNotPdf'])];
-    }
+  // No provisional contact, Xero API call or draft may be attempted when
+  // the PDF does not independently establish critical accounting fields.
+  // Email-body values are not acceptable substitutes for invoice evidence.
+  const critical = ['supplier','reference','grossAmount','documentType','currency'] as const;
+  const missing = critical.filter(key => !candidates[key] || candidates[key]!.uncertain);
+  if (missing.length || candidates.uncertainFields.some(key=>critical.includes(key as typeof critical[number]))) {
+    throw new DocumentNeedsHumanReview('unclear',
+      `Critical invoice fields require verification before Xero access: ${[...new Set([...missing,...candidates.uncertainFields.filter(key=>critical.includes(key as typeof critical[number]))])].join(', ')}`);
   }
   const session = await getPilotXeroWriteSession();
   if (session.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
