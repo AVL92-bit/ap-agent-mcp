@@ -12,10 +12,9 @@ export function verifyInvoiceDocumentText(text: string): void {
   // A receipt can quote an invoice number, total and payment status without
   // being an invoice. Do not let those references authorise Xero writes.
   const firstLines = t.split(/\r?\n/).map(line=>line.trim()).filter(Boolean).slice(0,8);
-  const heading = firstLines.join(' ');
   const receiptHeading = firstLines.some(line=>/^(?:payment\s+)?receipt\b(?:\s*(?:number|no\.?|#|ref(?:erence)?\.?|[:#-]).*)?$/i.test(line))
     || /^(?:payment\s+)?receipt\b/i.test(firstLines[0]??'');
-  const invoiceHeading = firstLines.some(line=>/^(?:tax\s+)?invoice\b|^credit\s+note\b/i.test(line));
+  const invoiceHeading = firstLines.some(line=>/^(?:(?:tax\s+)?invoice|credit\s+note)\s*[:#-]?\s*$/i.test(line));
   if (receiptHeading && !invoiceHeading) {
     throw new DocumentNeedsHumanReview('not_invoice','Document is headed Receipt; an invoice reference on payment evidence does not make it an invoice');
   }
