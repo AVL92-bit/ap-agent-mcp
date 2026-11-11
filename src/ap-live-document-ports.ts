@@ -1,6 +1,5 @@
 import { PDFParse } from 'pdf-parse';
 import { verifyInvoiceDocumentText, DocumentNeedsHumanReview } from './ap-document-verification.js';
-import { ocrInvoicePdf } from './ap-pdf-ocr.js';
 import type { PoolClient } from 'pg';
 import { makeApContactIntent, resolveProvisionalContact } from './ap-contact-write-intent.js';
 import { xeroFetch } from './xero-rate-limit.js';
@@ -61,21 +60,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     if (!/No usable embedded PDF text/.test(String(error))) throw error;
     // OCR or correspondence text is not sufficient to authorise automatic drafting.
     throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
-    // Optional OCR is deliberately never treated as verified document data.
-    // If OCR is unavailable, preserve the existing Front-message fallback.
-    let ocrText: string | null = null;
-    if (process.env.AP_PDF_OCR_ENABLED?.toLowerCase() === 'true') {
-      try { ocrText = await ocrInvoicePdf(pdf.bytes); } catch { /* retain safe correspondence fallback */ }
-    }
-    const context = `${conversation.subject}\n${conversation.body}`;
-    candidates = extractInvoiceCandidates(ocrText || context);
-    candidates.uncertainFields = [...new Set([...candidates.uncertainFields,
-      ...(ocrText ? ['fieldsFromOcrRequireReview'] : ['sourcePdfUnreadable', 'fieldsFromConversationNotPdf'])])];
-    // OCR/correspondence evidence is always uncertain even when all fields are present.
-    for (const key of ['documentType','supplier','reference','invoiceDate','dueDate','grossAmount','currency'] as const) {
-      const candidate = candidates[key];
-      if (candidate) candidate.uncertain = true;
-    }
+    throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
   }
   // Missing gross may be recovered from explicit payable totals in the originating
   // conversation. The amount is advisory and always requires human review.
