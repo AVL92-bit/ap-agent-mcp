@@ -37,3 +37,10 @@ test("routine nonfinance without attachments is archived candidate", () => {
 test("nonfinance with unsupported attachment is ambiguous, not archived", () => {
   assert.equal(classifyFrontCorrespondence([{subject:"Hello",text:"See attached",attachments:[attachment("scan.jpg","image/jpeg")]}]),"requires_attachment_review");
 });
+
+test("precise finance phrases are recognised without matching bare account", () => {
+  for (const phrase of ["account balance","account statement","outstanding balance","account overdue","remittance advice","purchase order"]) {
+    assert.equal(classifyFrontCorrespondence([{subject:phrase,body:"Please see below"}]),"finance_correspondence",phrase);
+  }
+  assert.equal(classifyFrontCorrespondence([{subject:"Your account password",body:"Reset your login"}]),"routine_non_finance");
+});
