@@ -37,7 +37,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const dueDate=matchField(lines,/\b(?:due\s*date|payment\s*due)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
   // Prefer explicitly payable/gross totals. Never infer gross from a VAT, subtotal,
   // unit price or arbitrary line-item amount. Accept whole-pound and UK comma amounts.
-  const money = '([£$€]?\\\\s*[+-]?\\\\s*(?:\\\\d{1,3}(?:,\\\\d{3})+|\\\\d+)(?:\\\\.\\\\d{1,2})?)';
+  const money = '([£$€]?\\s*[+-]?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)';
   const accountCredit=/\b(?:credit\s+brought\s+forward|balance\s+carried\s+forward|account\s+in\s+credit)\b|\b(?:total\s+amount|account\s+balance)\s*[:=–-]?\s*-£/i.test(text);
   const totalLabels = accountCredit
     ? /\b(?:total\s+charges\s+for\s+(?:this|the)\s+period|total\s+invoice\s+charges)\b/i
@@ -47,7 +47,7 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
     const label = totalLabels.exec(line);
     if (!label) continue;
     const after = line.slice(label.index + label[0].length).replace(/^\s*[:=–]\s*/, '').trim();
-    const m = after.match(new RegExp('^' + money + '(?=\s|$)', 'i'));
+    const m = after.match(new RegExp('^' + money + '(?=\\s|$)', 'i'));
     if (!m) continue;
     const signed = Number(m[1].replace(/[^\d.+-]/g,''));
     if (Number.isFinite(signed) && signed > 0) {
