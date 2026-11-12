@@ -13,6 +13,7 @@ export async function executeCompleteApInbox(input: {
   reportReview: InboxPort['reportReview'];
   xero: XeroDraftPort;
   journal?: InboxPort['journal'];
+  expandEmail?: InboxPort['expandEmail'];
   maxPages?: number;
   maxConversations?: number;
   /** Optional limit applied AFTER the complete scan (named conversations / max count). */
@@ -30,6 +31,7 @@ export async function executeCompleteApInbox(input: {
     archive: input.archive,
     reportReview: input.reportReview,
     journal: input.journal,
+    expandEmail: input.expandEmail,
   };
   return runApInbox(port, input.xero);
 }

@@ -4,6 +4,11 @@ import type { PoolClient } from 'pg';
  * of Xero completion: every retry still reconciles the original PDF in Xero. */
 export function makeApDocumentJournal(client: PoolClient) {
   return {
+    /** Outcome of an earlier run for this attachment, if any. */
+    async previous(conversationId: string, attachmentId: string): Promise<{status:string; xeroId:string|null}|null> {
+      const r = await client.query(`SELECT status, xero_id FROM ap_document_journal WHERE conversation_id=$1 AND attachment_id=$2`,[conversationId,attachmentId]);
+      return r.rowCount ? {status:String(r.rows[0].status),xeroId:r.rows[0].xero_id??null} : null;
+    },
     async begin(conversationId: string, attachmentId: string, sha256: string): Promise<void> {
       if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid source digest');
       const result = await client.query(`INSERT INTO ap_document_journal

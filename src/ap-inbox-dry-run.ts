@@ -41,6 +41,10 @@ export async function dryRunApInbox(input: {
   conversationsScanned: number;
   makeDraftCommand: InboxPort['makeDraftCommand'];
   liveXero: XeroDraftPort; // only lookup and verifyOriginal (reads) are called
+  expandEmail?: InboxPort['expandEmail'];
+  /** Read-only lookup of an earlier run's outcome for an attachment. */
+  previous?: (conversationId: string, attachmentId: string) => Promise<{ status: string; xeroId?: string | null } | null>;
+  onProgress?: (p: string) => void;
 }): Promise<DryRunReport> {
   const items = new Map<string, DryRunConversation>();
   const item = (id: string) => items.get(id)!;
@@ -55,6 +59,7 @@ export async function dryRunApInbox(input: {
   const port: InboxPort = {
     listAllOpenConversations: async () => input.conversations,
     makeDraftCommand: async (conversation, attachment) => {
+      input.onProgress?.(`Reading ${attachment.filename} (${conversation.id})`);
       current.conversationId = conversation.id; current.attachmentId = attachment.id;
       current.filename = attachment.filename; current.command = undefined;
       const entry: DryRunDocument = { attachmentId: attachment.id, filename: attachment.filename, outcome: 'failure' };
@@ -84,7 +89,14 @@ export async function dryRunApInbox(input: {
         outcome: 'not_drafted', reason: row.reason });
       else if (d.outcome === 'failure' && row.outcome === 'technical_failure') d.reason = row.reason;
     },
-    // No journal: a dry run never claims or records an attempt.
+    expandEmail: input.expandEmail,
+    // Journal is read-only: earlier outcomes are looked up, nothing is begun, claimed or recorded.
+    journal: input.previous ? { previous: async (c, a) => {
+      const p = await input.previous!(c, a);
+      if (p && ['draft_verified', 'draft_uncertain', 'existing_verified'].includes(p.status))
+        item(c).documents.push({ attachmentId: a, filename: '', outcome: 'already_in_xero', reason: `Handled on an earlier run (${p.status})`, xeroId: p.xeroId ?? undefined });
+      return p;
+    }, begin: async () => {}, complete: async () => {} } : undefined,
   };
   const xero: XeroDraftPort = {
     lookup: number => input.liveXero.lookup(number),
@@ -105,6 +117,7 @@ export async function dryRunApInbox(input: {
   for (const r of report.items) {
     const it = items.get(r.conversationId); if (!it) continue;
     it.failures.push(...r.failures);
+    if (!it.frontTag && r.tag) it.frontTag = r.tag; // e.g. "Human review (unchanged, awaiting finance)"
     for (const d of it.documents) {
       if (d.outcome === 'failure' && d.draft && !d.reason) { d.outcome = 'already_in_xero'; }
     }

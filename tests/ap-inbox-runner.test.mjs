@@ -32,3 +32,9 @@ test('supplier uncertainty report preserves extracted name, selected Xero contac
  assert.equal(review.supplierMatchScore,2/3);
  assert.match(review.reason,/supplier/);
 });
+test('a conversation tagged Human Review is never re-tagged or archived; new attachments still processed',async()=>{
+ const f=fixture([{id:'a',subject:'',body:'',tags:['Human Review'],attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);
+ const tags=[];f.port.applyTag=async(id,t)=>tags.push(t);let archived=0;f.port.archive=async()=>{archived++};
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(r.documents,1);assert.deepEqual(tags,[]);assert.equal(archived,0);assert.match(r.items[0].tag,/unchanged/);
+});
