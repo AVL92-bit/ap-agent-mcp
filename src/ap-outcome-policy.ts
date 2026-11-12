@@ -10,9 +10,11 @@ export const FRONT_OUTCOME_POLICY: Record<ApOutcome,{tag:string;archive:boolean;
   non_finance_no_attachment:{tag:'AP Agent reviewed',archive:true,sheet:false},
 };
 export function classifyNoAttachment(text:string):ApOutcome {
-  // Direct Debit collection notices need no AP action (payment is handled by people).
-  if (/\bdirect\s+debit\b/i.test(text) &&
-    /\b(?:upcoming|advance\s+notice|will\s+be\s+(?:collected|taken|debited)|due\s+to\s+be\s+(?:collected|taken)|collection\s+date|payment\s+(?:collection|will\s+be))\b/i.test(text))
+  // Direct Debit collection notices need no AP action (payment is handled by people). Judged on
+  // the SUBJECT only: an invoice email that merely mentions Direct Debit is not a notice.
+  const subject = text.split('\n')[0] ?? '';
+  if (/\bdirect\s+debit\b/i.test(subject) && !/\binvoice\b/i.test(subject) &&
+    /\b(?:upcoming|advance\s+notice|will\s+be\s+(?:collected|taken|debited)|due\s+to\s+be\s+(?:collected|taken)|collection\s+date|payment\s+(?:collection|will\s+be)|payment\s+to)\b/i.test(subject))
     return 'non_finance_no_attachment';
   return /\b(invoice|statement|reminder|overdue|credit note|payment due|bill|accounts payable)\b/i.test(text)
     ? 'finance_no_attachment' : 'non_finance_no_attachment';

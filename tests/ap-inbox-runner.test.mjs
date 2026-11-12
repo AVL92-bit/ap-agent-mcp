@@ -45,3 +45,8 @@ test('Direct Debit collection notices are archived as AP Agent reviewed; stateme
  assert.equal(r.items.find(i=>i.conversationId==='dd').tag,'AP Agent reviewed');
  assert.equal(r.items.find(i=>i.conversationId==='st').tag,'No attachment - Human review');
 });
+test('an invoice email that mentions Direct Debit in its body is not a Direct Debit notice',async()=>{
+ const f=fixture([{id:'ig',subject:'Your Monthly iGPR Managed Service Invoice',body:'Payment will be collected by Direct Debit on 1 Dec',attachments:[]}]);
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(r.items[0].tag,'No attachment - Human review');
+});

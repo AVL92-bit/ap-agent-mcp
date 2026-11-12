@@ -7,6 +7,7 @@ import { extractInvoiceCandidates } from './invoice-candidates.js';
 import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.js';
 import { extractInvoiceFields } from './model-extraction.js';
 import { extractPdfsFromEml } from './eml-attachments.js';
+import { alignToSupplierNumberFormat } from './supplier-number-format.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -157,9 +158,26 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
       String(b.InvoiceID??'').localeCompare(String(a.InvoiceID??'')));
     return eligible[0]?.LineItems?.find(line=>line.AccountCode)?.AccountCode;
   }
-  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,reviewNotes:extraction.notes,
+  const command = await buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,reviewNotes:extraction.notes,
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
     recentAccountCodeForContact,
   });
+  // Follow the supplier's existing invoice-number format in Xero (e.g. drop "RI " when the
+  // supplier's earlier bills are plain numbers).
+  if (!cache.bills) cache.bills=await readPaged<any>('Invoices','Invoices');
+  const history=(cache.bills as Array<{Type?:string;Status?:string;InvoiceNumber?:string;Contact?:{ContactID?:string}}>)
+    .filter(b=>b.Type==='ACCPAY' && b.Contact?.ContactID===command.supplierContactId && ['AUTHORISED','PAID'].includes(String(b.Status).toUpperCase()))
+    .map(b=>b.InvoiceNumber??'').slice(0,20);
+  const aligned=alignToSupplierNumberFormat(command.number,history);
+  if (aligned && aligned!==command.number) {
+    const original=command.number;
+    command.number=aligned;
+    command.infoNotes=[...(command.infoNotes??[]),`Invoice number "${original}" recorded as "${aligned}" to match this supplier's existing Xero numbers`];
+    if (pdf.filename.replace(/[^0-9]/g,' ').split(' ').includes(aligned)) {
+      command.uncertainFields=command.uncertainFields.filter(f=>f!=='reference');
+      command.reviewNotes=(command.reviewNotes??[]).filter(n=>!n.startsWith(`Invoice number "${original}" differs from the number in the filename`));
+    }
+  }
+  return command;
 }
