@@ -2382,6 +2382,34 @@ server.registerTool(
   // --------------------------------------------------
 
   server.registerTool(
+    "add_finance_review_note",
+    {
+      title: "Add Finance Review Note For A Draft",
+      description:
+        "Write: appends one 'Draft with uncertainty' row to the Finance review Sheet for a document the agent has already drafted, carrying a reviewer note supplied by the operator. Does not touch Xero or Front. Idempotent per conversation + attachment.",
+      inputSchema: {
+        conversation_id: z.string().regex(/^cnv_[\w-]+$/),
+        attachment_id: z.string().regex(/^fil_[\w-]+(?:~\d+)?$/),
+        xero_invoice_id: z.string().uuid().optional(),
+        supplier: z.string().max(150).optional(),
+        reference: z.string().max(100).optional(),
+        gross: z.number().optional(),
+        filename: z.string().max(200).optional(),
+        note: z.string().min(3).max(500),
+      },
+    },
+    async ({ conversation_id, attachment_id, xero_invoice_id, supplier, reference, gross, filename, note }) => {
+      const a = { conversation_id, attachment_id, xero_invoice_id, supplier, reference, gross, filename, note };
+      if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
+      try {
+        await appendApInboxException({ conversationId: a.conversation_id, attachmentId: a.attachment_id, xeroId: a.xero_invoice_id, outcome: 'draft_uncertain',
+          reason: a.note, filename: a.filename, supplier: a.supplier, reference: a.reference, gross: a.gross });
+        return toolResult({ status: 'sheet_row_written_or_already_present', conversation_id: a.conversation_id, attachment_id: a.attachment_id });
+      } catch (error) { return safeError("Finance review note failed", error); }
+    }
+  );
+
+  server.registerTool(
     "get_finance_review_rows",
     {
       title: "Read Finance Review Sheet Rows",
