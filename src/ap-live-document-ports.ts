@@ -2,7 +2,7 @@ import { PDFParse } from 'pdf-parse';
 import { verifyInvoiceDocumentText, DocumentNeedsHumanReview, requireVerifiedCriticalFields } from './ap-document-verification.js';
 import type { PoolClient } from 'pg';
 import { xeroFetch } from './xero-rate-limit.js';
-import { getPilotXeroWriteSession } from './xero-pilot-test.js';
+import { getPilotXeroWriteSession, getPilotXeroReadSession } from './xero-pilot-test.js';
 import { extractInvoiceCandidates } from './invoice-candidates.js';
 import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
@@ -61,7 +61,16 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
   }
   requireVerifiedCriticalFields(candidates);
-  const session = await getPilotXeroWriteSession();
+  return resolveLiveDraftCandidates(candidates,pdf,attachment.id,await getPilotXeroWriteSession());
+}
+
+/** Same Xero data and decision path as live drafting; no business writes. */
+export async function previewLiveDraftCandidates(candidates: ReturnType<typeof extractInvoiceCandidates>, filename:string, attachmentId:string) {
+  if (process.env.FRONT_ENABLED_INBOX_ID !== INBOX || process.env.XERO_PILOT_TENANT_ID !== TENANT) throw new Error('Unexpected pilot inbox or tenant');
+  return resolveLiveDraftCandidates(candidates,{filename,bytes:new Uint8Array(),contentType:'application/pdf'},attachmentId,await getPilotXeroReadSession());
+}
+
+async function resolveLiveDraftCandidates(candidates:ReturnType<typeof extractInvoiceCandidates>,pdf:OriginalPdf,attachmentId:string,session:Awaited<ReturnType<typeof getPilotXeroReadSession>>) {
   if (session.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
   const headers = {Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'};
   async function readPaged<T>(resource:string,key:string):Promise<T[]> {
@@ -96,7 +105,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   }
   return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,
     fallbackDate:new Date().toISOString().slice(0,10),
-    fallbackReference:`FRONT-${attachment.id}`,
+    fallbackReference:`FRONT-${attachmentId}`,
     recentAccountCodeForContact,
     fallbackAccountCode:process.env.AP_FALLBACK_ACCOUNT_CODE,
   });
