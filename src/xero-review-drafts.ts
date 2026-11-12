@@ -236,7 +236,7 @@ async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:stri
   const printedName=incomingPdfText?pdfSupplierName(incomingPdfText):null;
   if(!printedName) throw new Error('Incoming PDF has no unambiguous supplier name; supplier verification blocked');
   const candidates=contacts.map(c=>({c,score:supplierNameSimilarity(printedName,String(c.Name))}))
-    .filter(x=>x.score>=0.40.sort((a,b)=>b.score-a.score);
+    .filter(x=>x.score>=0.40).sort((a,b)=>b.score-a.score);
   if(!candidates.length) return null;
   const confirmed:ContactMatch[]=[];
   for(const {c,score} of candidates) {
