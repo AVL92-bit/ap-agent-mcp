@@ -835,8 +835,9 @@ pages_scanned: visitedPages.size,
   }, async ({conversation_id,message_id,attachment_id}) => {
     try {
       const extracted = await extractVerifiedInvoiceAttachment({conversation_id,message_id,attachment_id});
-      if (extracted.isError) return extracted;
-      const payload = JSON.parse(extracted.content[0].text) as {status?:string;reason?:string;invoice_text?:string;original_filename?:string;original_content_type?:string};
+      const firstContent = extracted.content[0];
+      if (!firstContent || firstContent.type !== 'text') return toolResult({status:'review_required',reason:'PDF text extraction requires human review',creates_draft:false});
+      const payload = JSON.parse(firstContent.text) as {status?:string;reason?:string;invoice_text?:string;original_filename?:string;original_content_type?:string};
       if (payload.status !== 'ok' || payload.original_content_type !== 'application/pdf' || !payload.invoice_text || !payload.original_filename) {
         return toolResult({status:'review_required',reason:payload.reason??'Verified embedded PDF text required',creates_draft:false});
       }
