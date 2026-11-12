@@ -5,6 +5,7 @@ import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-jo
 import { executeCompleteApInbox } from "./ap-inbox-execution.js";
 import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
 import { makeLiveDraftCommand } from "./ap-live-document-ports.js";
+import { previewApDraftSelection } from "./ap-draft-dry-run.js";
 import { appendApInboxException } from "./google-sheets-review.js";
 import { scanApFrontInbox } from "./ap-front-inbox-scan.js";
 import { extractInvoiceCandidates } from "./invoice-candidates.js";
@@ -823,6 +824,27 @@ pages_scanned: visitedPages.size,
 
   // Application-owned complete scan and draft-only execution. Explicit opt-in,
   // never triggered by the read-only scanner or by correspondence triage.
+  server.registerTool("preview_ap_draft_selection_snapshot", {
+    title: "Preview AP draft selection from supplied evidence (strictly read only)",
+    description: "Run the real deterministic supplier and account selection against caller-supplied PDF text and Xero snapshots. No network, database or write calls. Not a live Xero verification.",
+    inputSchema: {
+      invoice_text: z.string().min(10).max(250000),
+      filename: z.string().min(5).max(255).regex(/\\.pdf$/i),
+      attachment_id: z.string().startsWith('fil_').max(100),
+      contacts: z.array(z.object({id:z.string().min(1),name:z.string().min(1)})).max(10000),
+      accounts: z.array(z.object({code:z.string(),name:z.string(),type:z.string(),status:z.string()})).max(1000),
+      historical_account_code: z.string().optional(),
+      fallback_account_code: z.string().optional(),
+    },
+  }, async ({invoice_text,filename,attachment_id,contacts,accounts,historical_account_code,fallback_account_code}) => {
+    try {
+      return toolResult(await previewApDraftSelection({
+        invoiceText:invoice_text,filename,attachmentId:attachment_id,contacts,accounts,
+        historicalAccountCode:historical_account_code,fallbackAccountCode:fallback_account_code,
+      }));
+    } catch(error) { return safeError('Read-only AP draft selection preview failed; no writes performed',error); }
+  });
+
   server.registerTool("run_ap_inbox", {
     title: "Run complete AP inbox (draft only)",
     description: "Scan all unassigned AP conversations and create/reconcile Xero DRAFT documents. Requires explicit execute=true and server-side write enablement.",
