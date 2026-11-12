@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { printedSupplierName } from './supplier-evidence.js';
+import { printedSupplierName, sameSupplierIgnoringLegalSuffix } from './supplier-evidence.js';
 import { xeroFetch } from "./xero-rate-limit.js";
 import { PDFParse } from 'pdf-parse';
 /** Supervised AP draft creation. Uncertainty is recorded for review, not an approval gate.
@@ -199,7 +199,7 @@ async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:stri
   const confirmed:ContactMatch[]=[];
   for(const {c,score} of candidates) {
     const evidence=await historicalInvoiceNameMatches(api,String(c.ContactID),incomingPdfText!);
-    if(evidence.matched) confirmed.push({id:String(c.ContactID),name:String(c.Name),alias:printedName!==comparableSupplierName(String(c.Name)),confidence:`historical_pdf_supplier_name_match; bill=${evidence.bill_id}; filename=${evidence.filename}; candidate_similarity=${score.toFixed(2)}`});
+    if(evidence.matched) confirmed.push({id:String(c.ContactID),name:String(c.Name),alias:!sameSupplierIgnoringLegalSuffix(printedName,String(c.Name)),confidence:`historical_pdf_supplier_name_match; bill=${evidence.bill_id}; filename=${evidence.filename}; candidate_similarity=${score.toFixed(2)}`});
   }
   if(confirmed.length>1) throw new Error(`Multiple Xero contacts have matching historical supplier invoice names: ${confirmed.map(x=>x.name).join(', ')}`);
   if(!confirmed.length) throw new Error(`No supplier-name match found in the three most recent Xero bills for any 40%+ candidate; supplier review required`);
