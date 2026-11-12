@@ -20,6 +20,6 @@ test('CI runs TypeScript, application tests and production Docker build',()=>{
 test('Unreadable PDF requires human review and cannot trigger OCR drafting',()=>{
   const live=read('src/ap-live-document-ports.ts');
   assert.match(live,/DocumentNeedsHumanReview/);
-  assert.match(live,/PDF text is unreadable; human review required/);
+  assert.match(live,/PDF has no readable text and model extraction is unavailable/);
   assert.doesNotMatch(live,/fieldsFromOcrRequireReview/);
 });

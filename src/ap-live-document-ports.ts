@@ -1,10 +1,11 @@
 import { PDFParse } from 'pdf-parse';
-import { verifyInvoiceDocumentText, DocumentNeedsHumanReview, requireVerifiedCriticalFields } from './ap-document-verification.js';
+import { verifyInvoiceDocumentText, DocumentNeedsHumanReview } from './ap-document-verification.js';
 import type { PoolClient } from 'pg';
 import { xeroFetch } from './xero-rate-limit.js';
 import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { extractInvoiceCandidates } from './invoice-candidates.js';
 import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.js';
+import { extractInvoiceFields } from './model-extraction.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -30,17 +31,30 @@ export async function downloadFrontOriginalPdf(attachment: InboxAttachment, toke
   return {filename:attachment.filename,bytes,contentType:'application/pdf'};
 }
 
+/** Extraction for the full run: text rules always, model extraction (reads the PDF as
+ * text + page images) when available, cross-checked. Only agreed blockers throw:
+ * receipt (supporting document), not an invoice/credit note, no gross amount. */
 export async function extractPdfCandidates(pdf: OriginalPdf) {
   const parser = new PDFParse({data:pdf.bytes});
+  let text = '';
   try {
     const info = await parser.getInfo();
     if (!Number.isInteger(info.total) || info.total < 1 || info.total > MAX_PAGES) throw new Error('PDF page count outside extraction bounds');
     const result = await parser.getText();
-    const text = result.text?.trim() || '';
-    if (text.length < 10 || text.length > 250000) throw new Error('No usable embedded PDF text; image-only PDF extraction unavailable');
-    verifyInvoiceDocumentText(text);
-    return extractInvoiceCandidates(text);
+    text = result.text?.trim() || '';
+    if (text.length > 250000) throw new Error('PDF text exceeds extraction bounds');
   } finally { await parser.destroy(); }
+  verifyInvoiceDocumentText(text, {textOnly:false}); // receipts only
+  const merged = await extractInvoiceFields({text, pdf:pdf.bytes, filename:pdf.filename});
+  if (merged.source==='text') {
+    if (text.length < 10) throw new DocumentNeedsHumanReview('unclear','PDF has no readable text and model extraction is unavailable');
+    verifyInvoiceDocumentText(text, {textOnly:true});
+  }
+  const type = merged.candidates.documentType.value;
+  if (type==='receipt') throw new DocumentNeedsHumanReview('supporting_document','Receipt: supporting document only; never posted to Xero');
+  if (type!=='invoice' && type!=='credit_note') throw new DocumentNeedsHumanReview('not_invoice',`Not an invoice or credit note (${type})`);
+  if (!merged.candidates.grossAmount) throw new DocumentNeedsHumanReview('unclear','No gross amount found on the document; cannot draft');
+  return merged;
 }
 
 /** Live read-only Xero candidate listing. Never creates supplier contacts. */
@@ -51,16 +65,8 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   const frontToken = process.env.FRONT_API_TOKEN;
   if (!frontToken) throw new Error('Front token missing');
   const pdf = await downloadFrontOriginalPdf(attachment, frontToken);
-  let candidates;
-  try {
-    candidates = await extractPdfCandidates(pdf);
-  } catch (error) {
-    if (error instanceof DocumentNeedsHumanReview) throw error;
-    if (!/No usable embedded PDF text/.test(String(error))) throw error;
-    // OCR or correspondence text is not sufficient to authorise automatic drafting.
-    throw new DocumentNeedsHumanReview('unclear','PDF text is unreadable; human review required before any Xero or PostgreSQL writes');
-  }
-  requireVerifiedCriticalFields(candidates);
+  const extraction = await extractPdfCandidates(pdf);
+  const candidates = extraction.candidates;
   const session = await getPilotXeroWriteSession();
   if (session.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
   const headers = {Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'};
@@ -95,7 +101,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
       String(b.InvoiceID??'').localeCompare(String(a.InvoiceID??'')));
     return eligible[0]?.LineItems?.find(line=>line.AccountCode)?.AccountCode;
   }
-  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,
+  return buildDraftFromAvailableCandidates({candidates,contacts,accounts,pdf,reviewNotes:extraction.notes,
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
     recentAccountCodeForContact,

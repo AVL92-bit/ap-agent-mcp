@@ -13,7 +13,7 @@ test('complete executing MCP tool is application-controlled and explicitly gated
 test('live PDF extraction uses verified Front message and attachment IDs',()=>{
  const s=read('ap-live-document-ports.ts');
  assert.match(s,/messages\/\$\{encodeURIComponent\(attachment.messageId\)\}\/download\/\$\{encodeURIComponent\(attachment.id\)\}/);
- assert.match(s,/extractInvoiceCandidates\(text\)/);
+ assert.match(s,/extractInvoiceFields\(\{text/);
  assert.match(s,/buildDraftFromAvailableCandidates/);
  assert.match(s,/MAX_BYTES/);
 });

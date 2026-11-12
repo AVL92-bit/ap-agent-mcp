@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { printedSupplierName, sameSupplierIgnoringLegalSuffix } from './supplier-evidence.js';
 import { liveExtractionIssues } from './live-review-issues.js';
+import { extractInvoiceFields } from './model-extraction.js';
 import { xeroFetch } from "./xero-rate-limit.js";
 import { PDFParse } from 'pdf-parse';
 /** Supervised AP draft creation. Uncertainty is recorded for review, not an approval gate.
@@ -389,7 +390,8 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const coding:Record<string,unknown>&{account_code:string|null;issues:string[]}=draftSupplier
     ? await codingForContact(api,draftSupplier.id)
     : {status:'contact_unresolved',account_code:null,issues:[]};
-  const liveIssues=liveExtractionIssues(pdf,{invoice_number:r.invoice_number,gross_gbp:a.gross_gbp});
+  const merged=await extractInvoiceFields({text:pdf,pdf:new Uint8Array(original.bytes),filename:original.filename});
+  const liveIssues=liveExtractionIssues(pdf,{invoice_number:r.invoice_number,gross_gbp:a.gross_gbp},merged);
   // Resolve old assessment warnings using current source evidence, not stored guesses.
   // A missing legal-entity label is not itself a conflict when the PDF names the
   // practice as recipient. A different named recipient must still be reviewed.
@@ -431,6 +433,7 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
     printed_supplier_name:printedSupplier,supplier_verification_error:supplierVerificationError||null,
+    extraction_source:merged.source,extraction_model:merged.model??null,
     recorded_invoice_number:r.invoice_number??null,recorded_invoice_date:a.invoice_date??null,recorded_gross_gbp:a.gross_gbp??null,
     draft_contact:!draftSupplier?null:draftSupplier.verified?{id:draftSupplier.id,name:draftSupplier.name,basis:'historical_pdf_verified',confidence:draftSupplier.confidence}
       :{id:draftSupplier.id,name:draftSupplier.name,basis:'best_candidate_similarity',similarity:Number((draftSupplier.similarity??0).toFixed(2)),exceeds_40_percent:(draftSupplier.similarity??0)>0.40},
@@ -536,7 +539,8 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     messageId:r.front_message_id,attachmentId:r.attachment_id});
   const incomingPdfText=await pdfText(original.bytes);
   const printedSupplier=pdfSupplierName(incomingPdfText);
-  issues.push(...liveExtractionIssues(incomingPdfText,{invoice_number:number,gross_gbp:a.gross_gbp}));
+  const merged=await extractInvoiceFields({text:incomingPdfText,pdf:new Uint8Array(original.bytes),filename:original.filename});
+  issues.push(...liveExtractionIssues(incomingPdfText,{invoice_number:number,gross_gbp:a.gross_gbp},merged));
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
   // Resolve assessment warnings only after the current original PDF
   // and latest Front version have been independently verified.
@@ -694,10 +698,9 @@ export async function clearConfirmedPrePostFailure(pool:Pool,reviewId:string,con
     xero_draft_updated_at=NOW(),updated_at=NOW()
     WHERE id=$1 AND xero_draft_id IS NULL AND xero_draft_status IN ('creating','reconcile_required') RETURNING id`,[reviewId]);
   if(updated.rowCount!==1) throw new Error('Concurrent review change; retry reconciliation');
-  let sheet_status='synced';
-  try{await syncPilotReviewExceptions(pool,[reviewId]);}catch{sheet_status='sync_failed';}
+  // Clearing a stale attempt is housekeeping, not a finance-review event: no Sheet row.
   return {status:'cleared_confirmed_pre_post_failure',review_id:reviewId,
-    xero_duplicate_search_complete:true,operator_confirmed_no_xero_post:true,sheet_status};
+    xero_duplicate_search_complete:true,operator_confirmed_no_xero_post:true,sheet_status:'not_written'};
 }
 
 /** Explicitly link an existing Xero document to a review after verifying it live.

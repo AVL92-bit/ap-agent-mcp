@@ -48,6 +48,14 @@ import { investigatePilotHistoricalCodingException } from "./historical-comparab
 
 import { matchFrontTag } from "./front-tag-match.js";
 import { dryRunApInbox, selectConversations } from "./ap-inbox-dry-run.js";
+import { extractInvoiceFields } from "./model-extraction.js";
+/** Extraction shown by get_invoice_attachment: merged result (model cross-checked by text
+ * rules) as extracted_candidates, plus both sources and any disagreement notes. */
+async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:string}) {
+  const merged=await extractInvoiceFields(input);
+  return {extracted_candidates:merged.candidates,extraction_source:merged.source,extraction_model:merged.model??null,
+    extraction_notes:merged.notes,text_rule_candidates:merged.text_candidates};
+}
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -1503,7 +1511,7 @@ Accept: isPdf
             extraction_method: "docx_text",
             extracted_characters: invoiceText.length,
             invoice_text: invoiceText,
-            extracted_candidates: extractInvoiceCandidates(invoiceText),
+            ...(await extractionResponse({text:invoiceText,filename:attachment.filename ?? 'document.docx'})),
             requires_field_verification: true,
             invoice_ready_for_draft: false,
             bills_created: false,
@@ -1587,6 +1595,13 @@ Accept: isPdf
               console.error("PDF visual fallback failed", renderError instanceof Error ? renderError.message : "Unknown failure");
             }
           }
+          if (invoiceText.length < 50) {
+            const scanned=await extractionResponse({text:'',pdf:new Uint8Array(pdfBuffer),filename:'document.pdf'});
+            if (scanned.extraction_source==='model+text') return toolResult({status:'ok',conversation_id,message_id,attachment_id,
+              verified_inbox_id:inboxId,original_content_type:'application/pdf',original_size:pdfBuffer.length,
+              extraction_method:'model_read_page_images',total_pages:totalPages,extracted_characters:invoiceText.length,
+              invoice_text:invoiceText,...scanned,requires_field_verification:true,invoice_ready_for_draft:false,bills_created:false});
+          }
           return toolResult({
             status:
               "review_required",
@@ -1623,7 +1638,7 @@ Accept: isPdf
             invoiceText.length,
           invoice_text:
             invoiceText,
-          extracted_candidates: extractInvoiceCandidates(invoiceText),
+          ...(await extractionResponse({text:invoiceText,pdf:new Uint8Array(pdfBuffer),filename:'document.pdf'})),
           requires_field_verification:
             true,
           invoice_ready_for_draft:

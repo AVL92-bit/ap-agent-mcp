@@ -19,17 +19,23 @@ export type InboxPort = {
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
 export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[] };
 
+/** Documents the agent processes; every other attachment type is ignored. */
+export const DOCUMENT_ATTACHMENT = /\.(?:pdf|docx?|xlsx?)$/i;
+
 /** Never archive when a required operation fails; a Sheet outage is reported but
  * does not undo a successful draft or prevent its Front outcome. */
 export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<InboxRunReport> {
   const conversations = await port.listAllOpenConversations();
   const ids = new Set<string>();
   const report: InboxRunReport = { conversations: conversations.length, documents: 0, archived: 0, items: [] };
-  for (const conversation of conversations) {
+  for (let conversation of conversations) {
     const item: InboxRunItem = { conversationId: conversation.id, archived: false, documents: 0, failures: [] };
     report.items.push(item);
     if (!conversation.id || ids.has(conversation.id)) { item.failures.push('Duplicate or missing conversation ID'); continue; }
     ids.add(conversation.id);
+    // Only PDF, Word and Excel attachments are documents. Images, signatures, calendar
+    // files etc. are ignored; a conversation with none of these is a no-attachment email.
+    conversation = { ...conversation, attachments: conversation.attachments.filter(a => DOCUMENT_ATTACHMENT.test(a.filename)) };
     if (!conversation.attachments.length) {
       const outcome = classifyNoAttachment(`${conversation.subject}\n${conversation.body}`);
       const policy = FRONT_OUTCOME_POLICY[outcome];
@@ -54,9 +60,9 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
       let xeroId: string | undefined;
       let uncertain = false;
       try {
-        if (!/\.pdf$/i.test(attachment.filename)) throw new DocumentNeedsHumanReview('unclear','This document format is not yet supported for invoice-content verification');
+        if (!/\.pdf$/i.test(attachment.filename)) throw new DocumentNeedsHumanReview('unclear','Word/Excel document: not yet drafted automatically; finance to review');
         const command = await port.makeDraftCommand(conversation, attachment);
-        uncertain = command.uncertainFields.length > 0;
+        uncertain = command.uncertainFields.length > 0 || (command.reviewNotes?.length ?? 0) > 0;
         await port.journal?.begin(conversation.id, attachment.id, createHash('sha256').update(command.pdf.bytes).digest('hex'));
         const guardedXero = port.journal?.claimCreate
           ? {...xero, beforeCreate:()=>port.journal!.claimCreate!(conversation.id,attachment.id)}
@@ -64,7 +70,9 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
         const outcome = await reconcileCreateAndAttach(command, guardedXero);
         if (outcome.status === 'already_in_xero') {
           await port.journal?.complete(conversation.id, attachment.id, 'existing_verified', outcome.xeroId);
-          dispositions.push({ attachmentId: attachment.id, disposition: 'xero_existing_verified' });
+          // An existing DRAFT is still awaiting finance review: keep the conversation open.
+          dispositions.push({ attachmentId: attachment.id,
+            disposition: String(outcome.xeroStatus ?? '').toUpperCase() === 'DRAFT' ? 'draft_uncertain_attached' : 'xero_existing_verified' });
           continue;
         }
         if (outcome.status === 'draft_created') {
@@ -72,7 +80,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
           await port.journal?.complete(conversation.id, attachment.id, uncertain ? 'draft_uncertain' : 'draft_verified', xeroId);
           dispositions.push({ attachmentId: attachment.id, disposition: uncertain ? 'draft_uncertain_attached' : 'xero_draft_attached' });
           if (uncertain) {
-            try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: `Uncertain fields: ${command.uncertainFields.join(', ')}${command.uncertainFields.includes('grossAmount') ? ' | Amount uncertain due to carried-forward credit or ambiguous invoice total; verify current-period charges against original PDF' : ''}`, outcome: 'draft_uncertain', supplier:command.supplierName, extractedSupplier:command.extractedSupplierName, supplierMatchScore:command.supplierMatchScore, reference:command.number, gross:command.gross }); }
+            try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: [`Uncertain fields: ${command.uncertainFields.join(', ')}`, ...(command.uncertainFields.includes('grossAmount') ? ['Amount uncertain: check against the document (credit/brought-forward balance or unclear total)'] : []), ...(command.reviewNotes ?? [])].join(' | '), outcome: 'draft_uncertain', supplier:command.supplierName, extractedSupplier:command.extractedSupplierName, supplierMatchScore:command.supplierMatchScore, reference:command.number, gross:command.gross }); }
             catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
           }
           continue;

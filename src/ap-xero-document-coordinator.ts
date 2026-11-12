@@ -19,6 +19,8 @@ export type DraftCommand = {
   gross: number;
   pdf: OriginalPdf;
   uncertainFields: string[];
+  /** Review notes for the Sheet (e.g. model and text rules disagree). Never blockers. */
+  reviewNotes?: string[];
 };
 export type XeroDraftPort = {
   lookup(number: string): Promise<XeroPurchaseMatch[]>;
@@ -30,7 +32,7 @@ export type XeroDraftPort = {
   verifyOriginal?(kind: PurchaseKind, id: string, pdf: OriginalPdf): Promise<boolean>;
 };
 export type DraftOutcome =
-  | { status: 'already_in_xero'; kind: PurchaseKind; xeroId: string; uncertainFields: string[] }
+  | { status: 'already_in_xero'; kind: PurchaseKind; xeroId: string; xeroStatus?: string; uncertainFields: string[] }
   | { status: 'draft_created'; kind: PurchaseKind; xeroId: string; uncertainFields: string[] }
   | { status: 'attachment_failed'; kind: PurchaseKind; xeroId: string; uncertainFields: string[]; error: string }
   | { status: 'reconciliation_required'; kind: PurchaseKind; uncertainFields: string[]; error: string };
@@ -66,7 +68,7 @@ export async function reconcileCreateAndAttach(command: DraftCommand, port: Xero
         await port.attachOriginal(command.kind, id, command.pdf);
         if (!(await port.verifyOriginal(command.kind, id, command.pdf))) throw new Error('Original PDF still not verified after upload');
       }
-      return { status: 'already_in_xero', kind: command.kind, xeroId: id, uncertainFields: command.uncertainFields };
+      return { status: 'already_in_xero', kind: command.kind, xeroId: id, xeroStatus: initial[0].status, uncertainFields: command.uncertainFields };
     } catch (error) {
       return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: `Existing Xero document ${id}: ${String(error)}` };
     }
