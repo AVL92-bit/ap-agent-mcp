@@ -8,6 +8,7 @@ import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.
 import { extractInvoiceFields } from './model-extraction.js';
 import { extractPdfsFromEml } from './eml-attachments.js';
 import { alignToSupplierNumberFormat, matchesSupplierNumberFormat } from './supplier-number-format.js';
+import { confirmContactByHistoricalPdf } from './xero-review-drafts.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -94,7 +95,7 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
   if (type!=='invoice' && type!=='credit_note') throw new DocumentNeedsHumanReview('not_invoice',`Not an invoice or credit note (${type})`);
   if (!merged.candidates.grossAmount) throw new DocumentNeedsHumanReview('unclear',
     ['No gross amount found on the document; cannot draft', ...merged.notes].join(' | '));
-  return merged;
+  return {...merged, text};
 }
 
 const CACHE_MS = 10 * 60 * 1000;
@@ -184,6 +185,17 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     if (pdf.filename.replace(/[^0-9]/g,' ').split(' ').includes(aligned)) {
       command.uncertainFields=command.uncertainFields.filter(f=>f!=='reference');
       command.reviewNotes=(command.reviewNotes??[]).filter(n=>!n.startsWith(`Invoice number "${original}" differs from the number in the filename`));
+    }
+  }
+  // Same identity check as the supervised route, used only when the contact match is uncertain
+  // (it downloads previous bill PDFs from Xero): the supplier printed on this PDF matches the one
+  // printed on one of the contact's three most recent bills -> confirmed, not a review issue.
+  if (command.uncertainFields.includes('supplier') && extraction.text) {
+    const check = await confirmContactByHistoricalPdf(command.supplierContactId, extraction.text).catch(() => ({ matched: false }));
+    if (check.matched) {
+      command.uncertainFields = command.uncertainFields.filter(f => f !== 'supplier');
+      command.reviewNotes = (command.reviewNotes ?? []).filter(n => !n.startsWith('Supplier:'));
+      command.infoNotes = [...(command.infoNotes ?? []), 'Supplier confirmed against a previous invoice PDF in Xero'];
     }
   }
   return command;
