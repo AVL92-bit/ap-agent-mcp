@@ -46,6 +46,7 @@ import {
 import { assessPilotHistoricalCoding } from "./historical-coding-assessment.js";
 import { investigatePilotHistoricalCodingException } from "./historical-comparables.js";
 
+import { matchFrontTag } from "./front-tag-match.js";
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -275,20 +276,7 @@ async function findApFrontTagId(
     );
   }
 
-  const matches = data._results.filter(
-    (tag) => tag.name === tagName
-  );
-
-  if (
-    matches.length !== 1 ||
-    !matches[0].id
-  ) {
-    throw new Error(
-      `Front tag not uniquely found: ${tagName}`
-    );
-  }
-
-  return matches[0].id;
+  return matchFrontTag(data._results, tagName);
 }
 
 async function applyApFrontTag(
