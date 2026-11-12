@@ -7,7 +7,7 @@ import { extractInvoiceCandidates } from './invoice-candidates.js';
 import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.js';
 import { extractInvoiceFields } from './model-extraction.js';
 import { extractPdfsFromEml } from './eml-attachments.js';
-import { alignToSupplierNumberFormat } from './supplier-number-format.js';
+import { alignToSupplierNumberFormat, matchesSupplierNumberFormat } from './supplier-number-format.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -170,6 +170,13 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     .filter(b=>b.Type==='ACCPAY' && b.Contact?.ContactID===command.supplierContactId && ['AUTHORISED','PAID'].includes(String(b.Status).toUpperCase()))
     .map(b=>b.InvoiceNumber??'').slice(0,20);
   const aligned=alignToSupplierNumberFormat(command.number,history);
+  if (!aligned && matchesSupplierNumberFormat(command.number,history)) {
+    // e.g. Henry Schein bills are recorded as "RI 659..." in Xero while the filename has the bare
+    // number: the reference follows the supplier's existing format, so the filename check stands down.
+    const before=command.reviewNotes??[];
+    command.reviewNotes=before.filter(n=>!n.startsWith(`Invoice number "${command.number}" differs from the number in the filename`));
+    if (command.reviewNotes.length!==before.length) command.uncertainFields=command.uncertainFields.filter(f=>f!=='reference');
+  }
   if (aligned && aligned!==command.number) {
     const original=command.number;
     command.number=aligned;

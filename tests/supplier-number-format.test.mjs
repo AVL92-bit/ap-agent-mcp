@@ -13,3 +13,10 @@ test('a prefix the supplier does use is kept; too little history changes nothing
   assert.equal(alignToSupplierNumberFormat('RI 65930654', ['65930802']), null);
   assert.equal(alignToSupplierNumberFormat('RI 65930654', ['65930802', 'X-1']), null);
 });
+const { matchesSupplierNumberFormat } = await import(new URL('../dist/supplier-number-format.js', import.meta.url));
+test('Henry Schein history is "RI 659..." so "RI 65930654" matches the supplier format', () => {
+  const hist = ['65933114', 'RI 65927223', 'RI 65926398', 'RI 65921965'];
+  assert.equal(matchesSupplierNumberFormat('RI 65930654', hist), true);
+  assert.equal(alignToSupplierNumberFormat('RI 65930654', hist), null);
+  assert.equal(matchesSupplierNumberFormat('XYZ-1', hist), false);
+});
