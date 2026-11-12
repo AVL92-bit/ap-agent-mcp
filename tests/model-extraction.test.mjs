@@ -7,7 +7,7 @@ const fields = (over = {}) => ({ document_type: 'invoice', supplier_name: 'Healt
   gross_total: 667.92, gross_evidence: 'Amount due £667.92', net_total: 556.6, vat_total: 111.32, currency: 'GBP', account_balance: null,
   billed_to: 'St Georges Road Surgery', low_confidence_fields: [], notes: null, ...over });
 const fakeFetch = (f, capture = {}) => async (url, init) => { capture.url = url; capture.body = JSON.parse(init.body); capture.headers = init.headers;
-  return { ok: true, json: async () => ({ content: [{ type: 'tool_use', name: 'record_invoice_fields', input: f }] }) }; };
+  return { ok: true, json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(f) }] }) }; };
 const healthtech = 'Invoice\nInvoice number HT1\u000034156\nDate of issue October 1, 2026\nDate due October 1, 2026\nHealthtech 1\n91 Belmont Hill\nLondon\nSE13 5AX\nBill to\nSt Georges Road Surgery\nAmount due £667.92';
 
 test('without an API key the text rules are used and that is noted', async () => {
@@ -24,6 +24,7 @@ test('model and text rules agree: fields become confident (damaged dash confirme
   assert.equal(cap.body.model, 'claude-sonnet-5-5');
   assert.equal(cap.body.messages[0].content[0].type, 'document');
   assert.equal(cap.headers['x-api-key'], 'test-key');
+  assert.equal(cap.body.output_config.format.type, 'json_schema'); assert.equal(cap.body.tool_choice, undefined);
   assert.equal(r.candidates.reference.value, 'HT1-34156'); assert.equal(r.candidates.reference.uncertain, false);
   assert.equal(r.candidates.invoiceDate.value, '2026-10-01'); assert.equal(r.candidates.invoiceDate.uncertain, false);
   assert.equal(r.candidates.grossAmount.value, '£667.92'); assert.equal(r.candidates.grossAmount.uncertain, false);
