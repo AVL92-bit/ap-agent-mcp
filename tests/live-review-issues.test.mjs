@@ -13,6 +13,12 @@ test('damaged separator, credit balance and mismatched total are flagged from th
   assert.ok(issues.includes(BALANCE_AMOUNT_NOTE));
   assert.ok(issues.some(i => /differs from recorded £10.00/.test(i)));
 });
-test('stored notes are never inputs: only the PDF and recorded fields are used', () => {
-  assert.equal(liveExtractionIssues.length, 2);
+test('stored notes are never inputs: only the PDF, recorded fields and the current extraction', () => {
+  assert.equal(liveExtractionIssues.length, 3);
+  const issues = liveExtractionIssues('Invoice No: AB-1\nInvoice Date: 01/10/2026\nTotal Due: £20.00', { invoice_number: 'AB-1', gross_gbp: 20 },
+    { candidates: { documentType: { value: 'invoice', evidence: '', uncertain: false }, supplier: null,
+      reference: { value: 'AB-1', evidence: '', uncertain: false }, invoiceDate: { value: '2026-10-01', evidence: '', uncertain: false },
+      dueDate: null, grossAmount: { value: '£20.00', evidence: '', uncertain: false }, currency: { value: 'GBP', evidence: '', uncertain: false },
+      accountBalance: null, amountPaid: null, linkedInvoiceReference: null, uncertainFields: [] }, notes: ['Supplier: model read "A", text rules read "B" - verify'] });
+  assert.deepEqual(issues, ['Supplier: model read "A", text rules read "B" - verify']);
 });

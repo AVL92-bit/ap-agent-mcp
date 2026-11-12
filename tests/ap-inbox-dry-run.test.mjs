@@ -12,10 +12,12 @@ const convs = [
     { id: 'fil_rcpt', filename: 'Receipt-2439-6527.pdf', messageId: 'm' }] },
   { id: 'cnv_b', subject: 'Existing', body: '', attachments: [{ id: 'fil_old', filename: 'old.pdf', messageId: 'm' }] },
   { id: 'cnv_c', subject: 'Logo only', body: '', attachments: [{ id: 'fil_img', filename: 'image.png', messageId: 'm' }] },
+  { id: 'cnv_d', subject: 'Already drafted', body: '', attachments: [{ id: 'fil_d', filename: 'd.pdf', messageId: 'm' }] },
 ];
 const writes = [];
 const liveXero = {
-  lookup: async n => n === 'OLD-1' ? [{ kind: 'Invoices', id: 'x-old', number: 'OLD-1', status: 'DRAFT', contactId: 'c1', contactName: 'S', exact: true }] : [],
+  lookup: async n => n === 'OLD-1' ? [{ kind: 'Invoices', id: 'x-old', number: 'OLD-1', status: 'AUTHORISED', contactId: 'c1', contactName: 'S', exact: true }]
+    : n === 'DRAFTED-1' ? [{ kind: 'Invoices', id: 'x-draft', number: 'DRAFTED-1', status: 'DRAFT', contactId: 'c1', contactName: 'S', exact: true }] : [],
   verifyOriginal: async () => true,
   createDraft: async () => { writes.push('create'); return 'real'; },
   attachOriginal: async () => { writes.push('attach'); },
@@ -23,11 +25,12 @@ const liveXero = {
 const makeDraftCommand = async (_c, a) => {
   if (a.id === 'fil_rcpt') throw new DocumentNeedsHumanReview('supporting_document', 'Receipt: supporting document only');
   if (a.id === 'fil_old') return cmd('OLD-1');
+  if (a.id === 'fil_d') return cmd('DRAFTED-1');
   return cmd('HT1-34156', ['reference']);
 };
 
 test('dry run reports outcomes, tags and archive decisions without any write', async () => {
-  const r = await dryRunApInbox({ conversations: convs, conversationsScanned: 3, makeDraftCommand, liveXero });
+  const r = await dryRunApInbox({ conversations: convs, conversationsScanned: 4, makeDraftCommand, liveXero });
   assert.deepEqual(writes, []);
   assert.equal(r.writes_performed, 0);
   const a = r.items.find(i => i.conversationId === 'cnv_a');
@@ -38,7 +41,9 @@ test('dry run reports outcomes, tags and archive decisions without any write', a
   const b = r.items.find(i => i.conversationId === 'cnv_b');
   assert.equal(b.documents[0].outcome, 'already_in_xero'); assert.equal(b.wouldArchive, true);
   const c = r.items.find(i => i.conversationId === 'cnv_c');
-  assert.equal(c.documents[0].outcome, 'not_drafted'); assert.match(c.documents[0].reason, /not yet supported/);
+  const d = r.items.find(i => i.conversationId === 'cnv_d');
+  assert.equal(d.frontTag, 'Human review'); assert.equal(d.wouldArchive, false); // existing DRAFT awaits review
+  assert.equal(c.documents.length, 0); assert.equal(c.frontTag, 'AP Agent reviewed'); // image ignored: no-attachment email
 });
 test('limit by named conversations and max count; unknown conversation is refused', () => {
   assert.deepEqual(selectConversations(convs, { conversationIds: ['cnv_b'] }).map(c => c.id), ['cnv_b']);

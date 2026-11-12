@@ -15,7 +15,7 @@ test('missing fields stay uncertain and no amounts are invented',()=>{
 test('credit note identified',()=>{assert.equal(extractInvoiceCandidates('Credit Note\nCredit Note No: CN-22').documentType.value,'credit_note')});
 test('integration exposes advisory candidates in existing extraction response',()=>{
  const source=readFileSync(new URL('../src/index.ts',import.meta.url),'utf8');
- assert.match(source,/extracted_candidates: extractInvoiceCandidates\(invoiceText\)/);
+ assert.match(source,/extractionResponse\(\{text:invoiceText/);
 });
 
 test('damaged receipt reference separator is reconstructed but stays uncertain, with payment evidence retained',()=>{

@@ -1,14 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {verifyInvoiceDocumentText,DocumentNeedsHumanReview,requireVerifiedCriticalFields} from '../dist/ap-document-verification.js';
+import {verifyInvoiceDocumentText,DocumentNeedsHumanReview} from '../dist/ap-document-verification.js';
 import {extractInvoiceCandidates} from '../dist/invoice-candidates.js';
 import {runApInbox} from '../dist/ap-inbox-runner.js';
 
 test('non-invoice letter is rejected without invoice evidence',()=>{
   assert.throws(()=>verifyInvoiceDocumentText('Dear team, this letter confirms the account address.'),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='not_invoice');
 });
-test('invoice keyword alone is not enough',()=>{
-  assert.throws(()=>verifyInvoiceDocumentText('Please find invoice attached.'),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+test('invoice keyword alone passes the text check; a missing gross amount is the blocker later',()=>{
+  assert.doesNotThrow(()=>verifyInvoiceDocumentText('Please find invoice attached.'));
 });
 test('invoice body with reference and total can proceed to further checks',()=>{
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Invoice Number: INV-123\nTotal Due: £120.00'));
@@ -36,33 +36,22 @@ test('Healthtech payment receipt referencing an invoice cannot pass the evidence
 test('ordinary Healthtech invoice with payable total still passes evidence gate',()=>{
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Invoice\nHealthtech 1\nInvoice Number: HT1-35587\nTotal Due: £771.12'));
 });
-test('Water Plus carried-forward credit permits draft with explicitly labelled period charges',()=>{
-  const body='Summary of Charges: invoice wp-INV13861043\nInvoice Number: wp-INV13861043\nTotal Due: £48.67\nCredit brought forward £59.27\nAccount balance -£10.60';
-  assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+test('a credit or brought-forward balance never blocks: it is a review note',()=>{
+  const body='Summary of Charges: invoice wp-INV13861043\nCurrent charges £48.67\nCredit brought forward £59.27\nAccount balance -£10.60';
+  assert.doesNotThrow(()=>verifyInvoiceDocumentText(body));
 });
-test('conflicting receipt and invoice headings require human review',()=>{
-  assert.throws(()=>verifyInvoiceDocumentText('Receipt\nInvoice Number: HT1-35587\nInvoice\nTotal Due: £771.12'),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+test('receipt plus invoice headings: not treated as a receipt; extraction decides the type',()=>{
+  assert.doesNotThrow(()=>verifyInvoiceDocumentText('Receipt\nInvoice Number: HT1-35587\nInvoice\nTotal Due: £771.12'));
 });
 test('Bison tax invoice with ordinary total remains eligible for subsequent checks',()=>{
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Tax Invoice\nInvoice Number: INV/38652\nTotal Due: £420.00'));
 });
 
-test('missing PDF supplier does not by itself block Xero contact matching',()=>{
-  const candidates={supplier:null,reference:{uncertain:false},grossAmount:{uncertain:false},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['supplier']};
-  assert.doesNotThrow(()=>requireVerifiedCriticalFields(candidates));
-});
-test('uncertain gross amount blocks Xero access rather than creating a draft',()=>{
-  const candidates={supplier:{uncertain:false},reference:{uncertain:false},grossAmount:{uncertain:true},documentType:{uncertain:false},currency:{uncertain:false},uncertainFields:['grossAmount']};
-  assert.throws(()=>requireVerifiedCriticalFields(candidates),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear'&&/grossAmount/.test(e.message));
-});
-test('verified critical PDF fields pass the Xero preflight guard',()=>{
-  const certain={uncertain:false};
-  assert.doesNotThrow(()=>requireVerifiedCriticalFields({supplier:certain,reference:certain,grossAmount:certain,documentType:certain,currency:certain,uncertainFields:[]}));
-});
 
-test('credit balance without explicit period charges remains blocked',()=>{
+
+test('credit balance without explicit period charges is no longer a text-level block',()=>{
  const body='Invoice\\nInvoice Number: INV-1\\nTotal amount -£10.60\\nCredit brought forward £59.27';
- assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+ assert.doesNotThrow(()=>verifyInvoiceDocumentText(body));
 });
 
 test('a receipt is a supporting document, never an invoice', () => {
