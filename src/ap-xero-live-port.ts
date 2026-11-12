@@ -42,7 +42,7 @@ export function makeLiveXeroDraftPort(
         CurrencyCode: 'GBP',
         LineAmountTypes: 'Exclusive',
         LineItems: [grossExpenseLine({
-          inboxId: INBOX, description: `${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`,
+          inboxId: INBOX, description: [`${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`, ...(command.infoNotes ?? [])].join(' - '),
           gross: command.gross, accountCode: command.accountCode,
         })],
       };
@@ -65,6 +65,18 @@ export function makeLiveXeroDraftPort(
         throw new Error('Xero DRAFT response indeterminate; reconcile before retry');
       }
       return String(id);
+    },
+    async existingSummary(kind, id) {
+      const s = await session();
+      const headers = { Authorization: `Bearer ${s.accessToken}`, 'xero-tenant-id': s.tenantId, Accept: 'application/json' };
+      const doc = await xeroFetch(`${API}${kind}/${encodeURIComponent(id)}`, { headers, signal: AbortSignal.timeout(25000) });
+      if (!doc.ok) throw new Error(`Xero ${kind} read HTTP ${doc.status}`);
+      const d = ((await doc.json()) as Record<string, any>)[kind]?.[0] ?? {};
+      const att = await xeroFetch(`${API}${kind}/${encodeURIComponent(id)}/Attachments`, { headers, signal: AbortSignal.timeout(25000) });
+      if (!att.ok) throw new Error(`Xero attachment listing HTTP ${att.status}`);
+      const list = ((await att.json()) as { Attachments?: Array<{ FileName?: string; MimeType?: string }> }).Attachments ?? [];
+      return { total: typeof d.Total === 'number' ? d.Total : null, date: typeof d.DateString === 'string' ? d.DateString.slice(0, 10) : null,
+        hasPdf: list.some(a => /\.pdf$/i.test(a.FileName ?? '') || /pdf/i.test(a.MimeType ?? '')) };
     },
     async verifyOriginal(kind, id, pdf) {
       const s = await session();

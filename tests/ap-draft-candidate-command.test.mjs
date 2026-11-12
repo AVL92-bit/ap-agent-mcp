@@ -7,7 +7,9 @@ test('maps extracted invoice and preserves uncertainty without veto',()=>{
  const c=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: A123\nInvoice Date: 01/11/2026\nTotal: £48.67');
  const x=buildDraftCommand({candidates:c,supplierContactId:'contact',accountCode:'449',pdf});
  assert.equal(x.number,'A123'); assert.equal(x.invoiceDate,'2026-11-01'); assert.equal(x.gross,48.67);
- assert.ok(x.uncertainFields.includes('dueDate')); assert.equal(x.dueDate,'2026-11-01');
+ // No printed due date: invoice date + 30 days, as an informational note (not a review flag).
+ assert.ok(!x.uncertainFields.includes('dueDate')); assert.equal(x.dueDate,'2026-12-01');
+ assert.deepEqual(x.infoNotes,['Due date not printed; set to invoice date + 30 days']);
 });
 test('fallback values remain marked for review',()=>{
  const c=extractInvoiceCandidates('Invoice');

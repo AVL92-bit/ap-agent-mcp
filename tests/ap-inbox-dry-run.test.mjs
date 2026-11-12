@@ -20,6 +20,7 @@ const liveXero = {
   lookup: async n => n === 'OLD-1' ? [{ kind: 'Invoices', id: 'x-old', number: 'OLD-1', status: 'AUTHORISED', contactId: 'c1', contactName: 'S', exact: true }]
     : n === 'DRAFTED-1' ? [{ kind: 'Invoices', id: 'x-draft', number: 'DRAFTED-1', status: 'DRAFT', contactId: 'c1', contactName: 'S', exact: true }] : [],
   verifyOriginal: async () => true,
+  existingSummary: async () => ({ total: 667.92, date: '2026-10-01', hasPdf: true }),
   createDraft: async () => { writes.push('create'); return 'real'; },
   attachOriginal: async () => { writes.push('attach'); },
 };
@@ -75,4 +76,28 @@ test('PDFs inside an attached email are processed; an attached email without a P
   assert.equal(docs.find(d => d.attachmentId === 'fil_eml~1').outcome, 'would_create_draft');
   assert.match(docs.find(d => d.attachmentId === 'fil_eml2').reason, /Attached email contains no PDF/);
   assert.equal(r.items[0].frontTag, 'Human review');
+});
+
+test('a second copy of the same invoice is accounted for; a different total is a possible amendment', async () => {
+  const sameAndAmended = [{ id: 'cnv_jp', subject: 'JP MED', body: '', attachments: [
+    { id: 'fil_v1', filename: 'INVOICE #506.pdf', messageId: 'm' }, { id: 'fil_v2', filename: 'INVOICE #506 copy.pdf', messageId: 'm' },
+    { id: 'fil_v3', filename: 'INVOICE #506 amended.pdf', messageId: 'm' }] }];
+  const make = async (_c, a) => ({ ...cmd('506'), gross: a.id === 'fil_v3' ? 1900 : 1825 });
+  const r = await dryRunApInbox({ conversations: sameAndAmended, conversationsScanned: 1, makeDraftCommand: make,
+    liveXero: { ...liveXero, existingSummary: async () => ({ total: 0, date: null, hasPdf: true }) } });
+  const docs = r.items[0].documents;
+  assert.equal(docs[0].outcome, 'would_create_draft');
+  assert.equal(docs[1].outcome, 'already_in_xero');
+  assert.equal(docs[2].outcome, 'possible_amendment');
+  assert.match(docs[2].reason, /Possible amended version of invoice 506: Xero £1825.00 dated 2026-10-01, this document £1900.00/);
+  assert.equal(r.items[0].frontTag, 'Human review');
+  assert.ok(r.items[0].sheetRows.some(s => /Possible amended version/.test(s.reason)));
+});
+test('an existing Xero bill with a PDF under another filename is accounted for; nothing is uploaded', async () => {
+  const uploads = [];
+  const r = await dryRunApInbox({ conversations: [{ id: 'cnv_b2', subject: 's', body: '', attachments: [{ id: 'fil_b', filename: 'b.pdf', messageId: 'm' }] }],
+    conversationsScanned: 1, makeDraftCommand: async () => cmd('OLD-1'),
+    liveXero: { ...liveXero, attachOriginal: async () => uploads.push(1), existingSummary: async () => ({ total: 667.92, date: '2026-10-01', hasPdf: true }) } });
+  assert.equal(r.items[0].documents[0].outcome, 'already_in_xero');
+  assert.equal(uploads.length, 0); assert.equal(r.items[0].wouldArchive, true);
 });

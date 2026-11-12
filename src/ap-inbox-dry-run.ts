@@ -8,11 +8,11 @@ import type { DraftCommand, XeroDraftPort } from './ap-xero-document-coordinator
 
 export type DryRunDocument = {
   attachmentId: string; filename: string;
-  outcome: 'would_create_draft' | 'already_in_xero' | 'would_attach_pdf_to_existing' | 'supporting_document' | 'not_drafted' | 'failure';
+  outcome: 'would_create_draft' | 'already_in_xero' | 'would_attach_pdf_to_existing' | 'possible_amendment' | 'supporting_document' | 'not_drafted' | 'failure';
   reason?: string;
   draft?: { number: string; supplierContactId: string; supplierName?: string; extractedSupplierName?: string;
     supplierMatchScore?: number; accountCode: string; invoiceDate: string; dueDate: string; gross: number;
-    kind: string; uncertainFields: string[]; reviewNotes?: string[] };
+    kind: string; uncertainFields: string[]; reviewNotes?: string[]; infoNotes?: string[] };
   xeroId?: string;
 };
 export type DryRunConversation = {
@@ -71,7 +71,8 @@ export async function dryRunApInbox(input: {
           extractedSupplierName: command.extractedSupplierName, supplierMatchScore: command.supplierMatchScore,
           accountCode: command.accountCode, invoiceDate: command.invoiceDate, dueDate: command.dueDate,
           gross: command.gross, kind: command.kind, uncertainFields: command.uncertainFields,
-          ...(command.reviewNotes?.length ? { reviewNotes: command.reviewNotes } : {}) };
+          ...(command.reviewNotes?.length ? { reviewNotes: command.reviewNotes } : {}),
+          ...(command.infoNotes?.length ? { infoNotes: command.infoNotes } : {}) };
         return command;
       } catch (error) {
         const e = error as { kind?: string; message?: string };
@@ -88,6 +89,7 @@ export async function dryRunApInbox(input: {
       // Attachments rejected before extraction (e.g. images) still appear in the report.
       if (!d) item(row.conversationId).documents.push({ attachmentId: row.attachmentId, filename: row.filename ?? '',
         outcome: 'not_drafted', reason: row.reason });
+      else if (/^Possible amended version/.test(row.reason)) { d.outcome = 'possible_amendment'; d.reason = row.reason; d.xeroId = row.xeroId; }
       else if (d.outcome === 'failure' && row.outcome === 'technical_failure') d.reason = row.reason;
     },
     expandEmail: input.expandEmail,
@@ -99,8 +101,20 @@ export async function dryRunApInbox(input: {
       return p;
     }, begin: async () => {}, complete: async () => {} } : undefined,
   };
+  // Drafts "created" earlier in this dry run are visible to later documents, as they would be live.
+  const simulated = new Map<string, { id: string; kind: string; total: number; date: string }>();
   const xero: XeroDraftPort = {
-    lookup: number => input.liveXero.lookup(number),
+    lookup: async number => {
+      const live = await input.liveXero.lookup(number);
+      const sim = simulated.get(number);
+      return sim ? [...live, { kind: sim.kind as 'Invoices', id: sim.id, number, status: 'DRAFT', contactId: null, contactName: null, exact: true }] : live;
+    },
+    existingSummary: async (kind, id) => {
+      const sim = [...simulated.values()].find(x => x.id === id);
+      if (sim) return { total: sim.total, date: sim.date, hasPdf: true };
+      if (!input.liveXero.existingSummary) throw new Error('Existing document summary unavailable');
+      return input.liveXero.existingSummary(kind, id);
+    },
     verifyOriginal: async (kind, id, pdf) => {
       if (id.startsWith('DRY-RUN-') || pretendAttached.has(id)) return true;
       return input.liveXero.verifyOriginal ? input.liveXero.verifyOriginal(kind, id, pdf) : false;
@@ -109,9 +123,11 @@ export async function dryRunApInbox(input: {
       pretendAttached.add(id);
       const d = doc(); if (d && !id.startsWith('DRY-RUN-')) { d.outcome = 'would_attach_pdf_to_existing'; d.xeroId = id; }
     },
-    createDraft: async () => {
+    createDraft: async command => {
       const d = doc(); if (d) d.outcome = 'would_create_draft';
-      return `DRY-RUN-${++fakeIds}`;
+      const id = `DRY-RUN-${++fakeIds}`;
+      simulated.set(command.number, { id, kind: command.kind, total: command.gross, date: command.invoiceDate });
+      return id;
     },
   };
   const report = await runApInbox(port, xero);

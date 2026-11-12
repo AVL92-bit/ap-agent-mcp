@@ -112,6 +112,14 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
           }
           continue;
         }
+        if (outcome.status === 'possible_amendment') {
+          // Not drafted: the invoice number is already in Xero with a different total.
+          dispositions.push({ attachmentId: attachment.id, disposition: 'draft_uncertain_attached' });
+          try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId: outcome.xeroId,
+            reason: outcome.error, outcome: 'draft_uncertain', filename: attachment.filename, reference: command.number, gross: command.gross }); }
+          catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
+          continue;
+        }
         xeroId = outcome.status === 'attachment_failed' ? outcome.xeroId : undefined;
         failure = outcome.error;
       } catch (e) {
