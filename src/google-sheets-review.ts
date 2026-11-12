@@ -171,7 +171,7 @@ export async function appendApInboxException(input: {
   outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
 }):Promise<void> {
   if(SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID || SHEET_NAME!=='Finance review') throw new Error('Finance review Sheet target mismatch');
-  if(!/^cnv_[\w-]+$/.test(input.conversationId)||!/^fil_[\w-]+$/.test(input.attachmentId)) throw new Error('Invalid review source IDs');
+  if(!/^cnv_[\w-]+$/.test(input.conversationId)||!/^fil_[\w-]+(?:~\d+)?$/.test(input.attachmentId)) throw new Error('Invalid review source IDs');
   const token=await getAccessToken();
   const range=encodeURIComponent("'Finance review'!A1:J10000");
   const existing=await sheetsRequest(token,`/values/${range}`) as {values?:string[][]};

@@ -20,7 +20,10 @@ export type InboxPort = {
   journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
 };
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
-export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[] };
+export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[]; stoppedEarly?: string };
+
+/** A Xero rate-limit failure stops the whole run: later documents would fail the same way. */
+export const isXeroRateLimit = (message: string | undefined) => /Xero HTTP 429|Xero rate-limit pause/i.test(message ?? '');
 
 /** Documents the agent processes; every other attachment type is ignored. */
 export const DOCUMENT_ATTACHMENT = /\.(?:pdf|docx?|xlsx?|eml)$/i;
@@ -138,12 +141,19 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
         }
         failure = String(e);
       }
+      if (isXeroRateLimit(failure) && !xeroId) {
+        // Nothing was created: leave this document (and conversation) untouched for the next run.
+        item.failures.push(`${attachment.id}: ${failure}`);
+        report.stoppedEarly = `Xero API limit reached at ${conversation.id}; run stopped. Re-run later: completed documents are skipped.`;
+        return report;
+      }
       try { await port.journal?.complete(conversation.id, attachment.id, 'technical_failure', xeroId); } catch (e) { item.failures.push(`Journal failure: ${String(e)}`); }
       dispositions.push({ attachmentId: attachment.id, disposition: 'processing_failure' });
       item.failures.push(`${attachment.id}: ${failure}`);
       try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId, reason: failure || 'Unknown processing failure', outcome: 'technical_failure' }); }
       catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
     }
+    if (report.stoppedEarly) return report;
     const decision = decideDocumentConversation(dispositions);
     if (awaitingReview) { item.tag = 'Human review (unchanged, awaiting finance)'; continue; }
     try {

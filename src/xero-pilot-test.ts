@@ -902,6 +902,9 @@ export type PilotXeroWriteSession = {
   accessToken: string;
 };
 
+const SESSION_REUSE_MS = 10 * 60 * 1000;
+let verifiedSession: { tenantId: string; accessToken: string; verifiedAt: number; tokenExpiresAt: number } | null = null;
+
 async function getPilotXeroSession(
   readOnly: boolean
 ): Promise<PilotXeroWriteSession> {
@@ -919,6 +922,13 @@ async function getPilotXeroSession(
     !process.env.XERO_CLIENT_SECRET
   ) {
     throw new Error("Xero draft-writing access is disabled");
+  }
+
+  // Reuse a recently verified session: the connection/organisation checks cost two Xero API
+  // calls each time and count against the daily limit. Env gates above are still applied per call.
+  const now = Date.now();
+  if (verifiedSession && now < verifiedSession.verifiedAt + SESSION_REUSE_MS && now < verifiedSession.tokenExpiresAt - 5 * 60 * 1000) {
+    return { tenantId: verifiedSession.tenantId, accessToken: verifiedSession.accessToken };
   }
 
   const pool = new Pool({
@@ -1093,11 +1103,18 @@ async function getPilotXeroSession(
       throw new Error("Xero organisation verification failed");
     }
 
+    verifiedSession = {
+      tenantId: expectedTenantId,
+      accessToken: tokens.access_token,
+      verifiedAt: Date.now(),
+      tokenExpiresAt: tokens.obtained_at + (typeof tokens.expires_in === "number" ? tokens.expires_in : 0) * 1000,
+    };
     return {
       tenantId: expectedTenantId,
       accessToken: tokens.access_token,
     };
   } catch (error) {
+    verifiedSession = null;
     await client.query("ROLLBACK").catch(() => {});
     throw error;
   } finally {
