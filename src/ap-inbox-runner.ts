@@ -3,24 +3,28 @@ import { DocumentNeedsHumanReview } from './ap-document-verification.js';
 import { classifyNoAttachment, FRONT_OUTCOME_POLICY } from './ap-outcome-policy.js';
 import { decideDocumentConversation, type DocumentDisposition } from './ap-conversation-completion.js';
 import { reconcileCreateAndAttach, type DraftCommand, type XeroDraftPort } from './ap-xero-document-coordinator.js';
+import { frontTagKey } from './front-tag-match.js';
 
 /** Application-owned orchestration boundary. All conversation IDs and attachments
  * come from the inbox port, never from an LLM-supplied selection. */
 export type InboxAttachment = { id: string; filename: string; messageId: string };
-export type InboxConversation = { id: string; subject: string; body: string; attachments: InboxAttachment[] };
+export type InboxConversation = { id: string; subject: string; body: string; attachments: InboxAttachment[]; tags?: string[] };
 export type InboxPort = {
   listAllOpenConversations(): Promise<InboxConversation[]>; // MUST throw on truncated pagination
   makeDraftCommand(conversation: InboxConversation, attachment: InboxAttachment): Promise<DraftCommand>;
   applyTag(conversationId: string, tag: string): Promise<void>;
   archive(conversationId: string): Promise<void>;
   reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
-  journal?: { begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
+  /** Open an attached email (.eml) and return the PDFs inside it as attachments. */
+  expandEmail?(conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]>;
+  journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
 };
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
 export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[] };
 
 /** Documents the agent processes; every other attachment type is ignored. */
-export const DOCUMENT_ATTACHMENT = /\.(?:pdf|docx?|xlsx?)$/i;
+export const DOCUMENT_ATTACHMENT = /\.(?:pdf|docx?|xlsx?|eml)$/i;
+const HUMAN_REVIEW = frontTagKey('Human review');
 
 /** Never archive when a required operation fails; a Sheet outage is reported but
  * does not undo a successful draft or prevent its Front outcome. */
@@ -36,7 +40,22 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
     // Only PDF, Word and Excel attachments are documents. Images, signatures, calendar
     // files etc. are ignored; a conversation with none of these is a no-attachment email.
     conversation = { ...conversation, attachments: conversation.attachments.filter(a => DOCUMENT_ATTACHMENT.test(a.filename)) };
+    // Attached emails are opened and the PDFs inside processed like normal attachments.
+    // An attached email with no PDF inside stays as an attachment and goes to Human Review.
+    if (port.expandEmail) {
+      const expanded: InboxAttachment[] = [];
+      for (const a of conversation.attachments) {
+        if (!/\.eml$/i.test(a.filename)) { expanded.push(a); continue; }
+        try { const inner = await port.expandEmail(conversation, a); expanded.push(...(inner.length ? inner : [a])); }
+        catch (e) { expanded.push(a); item.failures.push(`Attached email ${a.id}: ${String(e)}`); }
+      }
+      conversation = { ...conversation, attachments: expanded };
+    }
+    // A conversation already tagged Human Review is waiting for finance: the agent never
+    // re-tags or archives it. New attachments in it are still processed.
+    const awaitingReview = (conversation.tags ?? []).some(t => frontTagKey(t) === HUMAN_REVIEW);
     if (!conversation.attachments.length) {
+      if (awaitingReview) { item.tag = 'Human review (unchanged, awaiting finance)'; continue; }
       const outcome = classifyNoAttachment(`${conversation.subject}\n${conversation.body}`);
       const policy = FRONT_OUTCOME_POLICY[outcome];
       try {
@@ -60,6 +79,14 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
       let xeroId: string | undefined;
       let uncertain = false;
       try {
+        // Attachments already drafted or found in Xero on an earlier run are not re-read.
+        const previous = await port.journal?.previous?.(conversation.id, attachment.id);
+        if (previous && ['draft_verified','draft_uncertain','existing_verified'].includes(previous.status)) {
+          dispositions.push({ attachmentId: attachment.id, disposition: previous.status === 'draft_uncertain' ? 'draft_uncertain_attached'
+            : previous.status === 'existing_verified' ? 'xero_existing_verified' : 'xero_draft_attached' });
+          continue;
+        }
+        if (/\.eml$/i.test(attachment.filename)) throw new DocumentNeedsHumanReview('unclear','Attached email contains no PDF invoice; finance to review');
         if (!/\.pdf$/i.test(attachment.filename)) throw new DocumentNeedsHumanReview('unclear','Word/Excel document: not yet drafted automatically; finance to review');
         const command = await port.makeDraftCommand(conversation, attachment);
         uncertain = command.uncertainFields.length > 0 || (command.reviewNotes?.length ?? 0) > 0;
@@ -70,9 +97,9 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
         const outcome = await reconcileCreateAndAttach(command, guardedXero);
         if (outcome.status === 'already_in_xero') {
           await port.journal?.complete(conversation.id, attachment.id, 'existing_verified', outcome.xeroId);
-          // An existing DRAFT is still awaiting finance review: keep the conversation open.
-          dispositions.push({ attachmentId: attachment.id,
-            disposition: String(outcome.xeroStatus ?? '').toUpperCase() === 'DRAFT' ? 'draft_uncertain_attached' : 'xero_existing_verified' });
+          // Already in Xero (drafted earlier or entered by a person): accounted for. Whether
+          // the conversation stays open is decided by the Human Review tag, not Xero status.
+          dispositions.push({ attachmentId: attachment.id, disposition: 'xero_existing_verified' });
           continue;
         }
         if (outcome.status === 'draft_created') {
@@ -110,6 +137,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
       catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
     }
     const decision = decideDocumentConversation(dispositions);
+    if (awaitingReview) { item.tag = 'Human review (unchanged, awaiting finance)'; continue; }
     try {
       await port.applyTag(conversation.id, decision.tag);
       item.tag = decision.tag;

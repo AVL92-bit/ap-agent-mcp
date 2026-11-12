@@ -1,7 +1,7 @@
 import { collectFrontMessagePages } from './front-message-pages.js';
 import type { InboxConversation, InboxAttachment } from './ap-inbox-runner.js';
 
-type FrontConversation = {id?:string;subject?:string;status?:string;assignee?:unknown};
+type FrontConversation = {id?:string;subject?:string;status?:string;assignee?:unknown;tags?:Array<{name?:string}>};
 type FrontMessage = {id?:string;subject?:string;body?:string;text?:string;blurb?:string;attachments?:Array<{filename?:string;url?:string;id?:string}>};
 type Page<T> = {_results?:T[];_pagination?:{next?:string|null}};
 const ROOT = 'https://api2.frontapp.com';
@@ -66,7 +66,8 @@ export async function scanApFrontInbox(input:{inboxId:string;fetchPage:(url:stri
         attachments.push({id:id??'',filename:a.filename??'',messageId:m.id??''});
       }
     }
-    result.push({id:c.id!,subject:c.subject??'',body:messages.messages.map(m=>[m.subject,m.body,m.text,m.blurb].filter(Boolean).join('\n')).join('\n'),attachments});
+    result.push({id:c.id!,subject:c.subject??'',body:messages.messages.map(m=>[m.subject,m.body,m.text,m.blurb].filter(Boolean).join('\n')).join('\n'),attachments,
+      tags:(c.tags??[]).map(t=>t.name??'').filter(Boolean)});
   }
   return result;
 }

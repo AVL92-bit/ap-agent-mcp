@@ -4,7 +4,7 @@ import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
 import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-journal.js';
 import { executeCompleteApInbox } from "./ap-inbox-execution.js";
 import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
-import { makeLiveDraftCommand } from "./ap-live-document-ports.js";
+import { makeLiveDraftCommand, expandFrontEmail } from "./ap-live-document-ports.js";
 import { appendApInboxException } from "./google-sheets-review.js";
 import { scanApFrontInbox } from "./ap-front-inbox-scan.js";
 import { extractInvoiceCandidates } from "./invoice-candidates.js";
@@ -56,6 +56,7 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
   return {extracted_candidates:merged.candidates,extraction_source:merged.source,extraction_model:merged.model??null,
     extraction_notes:merged.notes,text_rule_candidates:merged.text_candidates};
 }
+import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -824,64 +825,87 @@ pages_scanned: visitedPages.size,
   // never triggered by the read-only scanner or by correspondence triage.
   server.registerTool("run_ap_inbox", {
     title: "Run complete AP inbox (draft only)",
-    description: "Scan all unassigned AP conversations and create/reconcile Xero DRAFT documents. dry_run=true runs the identical process with every write replaced by a report (no Xero draft, PDF upload, journal, Sheet, Front tag or archive) and does not need execute. A live run requires execute=true and server-side write enablement. conversation_ids / max_conversations limit either run after a complete scan.",
+    description: "Scan all unassigned AP conversations and create/reconcile Xero DRAFT documents. Runs in the background: dry_run=true or execute=true returns a job_id at once; call again with job_id to get progress and the result. dry_run runs the identical process with every write replaced by a report (no Xero draft, PDF upload, journal, Sheet, Front tag or archive). A live run requires execute=true and server-side write enablement. conversation_ids / max_conversations limit either run after a complete scan.",
     inputSchema: {execute:z.boolean().default(false),dry_run:z.boolean().default(false),
       conversation_ids:z.array(z.string().regex(/^cnv_[A-Za-z0-9_-]+$/)).max(100).optional(),
-      max_conversations:z.number().int().min(1).max(1000).optional()},
-  }, async ({execute,dry_run,conversation_ids,max_conversations}) => {
+      max_conversations:z.number().int().min(1).max(1000).optional(),
+      job_id:z.string().regex(/^job_[0-9a-f-]{36}$/).optional()},
+  }, async ({execute,dry_run,conversation_ids,max_conversations,job_id}) => {
+    if (job_id) {
+      const job=getRunJob(job_id);
+      return job ? toolResult(job) : toolFailure('Unknown job_id (jobs are kept in memory until the server restarts)');
+    }
     const limit={conversationIds:conversation_ids,maxConversations:max_conversations};
+    const fetchFrontPage=async (url:string)=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as any;};
     if (dry_run) {
-      try {
+      const job=startRunJob('dry_run',async progress=>{
         const {inboxId}=frontConfig();
-        const scanned=await scanApFrontInbox({inboxId,fetchPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as any;}});
+        progress('Scanning Front inbox');
+        const scanned=await scanApFrontInbox({inboxId,fetchPage:fetchFrontPage});
         const chosen=selectConversations(scanned,limit);
-        const report=await dryRunApInbox({conversations:chosen,conversationsScanned:scanned.length,
-          makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment),
-          liveXero:makeLiveXeroDraftPort()});
-        return toolResult({status:'dry_run_completed',...report});
-      } catch(error){return safeError('AP inbox dry run failed; no writes performed',error);}
+        progress(`Processing ${chosen.length} conversation(s)`);
+        // Read-only access to the run journal so already-handled attachments are skipped as in a live run.
+        const pool=process.env.DATABASE_URL?new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000}):null;
+        try {
+          return await dryRunApInbox({conversations:chosen,conversationsScanned:scanned.length,
+            makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment),
+            liveXero:makeLiveXeroDraftPort(),expandEmail:expandFrontEmail,
+            previous:pool?async (c,a)=>{const r=await pool.query(`SELECT status,xero_id FROM ap_document_journal WHERE conversation_id=$1 AND attachment_id=$2`,[c,a]).catch(()=>({rowCount:0,rows:[]} as any));return r.rowCount?{status:String(r.rows[0].status),xeroId:r.rows[0].xero_id??null}:null;}:undefined,
+            onProgress:progress});
+        } finally { await pool?.end(); }
+      });
+      return toolResult({status:'dry_run_started',job_id:job.id,writes_performed:0,
+        next:'Call run_ap_inbox with this job_id to get progress and the report.'});
     }
     if (!execute) return toolResult({status:"dry_run_only",message:"Set dry_run=true to see what a run would do, or execute=true to run the server-controlled AP inbox. No writes performed."});
     if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
     if (!process.env.DATABASE_URL) return toolFailure('DATABASE_URL required for exclusive inbox execution; no writes performed');
-    const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
-    let runClient: PoolClient | undefined;
+    let job;
     try {
-      const activeRunClient = await runPool.connect();
-      runClient = activeRunClient;
-      const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
-      if (lock.rows[0]?.acquired !== true) return toolFailure('Another AP inbox run holds the PostgreSQL execution lock');
-      await ensureApDocumentJournal(runClient);
-      await ensureApContactIntent(runClient);
-      await ensureApSheetOutbox(runClient);
-      const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
-      const sheetBefore=await sheetOutbox.flush();
-      const {inboxId}=frontConfig();
-      const result=await executeCompleteApInbox({
-        inboxId,
-        fetchFrontPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as {_results?: unknown[]; _pagination?: {next?: string | null}};},
-        makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,activeRunClient),
-        xero:makeLiveXeroDraftPort(),
-        applyTag:async (id,tag)=>{
-          if(tag==='AP Agent reviewed')await applyApFrontTag(id,'reviewed');
-          else if(tag==='Human review')await applyApFrontTag(id,'human_review');
-          else if(tag==='No attachment - Human review')await applyApFrontTag(id,'no_attachment');
-          else throw new Error('Unknown AP Front tag');
-        },
-        archive:archiveApFrontConversation,
-        reportReview:row=>sheetOutbox.enqueue(row),
-        journal:makeApDocumentJournal(runClient),
-        select:all=>selectConversations(all,limit),
+      job=startRunJob('execute',async progress=>{
+        const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+        let runClient: PoolClient | undefined;
+        try {
+          const activeRunClient = await runPool.connect();
+          runClient = activeRunClient;
+          const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
+          if (lock.rows[0]?.acquired !== true) throw new Error('Another AP inbox run holds the PostgreSQL execution lock');
+          await ensureApDocumentJournal(runClient);
+          await ensureApContactIntent(runClient);
+          await ensureApSheetOutbox(runClient);
+          const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
+          const sheetBefore=await sheetOutbox.flush();
+          const {inboxId}=frontConfig();
+          progress('Running inbox');
+          const result=await executeCompleteApInbox({
+            inboxId,
+            fetchFrontPage,
+            makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,activeRunClient),
+            xero:makeLiveXeroDraftPort(),
+            applyTag:async (id,tag)=>{
+              if(tag==='AP Agent reviewed')await applyApFrontTag(id,'reviewed');
+              else if(tag==='Human review')await applyApFrontTag(id,'human_review');
+              else if(tag==='No attachment - Human review')await applyApFrontTag(id,'no_attachment');
+              else throw new Error('Unknown AP Front tag');
+            },
+            archive:archiveApFrontConversation,
+            reportReview:row=>sheetOutbox.enqueue(row),
+            journal:makeApDocumentJournal(runClient),
+            expandEmail:expandFrontEmail,
+            select:all=>selectConversations(all,limit),
+          });
+          const sheetAfter=await sheetOutbox.flush();
+          return {status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}};
+        } finally {
+          if (runClient) {
+            try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
+          }
+          await runPool.end();
+        }
       });
-      const sheetAfter=await sheetOutbox.flush();
-      return toolResult({status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}});
-    } catch(error){return safeError('AP inbox run failed; inspect for partial writes before retry',error);}
-    finally {
-      if (runClient) {
-        try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
-      }
-      await runPool.end();
-    }
+    } catch(error){return safeError('AP inbox run could not start; no writes performed',error);}
+    return toolResult({status:'execute_started',job_id:job.id,
+      next:'Call run_ap_inbox with this job_id to get progress and the result. Inspect for partial writes if the job fails.'});
   });
 
   server.registerTool("run_ap_correspondence_triage", {

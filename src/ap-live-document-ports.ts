@@ -6,6 +6,7 @@ import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { extractInvoiceCandidates } from './invoice-candidates.js';
 import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.js';
 import { extractInvoiceFields } from './model-extraction.js';
+import { extractPdfsFromEml } from './eml-attachments.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -15,6 +16,29 @@ const INBOX = 'inb_bys7q';
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_PAGES = 100;
 const API = 'https://api.xero.com/api.xro/2.0';
+
+/** PDFs found inside attached emails during this run, keyed by virtual attachment id. */
+const embeddedPdfs = new Map<string, OriginalPdf>();
+
+/** Open an attached email (.eml) from Front and return the PDFs inside it as attachments
+ * (id "<fil_id>~<n>"). Returns [] when the email contains no PDF. */
+export async function expandFrontEmail(_conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]> {
+  if (!/^fil_[\w-]+$/.test(attachment.id) || !/^[\w-]+$/.test(attachment.messageId)) throw new Error('Invalid Front source attachment identity');
+  const token = process.env.FRONT_API_TOKEN;
+  if (!token) throw new Error('Front token missing');
+  const response = await xeroFetch(`https://api2.frontapp.com/messages/${encodeURIComponent(attachment.messageId)}/download/${encodeURIComponent(attachment.id)}`, {
+    headers: {Authorization:`Bearer ${token}`}, signal:AbortSignal.timeout(25000),
+  });
+  if (!response.ok) throw new Error(`Front attached-email download HTTP ${response.status}`);
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.length > MAX_BYTES) throw new Error('Attached email exceeds size limit');
+  const pdfs = extractPdfsFromEml(Buffer.from(bytes).toString('latin1'));
+  return pdfs.map((p, i) => {
+    const id = `${attachment.id}~${i + 1}`;
+    embeddedPdfs.set(id, {filename: /\.pdf$/i.test(p.filename) ? p.filename : `${p.filename}.pdf`, bytes: p.bytes, contentType: 'application/pdf'});
+    return {id, filename: embeddedPdfs.get(id)!.filename, messageId: attachment.messageId};
+  });
+}
 
 /** All document selection is derived from scanned Front message/attachment IDs. */
 export async function downloadFrontOriginalPdf(attachment: InboxAttachment, token: string): Promise<OriginalPdf> {
@@ -50,12 +74,28 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
     if (text.length < 10) throw new DocumentNeedsHumanReview('unclear','PDF has no readable text and model extraction is unavailable');
     verifyInvoiceDocumentText(text, {textOnly:true});
   }
+  // Cross-check the reference against the attachment filename: a filename number that the
+  // reference contains but does not equal (e.g. "RI 65930654" vs Invoice_65930654.pdf) is a note.
+  const ref = merged.candidates.reference;
+  if (ref) {
+    const k = (s:string) => s.toLowerCase().replace(/[^a-z0-9]/g,'');
+    const fileNums = pdf.filename.match(/\d{5,}/g) ?? [];
+    if (fileNums.some(n => k(ref.value).includes(n)) && !k(pdf.filename).includes(k(ref.value))) {
+      ref.uncertain = true;
+      if (!merged.candidates.uncertainFields.includes('reference')) merged.candidates.uncertainFields.push('reference');
+      merged.notes.push(`Invoice number "${ref.value}" differs from the number in the filename ${pdf.filename} - verify`);
+    }
+  }
   const type = merged.candidates.documentType.value;
   if (type==='receipt') throw new DocumentNeedsHumanReview('supporting_document','Receipt: supporting document only; never posted to Xero');
   if (type!=='invoice' && type!=='credit_note') throw new DocumentNeedsHumanReview('not_invoice',`Not an invoice or credit note (${type})`);
   if (!merged.candidates.grossAmount) throw new DocumentNeedsHumanReview('unclear','No gross amount found on the document; cannot draft');
   return merged;
 }
+
+const CACHE_MS = 10 * 60 * 1000;
+let xeroCache: {at:number; contacts:Array<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>;
+  accounts:Array<{Code?:string;Name?:string;Type?:string;Status?:string}>; bills:unknown[]|null} | null = null;
 
 /** Live read-only Xero candidate listing. Never creates supplier contacts. */
 export async function makeLiveDraftCommand(conversation: InboxConversation, attachment: InboxAttachment, _client?: PoolClient): Promise<DraftCommand> {
@@ -64,7 +104,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   }
   const frontToken = process.env.FRONT_API_TOKEN;
   if (!frontToken) throw new Error('Front token missing');
-  const pdf = await downloadFrontOriginalPdf(attachment, frontToken);
+  const pdf = embeddedPdfs.get(attachment.id) ?? await downloadFrontOriginalPdf(attachment, frontToken);
   const extraction = await extractPdfCandidates(pdf);
   const candidates = extraction.candidates;
   const session = await getPilotXeroWriteSession();
@@ -83,8 +123,20 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     }
     throw new Error(`Xero ${resource} pagination incomplete`);
   }
-  const rawContacts=await readPaged<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>('Contacts','Contacts');
-  const rawAccounts=await readPaged<{Code?:string;Name?:string;Type?:string;Status?:string}>('Accounts','Accounts');
+  // Xero reference data is read once and reused for the run (10-minute cache).
+  // Accounts is not paginated in Xero: one request returns the whole chart.
+  if (!xeroCache || Date.now() - xeroCache.at > CACHE_MS) {
+    const accountsResponse=await xeroFetch(`${API}/Accounts`,{headers,signal:AbortSignal.timeout(25000)});
+    if(!accountsResponse.ok) throw new Error(`Xero Accounts read HTTP ${accountsResponse.status}`);
+    const accountsBody=await accountsResponse.json() as {Accounts?:Array<{Code?:string;Name?:string;Type?:string;Status?:string}>};
+    if(!Array.isArray(accountsBody.Accounts)) throw new Error('Malformed Xero Accounts response');
+    xeroCache={at:Date.now(),
+      contacts:await readPaged<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>('Contacts','Contacts'),
+      accounts:accountsBody.Accounts,bills:null};
+  }
+  const cache=xeroCache;
+  const rawContacts=cache.contacts;
+  const rawAccounts=cache.accounts;
   const contacts:ContactCandidate[]=rawContacts.filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!,
     ...(c.PurchasesDefaultAccountCode?{defaultPurchaseCode:c.PurchasesDefaultAccountCode}:{})}));
   const accounts:AccountCandidate[]=rawAccounts.map(a=>({code:a.Code||'',name:a.Name||'',type:a.Type||'',status:a.Status||''}));
@@ -92,7 +144,8 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   async function recentAccountCodeForContact(contactId:string):Promise<string|undefined> {
     type HistoricalBill = {Type?:string;Status?:string;DateString?:string;Date?:string;InvoiceID?:string;
       Contact?:{ContactID?:string};LineItems?:Array<{AccountCode?:string}>};
-    const bills=await readPaged<HistoricalBill>('Invoices','Invoices');
+    if (!cache.bills) cache.bills=await readPaged<HistoricalBill>('Invoices','Invoices');
+    const bills=cache.bills as HistoricalBill[];
     // Only approved or paid bills are coding precedent; drafts (including the agent's own) are not.
     const eligible=bills.filter(b=>b.Type==='ACCPAY' && b.Contact?.ContactID===contactId &&
       ['AUTHORISED','PAID'].includes((b.Status??'').toUpperCase()) &&
