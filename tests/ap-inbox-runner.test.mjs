@@ -50,3 +50,11 @@ test('an invoice email that mentions Direct Debit in its body is not a Direct De
  const r=await runApInbox(f.port,f.xero);
  assert.equal(r.items[0].tag,'No attachment - Human review');
 });
+test('Xero rate limit stops the run: no Sheet row, tag or archive for that conversation, later ones untouched',async()=>{
+ const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]},{id:'b',subject:'',body:'',attachments:[{id:'i2',filename:'b.pdf',messageId:'m'}]}]);
+ f.xero.lookup=async()=>{throw Error('Xero HTTP 429 rate limit (day); Retry-After: 8181 seconds')};
+ const r=await runApInbox(f.port,f.xero);
+ assert.match(r.stoppedEarly,/Xero API limit reached at a/);
+ assert.deepEqual(f.calls,[]);
+ assert.equal(r.items.length,1);
+});

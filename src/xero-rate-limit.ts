@@ -16,6 +16,10 @@ export async function xeroFetch(input: string | URL | Request, init?: RequestIni
   await previous;
   try {
     const now = Date.now();
+    // A long block means the daily limit: fail fast instead of sleeping for hours.
+    if (blockedUntil - now > 2 * 60_000) {
+      throw new Error(`Xero rate-limit pause: Xero API blocked until ${new Date(blockedUntil).toISOString()}; stop Xero calls and resume after cooldown`);
+    }
     const delay = Math.max(0, nextSlot - now, blockedUntil - now);
     if (delay) await sleep(delay);
     nextSlot = Date.now() + MIN_INTERVAL_MS;
