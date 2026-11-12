@@ -59,7 +59,6 @@ export async function buildDraftFromAvailableCandidates(input: {
   accounts: AccountCandidate[];
   pdf: OriginalPdf;
   preferredAccountCode?: string;
-  fallbackAccountCode?: string;
   fallbackDate?: string;
   fallbackReference?: string;
   fallbackGross?: number;
@@ -71,11 +70,13 @@ export async function buildDraftFromAvailableCandidates(input: {
   if (!matched) throw new DocumentNeedsHumanReview('unclear','No existing Xero supplier contact exceeded 40% similarity; no Xero contact created');
   const supplier = matched;
   const historicalCode = input.recentAccountCodeForContact ? await input.recentAccountCodeForContact(supplier.value.id) : undefined;
-  const account = chooseAccount(input.accounts, historicalCode, input.fallbackAccountCode);
+  const account = chooseAccount(input.accounts, historicalCode, supplier.value.defaultPurchaseCode);
+  // No generic fallback: without the supplier's own coding the invoice is not drafted.
+  if (!account) throw new DocumentNeedsHumanReview('unclear',`No approved bill history and no default purchase account for ${supplier.value.name} in Xero; invoice not drafted`);
   // All drafts receive normal finance review; account-code selection alone does not
   // trigger an additional uncertainty exception. Historical codes must still be active and expense-eligible.
   return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,extractedSupplierName:input.candidates.supplier?.value,supplierMatchScore:supplier.score,
     accountCode:account.value.code,pdf:input.pdf,fallbackDate:input.fallbackDate,
     fallbackReference:input.fallbackReference,fallbackGross:input.fallbackGross,
-    extraUncertainty:[...supplier.uncertainFields]});
+    extraUncertainty:[...supplier.uncertainFields,...account.uncertainFields]});
 }

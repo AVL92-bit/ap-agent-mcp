@@ -31,7 +31,7 @@ test('review-only document does not invoke Xero or journal and remains open',asy
 
 test('Healthtech payment receipt referencing an invoice cannot pass the evidence gate',()=>{
   const body='Receipt\nHealthtech 1\nReceipt Number: 2874-6222\nPaid by Bacs Direct Debit\nInvoice Number: HT1-35587\nTotal Due: £771.12';
-  assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='not_invoice');
+  assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='supporting_document');
 });
 test('ordinary Healthtech invoice with payable total still passes evidence gate',()=>{
   assert.doesNotThrow(()=>verifyInvoiceDocumentText('Invoice\nHealthtech 1\nInvoice Number: HT1-35587\nTotal Due: £771.12'));
@@ -63,4 +63,9 @@ test('verified critical PDF fields pass the Xero preflight guard',()=>{
 test('credit balance without explicit period charges remains blocked',()=>{
  const body='Invoice\\nInvoice Number: INV-1\\nTotal amount -£10.60\\nCredit brought forward £59.27';
  assert.throws(()=>verifyInvoiceDocumentText(body),e=>e instanceof DocumentNeedsHumanReview&&e.kind==='unclear');
+});
+
+test('a receipt is a supporting document, never an invoice', () => {
+  assert.throws(() => verifyInvoiceDocumentText('Page 1 of 1\nReceipt\nInvoice number HT1-34156\nReceipt number 2439-6527\nAmount paid £667.92'),
+    e => e instanceof DocumentNeedsHumanReview && e.kind === 'supporting_document');
 });

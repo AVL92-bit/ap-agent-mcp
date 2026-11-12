@@ -1,5 +1,6 @@
 /** Fail-closed document-body evidence gate before any Xero/PG write. */
-export type DocumentReviewKind = 'not_invoice' | 'unclear';
+/** supporting_document: payment evidence such as a receipt. Never drafted, never a failure. */
+export type DocumentReviewKind = 'not_invoice' | 'unclear' | 'supporting_document';
 export class DocumentNeedsHumanReview extends Error {
   constructor(public readonly kind: DocumentReviewKind, reason: string) {
     super(reason); this.name = 'DocumentNeedsHumanReview';
@@ -16,7 +17,7 @@ export function verifyInvoiceDocumentText(text: string): void {
     || /^(?:payment\s+)?receipt\b/i.test(firstLines[0]??'');
   const invoiceHeading = firstLines.some(line=>/^(?:(?:tax\s+)?invoice|credit\s+note)\s*[:#-]?\s*$/i.test(line));
   if (receiptHeading && !invoiceHeading) {
-    throw new DocumentNeedsHumanReview('not_invoice','Document is headed Receipt; an invoice reference on payment evidence does not make it an invoice');
+    throw new DocumentNeedsHumanReview('supporting_document','Receipt: supporting document only; never posted to Xero');
   }
   if (/^(?:payment\s+)?receipt\b/i.test(firstLines[0]??'') && invoiceHeading) {
     throw new DocumentNeedsHumanReview('unclear','Conflicting receipt and invoice headings; human review required');

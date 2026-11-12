@@ -34,34 +34,41 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   const documentType=field(receipt?'receipt':isCredit?'credit_note':'invoice',
     receipt?'Receipt heading found':isCredit?'Credit note wording found':'Invoice wording assessed',
     receipt || (!isCredit && !/\binvoice\b/i.test(text)));
-  const reference=receipt
-    ? matchField(lines,/\breceipt\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
-    : matchField(lines,/\b(?:invoice|credit\s*note)\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
-      ?? matchField(lines,/\b(?:summary\s+of\s+charges\s*:\s*)?invoice\s+([A-Z][A-Z0-9/_-]{3,60})\b/i);
-  // Embedded PDF text may contain a control character in place of a reference separator.
-  // Do not invent the missing character or present a partial identifier as certain.
-  if (reference) {
-    const evidenceLine = rawLines.find(line => clean(line) === reference.evidence);
-    const token = evidenceLine?.match(/\b(?:receipt|invoice|credit\s*note)\s*(?:(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*)?([A-Z0-9][A-Z0-9/_-]{1,60})/i);
-    if (token && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test((evidenceLine??'').slice(token.index!+token[0].length).slice(0,1))) reference.uncertain = true;
-  }
+  // Embedded PDF text may contain a control character in place of a reference separator
+  // (e.g. "HT1\u000034156"). Between two alphanumerics it is read as "-", but the
+  // reference stays UNCERTAIN so finance confirms it; nothing is presented as certain.
+  const CONTROL=/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/;
+  const repairSeparators=(s:string)=>s.replace(/([A-Za-z0-9])[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+(?=[A-Za-z0-9])/g,'$1-');
+  const refLines=lines.map(repairSeparators);
+  const damaged=(f:CandidateField|null)=>{
+    if(!f) return f;
+    const original=lines.find(line=>repairSeparators(line)===f.evidence);
+    if(original && CONTROL.test(original)) {
+      f.uncertain=true;
+      f.evidence=`${f.evidence} (separator reconstructed from damaged PDF character)`;
+    }
+    return f;
+  };
+  const reference=damaged(receipt
+    ? matchField(refLines,/\breceipt\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
+    : matchField(refLines,/\b(?:invoice|credit\s*note)\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
+      ?? matchField(refLines,/\b(?:summary\s+of\s+charges\s*:\s*)?invoice\s+([A-Z][A-Z0-9/_-]{3,60})\b/i));
   const linkedInvoiceReference=receipt
-    ? matchField(lines,/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
+    ? damaged(matchField(refLines,/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i))
     : null;
-  if (linkedInvoiceReference) {
-    const raw = text.split(/\r?\n/).find(line => clean(line) === linkedInvoiceReference.evidence);
-    const token=raw?.match(/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})/i);
-    if (token && /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test((raw??'').slice(token.index!+token[0].length).slice(0,1))) linkedInvoiceReference.uncertain=true;
-  }
-  let invoiceDate=matchField(lines,/\b(?:invoice\s*date|date\s*of\s*invoice|credit\s*note\s*date|issue\s*date)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b/i);
+  const MONTH='(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+  const DATE=`(\\d{1,2}[\\/-]\\d{1,2}[\\/-]\\d{2,4}|\\d{4}-\\d{2}-\\d{2}|\\d{1,2}(?:st|nd|rd|th)?\\s+${MONTH}\\.?,?\\s+\\d{4}|${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?,?\\s+\\d{4})`;
+  const ISSUE_LABEL='(?:invoice\\s*date|date\\s*of\\s*invoice|date\\s*of\\s*issue|date\\s*issued|credit\\s*note\\s*date|issue\\s*date|tax\\s*point(?:\\s*date)?)';
+  let invoiceDate=matchField(lines,new RegExp(`\\b${ISSUE_LABEL}\\s*[:#-]?\\s*${DATE}(?![\\w])`,'i'));
   if (!invoiceDate) {
-    const dateValue=/^(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})$/i;
-    for(let i=0;i<lines.length-1;i++) if(/^(?:issue\s*date|invoice\s*date|date\s*of\s*invoice)\s*[:#-]?$/i.test(lines[i]) && dateValue.test(lines[i+1])) {
+    const dateValue=new RegExp(`^${DATE}$`,'i');
+    for(let i=0;i<lines.length-1;i++) if(new RegExp(`^${ISSUE_LABEL}\\s*[:#-]?$`,'i').test(lines[i]) && dateValue.test(lines[i+1])) {
       invoiceDate=field(lines[i+1],lines[i]+' | '+lines[i+1],true);break;
     }
   }
   if (invoiceDate && /[A-Za-z]/.test(invoiceDate.value)) invoiceDate.uncertain=true;
-  const dueDate=matchField(lines,/\b(?:due\s*date|payment\s*due)\s*[:#-]?\s*(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/i);
+  const dueDate=matchField(lines,new RegExp(`\\b(?:due\\s*date|date\\s*due|payment\\s*due(?:\\s*date)?|due\\s*by)\\s*[:#-]?\\s*${DATE}(?![\\w])`,'i'));
+  if (dueDate && /[A-Za-z]/.test(dueDate.value)) dueDate.uncertain=true;
   // Prefer explicitly payable/gross totals. Never infer gross from a VAT, subtotal,
   // unit price or arbitrary line-item amount. Accept whole-pound and UK comma amounts.
   const money = '([£$€]?\\s*[+-]?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)';

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { printedSupplierName, sameSupplierIgnoringLegalSuffix } from './supplier-evidence.js';
+import { liveExtractionIssues } from './live-review-issues.js';
 import { xeroFetch } from "./xero-rate-limit.js";
 import { PDFParse } from 'pdf-parse';
 /** Supervised AP draft creation. Uncertainty is recorded for review, not an approval gate.
@@ -235,54 +236,82 @@ async function bestCandidateContact(api: Api, supplier: string): Promise<{id:str
   if (!(ranked[0]?.score > 0.40)) return null;
   return {id:String(ranked[0].contact.ContactID),name:String(ranked[0].contact.Name),score:ranked[0].score};
 }
-async function supplierContact(api: Api, supplier: string, incomingPdfText: string): Promise<{id:string; created:boolean; issue?:string}> {
-  // Historical PDF matching improves the candidate but must not veto a draft.
-  let match: ContactMatch | null = null;
-  try { match = await findSupplierContact(api, supplier, incomingPdfText); } catch { /* use ranked contact fallback */ }
-  if (match) return {id:match.id,created:false,...(match.alias?{issue:`Supplier candidate ${match.name}; verify identity`}:{})};
-  const best = await bestCandidateContact(api, supplier);
-  if (best) return {id:best.id,created:false,
-    issue:`Supplier uncertain: existing Xero contact ${best.name} selected at similarity ${best.score.toFixed(2)}; finance must verify`};
-  throw new Error('No existing Xero contact exceeds 40% supplier-name similarity; no contact created');
-}
 
 /** Approved/paid Xero purchase bills are the supplier's authorised coding precedent.
  * Read-only, bounded and contact-ID scoped. Ambiguous history is reported, not guessed.
  */
-export async function inspectApprovedSupplierCoding(supplierName:string, description:string, incomingPdfText?:string):Promise<Record<string,unknown>> {
-  const api=await getPilotXeroReadSessionForLink();
-  const contact=await findSupplierContact(api,supplierName,incomingPdfText);
-  if(!contact) return {status:'contact_unresolved',account_code:null,issues:['Existing supplier not verified']};
-  const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contact.id}")`);
-  const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);
-  if(!Array.isArray(response.Invoices)) throw new Error('Supplier bill history unavailable');
-  const recent=response.Invoices.filter((b:any)=>b.Type==='ACCPAY' && String(b.Contact?.ContactID??'').toLowerCase()===contact.id.toLowerCase() && ['AUTHORISED','PAID'].includes(b.Status));
-  if(!recent.length) return {status:'no_approved_history',account_code:null,issues:['No approved or paid supplier bill available for coding']};
-  const latest=recent[0];
-  // Fetch detail: Xero list responses may omit LineItems.
-  const detail=await xero(api,`Invoices/${encodeURIComponent(latest.InvoiceID)}`);
-  const bill=detail.Invoices?.[0];
-  if(!bill || bill.InvoiceID!==latest.InvoiceID) throw new Error('Most recent supplier bill detail unavailable');
-  const codes=[...new Set((bill.LineItems??[]).map((l:any)=>String(l.AccountCode??'').trim()).filter(Boolean))];
-  const accounts=await xero(api,'Accounts');
-  const active=new Set((accounts.Accounts??[]).filter((a:any)=>a.Status==='ACTIVE').map((a:any)=>String(a.Code)));
-  const code=codes.length===1 && active.has(codes[0])?codes[0]:null;
-  return {status:code?'latest_bill_account_selected':'latest_bill_coding_ambiguous',account_code:code,
-    contact_id:contact.id,source_bill_id:latest.InvoiceID,selection_method:'most_recent_approved_or_paid_bill',
-    issues:code?[]:['Most recent supplier bill has no single active account code; coding review required'],
-    matching_description:description.slice(0,200),tax_type:vatPolicyForInbox(INBOX).purchaseTaxType};
-}
-
-/** Fail closed: only the latest approved/paid supplier bill may supply a draft account. */
-async function accountCode(api: Api, preferred: unknown): Promise<{code:string; fallback:boolean}> {
+type SupplierCoding = {status:'latest_bill_account_selected'|'earlier_bill_account_selected'|'contact_default_account'|'no_supplier_coding';
+  account_code:string|null; contact_id:string; source_bill_id?:string; selection_method:string; issues:string[]; tax_type:string};
+const EXCLUDED_ACCOUNT_TYPES=['BANK','REVENUE','EQUITY','LIABILITY','CURRENTLIAB','FIXED','CURRENT'];
+async function activeExpenseCodes(api:Api):Promise<Set<string>> {
   const data=await xero(api,'Accounts');
   if (!Array.isArray(data.Accounts)) throw new Error('Xero accounts validation unavailable');
-  const active=data.Accounts.filter((a:any)=>a.Status==='ACTIVE' && a.Code &&
-    !['BANK','REVENUE','EQUITY','LIABILITY','CURRENTLIAB','FIXED','CURRENT'].includes(String(a.Type).toUpperCase()));
-  const chosen=active.find((a:any)=>String(a.Code)===String(preferred??'')) ??
-    active.find((a:any)=>String(a.Code)===String(process.env.AP_FALLBACK_ACCOUNT_CODE??''));
-  if (!chosen) throw new Error('No valid account code: configure AP_FALLBACK_ACCOUNT_CODE to an active expense account');
-  return {code:String(chosen.Code),fallback:String(chosen.Code)!==String(preferred??'')};
+  return new Set(data.Accounts.filter((a:any)=>a.Status==='ACTIVE' && a.Code &&
+    !EXCLUDED_ACCOUNT_TYPES.includes(String(a.Type).toUpperCase())).map((a:any)=>String(a.Code)));
+}
+/** Coding follows the selected supplier contact, never a generic fallback:
+ *  1. latest approved/paid bill for that contact with one active expense code
+ *     (an earlier approved bill if the latest has mixed codes; flagged)
+ *  2. else that contact's own default purchase account in Xero (flagged)
+ *  3. else no coding: the invoice is not drafted and goes to Human Review. */
+async function codingForContact(api:Api, contactId:string):Promise<SupplierCoding> {
+  const taxType=vatPolicyForInbox(INBOX).purchaseTaxType;
+  const active=await activeExpenseCodes(api);
+  const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
+  const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);
+  if(!Array.isArray(response.Invoices)) throw new Error('Supplier bill history unavailable');
+  const approved=response.Invoices.filter((b:any)=>b.Type==='ACCPAY' && b.InvoiceID &&
+    String(b.Contact?.ContactID??'').toLowerCase()===contactId.toLowerCase() && ['AUTHORISED','PAID'].includes(b.Status)).slice(0,5);
+  for (let i=0;i<approved.length;i++) {
+    // Fetch detail: Xero list responses may omit LineItems.
+    const detail=await xero(api,`Invoices/${encodeURIComponent(approved[i].InvoiceID)}`);
+    const bill=detail.Invoices?.[0];
+    if(!bill || bill.InvoiceID!==approved[i].InvoiceID) continue;
+    const codes=[...new Set((bill.LineItems??[]).map((l:any)=>String(l.AccountCode??'').trim()).filter(Boolean))] as string[];
+    if (codes.length===1 && active.has(codes[0])) return {
+      status:i===0?'latest_bill_account_selected':'earlier_bill_account_selected',account_code:codes[0],contact_id:contactId,
+      source_bill_id:bill.InvoiceID,selection_method:i===0?'most_recent_approved_or_paid_bill':'earlier_approved_or_paid_bill',
+      issues:i===0?[]:[`Latest approved supplier bill has mixed account codes; account ${codes[0]} taken from an earlier approved bill - finance to verify`],
+      tax_type:taxType};
+  }
+  const contact=(await xero(api,`Contacts/${encodeURIComponent(contactId)}`)).Contacts?.[0];
+  const contactDefault=String(contact?.PurchasesDefaultAccountCode??'').trim();
+  if (contactDefault && active.has(contactDefault)) return {status:'contact_default_account',account_code:contactDefault,
+    contact_id:contactId,selection_method:'xero_contact_default_purchase_account',
+    issues:[`No usable approved bill history for this supplier; Xero contact default purchase account ${contactDefault} used - finance to verify`],tax_type:taxType};
+  return {status:'no_supplier_coding',account_code:null,contact_id:contactId,selection_method:'none',
+    issues:['No approved bill history and no default purchase account for this supplier in Xero; invoice not drafted'],tax_type:taxType};
+}
+/** The supplier contact a draft would use: historically verified, else the best existing
+ * contact above 40% similarity (flagged). Never creates a contact. Read-only. */
+async function resolveDraftSupplier(api:Api, supplier:string, pdfText:string):Promise<{
+  id:string;name:string;verified:boolean;issue?:string;similarity?:number;confidence?:string;verificationError?:string}|null> {
+  let verified:ContactMatch|null=null; let verificationError='';
+  try { verified=await findSupplierContact(api,supplier,pdfText); }
+  catch(error){ verificationError=error instanceof Error?error.message:String(error); }
+  if (verified) return {id:verified.id,name:verified.name,verified:true,confidence:verified.confidence,
+    ...(verified.alias?{issue:`Supplier candidate ${verified.name}; verify identity`}:{})};
+  const best=await bestCandidateContact(api,supplier);
+  if (!best) return null;
+  return {id:best.id,name:best.name,verified:false,similarity:best.score,verificationError,
+    issue:`Supplier uncertain: existing Xero contact ${best.name} selected at similarity ${best.score.toFixed(2)}; finance must verify`};
+}
+/** Read-only coding for a supplier name (intake tools): resolve the contact, then code
+ * from that contact's own history. */
+export async function inspectApprovedSupplierCoding(supplierName:string, description:string, incomingPdfText?:string):Promise<Record<string,unknown>> {
+  const api=await getPilotXeroReadSessionForLink();
+  const contact=incomingPdfText
+    ? await resolveDraftSupplier(api,supplierName,incomingPdfText)
+    : await bestCandidateContact(api,supplierName).then(b=>b?{id:b.id,name:b.name,verified:false,similarity:b.score}:null);
+  if(!contact) return {status:'contact_unresolved',account_code:null,issues:['No existing Xero contact exceeds 40% supplier-name similarity']};
+  const coding=await codingForContact(api,contact.id);
+  return {...coding,contact_name:contact.name,contact_verified:contact.verified,matching_description:description.slice(0,200)};
+}
+/** Validation only: the supplier's own code must be an active expense account. No fallback. */
+async function accountCode(api: Api, code: unknown): Promise<{code:string}> {
+  const active=await activeExpenseCodes(api);
+  if (!code || !active.has(String(code))) throw new Error(`Supplier account code ${String(code??'(none)')} is not an active expense account in Xero`);
+  return {code:String(code)};
 }
 
 export async function inspectIntakeIdentity(pool:Pool, input:{conversationId:string;messageId:string;attachmentId:string;supplierName:string;invoiceNumber:string;documentType:'invoice'|'credit_note'}):Promise<Record<string,unknown>> {
@@ -338,10 +367,11 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     xero_draft_id, xero_draft_status FROM pilot_invoice_reviews WHERE id=$1`,[reviewId]);
   if (data.rowCount !== 1) throw new Error('Review not found');
   const r = data.rows[0]; const a = r.assessment_json ?? {};
+  // Stored assessment notes and proposed account are history only: issues are rebuilt
+  // below from the original PDF and the selected supplier's own Xero coding.
   const base = previewFields({document_type:r.document_type,supplier_name:r.supplier_name || a.xero_supplier,
     invoice_number:r.invoice_number,invoice_date:a.invoice_date,gross_gbp:a.gross_gbp,
-    due_date:a.due_date,proposed_account:a.proposed_account,billed_to:a.billed_to,
-    exceptions:Array.isArray(a.exceptions)?a.exceptions:[]},r.xero_draft_id,r.xero_draft_status);
+    due_date:a.due_date,proposed_account:'supplier history',exceptions:[]},r.xero_draft_id,r.xero_draft_status);
   // A review preview must use the SAME PDF evidence and latest-bill coding as
   // createReviewDraft. Stored names/proposed accounts are not verification.
   const original=await originalFrontDocument({conversationId:String(r.front_conversation_id),
@@ -349,20 +379,17 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const pdf=await pdfText(original.bytes);
   const api=await getPilotXeroReadSessionForLink();
   // Supplier verification failure is a review issue, never a preview failure. Mirror
-  // createReviewDraft: verified contact, else best-candidate existing contact (>40%).
+  // createReviewDraft: verified contact, else best-candidate existing contact (>40%);
+  // coding always comes from that contact's own Xero history.
   const printedSupplier=pdfSupplierName(pdf);
   const supplierForMatch=printedSupplier || String(r.supplier_name??'');
-  let verified:ContactMatch|null=null;
-  let supplierVerificationError='';
-  try { verified=await findSupplierContact(api,supplierForMatch,pdf); }
-  catch(error){ supplierVerificationError=error instanceof Error?error.message:String(error); }
-  const fallbackContact=verified?null:await bestCandidateContact(api,supplierForMatch).catch(()=>null);
-  const coding:Record<string,unknown>=verified
-    ? await inspectApprovedSupplierCoding(supplierForMatch,'',pdf)
-        .catch(()=>({status:'history_unavailable',account_code:null,issues:['Historical coding unavailable']}))
-    : {status:'contact_unresolved',account_code:null,issues:[supplierVerificationError||'Incoming and historical PDF supplier names did not match']};
-  const draftAccount=await accountCode(api,coding.account_code || a.proposed_account)
-    .catch((error:unknown)=>({code:null as string|null,fallback:true,error:error instanceof Error?error.message:String(error)}));
+  const draftSupplier=await resolveDraftSupplier(api,supplierForMatch,pdf);
+  const verified=draftSupplier?.verified?draftSupplier:null;
+  const supplierVerificationError=draftSupplier?.verificationError??'';
+  const coding:Record<string,unknown>&{account_code:string|null;issues:string[]}=draftSupplier
+    ? await codingForContact(api,draftSupplier.id)
+    : {status:'contact_unresolved',account_code:null,issues:[]};
+  const liveIssues=liveExtractionIssues(pdf,{invoice_number:r.invoice_number,gross_gbp:a.gross_gbp});
   // Resolve old assessment warnings using current source evidence, not stored guesses.
   // A missing legal-entity label is not itself a conflict when the PDF names the
   // practice as recipient. A different named recipient must still be reviewed.
@@ -385,29 +412,29 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   } catch (error) {
     latestVersionError=error instanceof Error?error.message:String(error);
   }
-  const issues=reconcileInvoiceReviewIssues((base.review_issues as string[]), {supplierVerified:!!verified, vatPolicyVerified:true, dueDateDefaulted:!dateOk(a.due_date)}).filter(issue=>
+  const issues=reconcileInvoiceReviewIssues([...(base.review_issues as string[]),...liveIssues], {supplierVerified:!!verified, vatPolicyVerified:true, dueDateDefaulted:!dateOk(a.due_date)}).filter(issue=>
     !(/nominal code needs review/i.test(issue) && coding.status==='latest_bill_account_selected') &&
     !(/supplier identity/i.test(issue) && !!verified) &&
     !(/billing entity|legal entity name/i.test(issue) && ((practiceRecipient||practiceAddress)&&!conflictingRecipient || historicalRecipientMatch)) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
   const draftBlockers:string[]=[];
-  if (!verified && fallbackContact) issues.push(`Supplier uncertain: existing Xero contact ${fallbackContact.name} selected at similarity ${fallbackContact.score.toFixed(2)}; finance must verify${supplierVerificationError?` (${supplierVerificationError})`:''}`);
-  if (!verified && !fallbackContact) draftBlockers.push('No existing Xero contact exceeds 40% supplier-name similarity; draft creation will not create a contact');
-  if (!draftAccount.code) draftBlockers.push(`No valid account code: ${(draftAccount as any).error ?? 'unavailable'}`);
-  else if (draftAccount.fallback) issues.push('Fallback expense account selected; finance must verify coding');
+  if (draftSupplier?.issue) issues.push(draftSupplier.issue+(supplierVerificationError&&!verified?` (${supplierVerificationError})`:''));
+  if (!draftSupplier) draftBlockers.push('No existing Xero contact exceeds 40% supplier-name similarity; draft creation will not create a contact');
+  if (draftSupplier && !coding.account_code) draftBlockers.push(coding.issues[0] ?? 'No supplier-specific account code');
+  else issues.push(...coding.issues);
   if (!(practiceRecipient||practiceAddress||historicalRecipientMatch) || (conflictingRecipient && !historicalRecipientMatch))
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
-  if (coding.status!=='latest_bill_account_selected') issues.push('Historical coding unverified — draft may proceed using a validated fallback expense account; finance must review');
   // Review statuses are Sheet reporting states, never pre-draft approval gates.
   const explicitHold=false;
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
     printed_supplier_name:printedSupplier,supplier_verification_error:supplierVerificationError||null,
-    draft_contact:verified?{id:verified.id,name:verified.name,basis:'historical_pdf_verified',confidence:verified.confidence}
-      :fallbackContact?{id:fallbackContact.id,name:fallbackContact.name,basis:'best_candidate_similarity',similarity:Number(fallbackContact.score.toFixed(2)),exceeds_40_percent:fallbackContact.score>0.40}:null,
-    draft_account_code:draftAccount.code,draft_account_is_fallback:draftAccount.fallback,
+    recorded_invoice_number:r.invoice_number??null,recorded_invoice_date:a.invoice_date??null,recorded_gross_gbp:a.gross_gbp??null,
+    draft_contact:!draftSupplier?null:draftSupplier.verified?{id:draftSupplier.id,name:draftSupplier.name,basis:'historical_pdf_verified',confidence:draftSupplier.confidence}
+      :{id:draftSupplier.id,name:draftSupplier.name,basis:'best_candidate_similarity',similarity:Number((draftSupplier.similarity??0).toFixed(2)),exceeds_40_percent:(draftSupplier.similarity??0)>0.40},
+    draft_account_code:coding.account_code??null,draft_account_source:coding.status,
     draft_blockers:draftBlockers,draft_would_be_created:draftBlockers.length===0,
     supplier_verification_blocks_draft:false,
     latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:(practiceRecipient||practiceAddress)&&!conflictingRecipient,
@@ -494,7 +521,8 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     throw new Error('Document cannot be represented in Xero: supplier, number, date or gross amount missing');
   if (supplier.length > 150 || number.length > 100) throw new Error('Supplier or document number too long');
   const gross = Math.abs(a.gross_gbp as number);
-  const issues:string[] = reconcileInvoiceReviewIssues(applyPaymentIssuePolicy(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : []), {supplierVerified:false,vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
+  // Stored assessment notes are history only; issues come from current evidence below.
+  const issues:string[] = [];
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
   // Billing-entity assessment happens against the original PDF below, not stale extraction text.
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));
@@ -508,7 +536,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     messageId:r.front_message_id,attachmentId:r.attachment_id});
   const incomingPdfText=await pdfText(original.bytes);
   const printedSupplier=pdfSupplierName(incomingPdfText);
-  if(!printedSupplier) issues.push('Supplier name could not be confirmed from original PDF; used recorded best candidate');
+  issues.push(...liveExtractionIssues(incomingPdfText,{invoice_number:number,gross_gbp:a.gross_gbp}));
   await assertLatestRecordedFrontVersion(pool,r,original.bytes);
   // Resolve assessment warnings only after the current original PDF
   // and latest Front version have been independently verified.
@@ -533,11 +561,22 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     else if (/billing entity|legal entity name/i.test(issue) && recipientVerified) issues.splice(i,1);
   }
   if(!recipientVerified) issues.push('Billed-to practice not unambiguously verified from original invoice PDF');
-  // Read-only coding verification precedes the atomic claim, so an unavailable
-  // or ambiguous latest bill cannot reserve a review unnecessarily.
-  const verifiedCoding=await inspectApprovedSupplierCoding(printedSupplier || supplier,String(a.evidence_notes??''),incomingPdfText)
-    .catch(()=>({status:'history_unavailable',account_code:null,issues:['Historical coding unavailable']}));
-  if (verifiedCoding.status!=='latest_bill_account_selected') issues.push('Historical coding unverified; best available account used');
+  // Supplier and coding are resolved read-only BEFORE the atomic claim, so a supplier
+  // with no match or no supplier-specific coding never leaves a blocking attempt.
+  const draftSupplier=await resolveDraftSupplier(preflightApi,printedSupplier||supplier,incomingPdfText);
+  const supplierCoding=draftSupplier?await codingForContact(preflightApi,draftSupplier.id):null;
+  if (!draftSupplier || !supplierCoding?.account_code) {
+    const reason=!draftSupplier
+      ? 'Not drafted: no existing Xero contact exceeds 40% supplier-name similarity; no contact created'
+      : `Not drafted: ${supplierCoding!.issues[0] ?? 'no supplier-specific account code'}`;
+    await pool.query(`UPDATE pilot_invoice_reviews SET xero_draft_error=$2,updated_at=NOW() WHERE id=$1`,[reviewId,[reason,...issues].join(' | ').slice(0,4000)]);
+    let sheetStatus:'synced'|'sync_failed'='synced';
+    try { await syncPilotReviewExceptions(pool,[reviewId]); } catch { sheetStatus='sync_failed'; }
+    return {status:'not_drafted',review_id:reviewId,reason,review_issues:issues,front_outcome:'human_review',
+      sheet_status:sheetStatus,draft_created:false,approved:false,submitted:false};
+  }
+  if (draftSupplier.issue) issues.push(draftSupplier.issue);
+  issues.push(...supplierCoding.issues);
 
   // Reserve the review BEFORE any Xero write. A failed/indeterminate request must be reconciled,
   // not blindly retried. Unique review record prevents concurrent draft creation.
@@ -565,12 +604,9 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     }
     // Mandatory historical precedent: the most recent approved/paid bill wins.
     // Older conflicting codes and proposed/suspense codes cannot override it.
-    const history=verifiedCoding;
-    const coding=await accountCode(api,history.account_code || a.proposed_account);
-    if (coding.fallback) issues.push('Fallback expense account selected; finance must verify coding');
+    const coding=await accountCode(api,supplierCoding.account_code);
     // Historical coding provenance is audit evidence, not a human-review issue.
-    const contact = await supplierContact(api,printedSupplier || supplier,incomingPdfText);
-    if (contact.issue) issues.push(contact.issue);
+    const contact={id:draftSupplier.id,created:false,issue:draftSupplier.issue};
     // A provisional or best-candidate contact is a finance review exception, not a draft veto.
     if (!contact.created) {
       const cleaned=reconcileInvoiceReviewIssues(issues,{supplierVerified:!contact.issue || !/without PDF-to-PDF confirmation|verify identity/i.test(contact.issue),vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});

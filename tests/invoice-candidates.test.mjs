@@ -18,12 +18,13 @@ test('integration exposes advisory candidates in existing extraction response',(
  assert.match(source,/extracted_candidates: extractInvoiceCandidates\(invoiceText\)/);
 });
 
-test('damaged receipt reference is partial and uncertain, with payment evidence retained',()=>{
+test('damaged receipt reference separator is reconstructed but stays uncertain, with payment evidence retained',()=>{
  const r=extractInvoiceCandidates('Healthtech 1\nReceipt\nReceipt number 2874\u00006222\nInvoice Number HT1\u000035587\nAmount paid £771.12');
  assert.equal(r.documentType.value,'receipt');
- assert.equal(r.reference.value,'2874');
+ assert.equal(r.reference.value,'2874-6222');
  assert.equal(r.reference.uncertain,true);
- assert.equal(r.linkedInvoiceReference.value,'HT1');
+ assert.match(r.reference.evidence,/separator reconstructed/);
+ assert.equal(r.linkedInvoiceReference.value,'HT1-35587');
  assert.equal(r.linkedInvoiceReference.uncertain,true);
  assert.equal(r.amountPaid.value,'£771.12');
  assert.equal(r.supplier.value,'Healthtech 1');
@@ -114,4 +115,33 @@ test('Water Plus real PDF payee split across lines outranks registration footer'
  assert.equal(c.supplier?.uncertain,true);
  assert.match(c.supplier?.evidence,/Cheques should be made payable to Water Plus Limited/);
  assert.equal(c.grossAmount?.value,'£48.67');
+});
+
+// Healthtech 1 HT1-34156 (cnv_1d0657fa) - real extracted text, damaged dashes kept as \u0000.
+const healthtech='Page 1 of 1\nInvoice\nInvoice number HT1\u000034156\nDate of issue October 1, 2026\nDate due \tOctober 1, 2026\nPractice name St Georges Road Surgery\nHealthtech 1\n91 Belmont Hill\nLondon\nSE13 5AX\nUnited Kingdom\nsupport@healthtech1.uk\nBill to\nSt Georges Road Surgery\nfinance_stgeorges@archvale.co.uk\n£667.92 due October 1, 2026\nPay online\nHealthtech-1 Automation\nDescription \tQty \tUnit price \tTax \tAmount\nAutomated lab reports\nSep 1\u0000Sep 30, 2026\n513 \t£0.20 \t20% \t£102.60\nAutomated registrations\nSep 1\u0000Sep 30, 2026\n227 \t£2.00 \t20% \t£454.00\nSubtotal \t£556.60\nTotal excluding tax \t£556.60\nVAT \u000020% on £556.60\u0000 \t£111.32\nTotal \t£667.92\nAmount due \t£667.92\nVAT Number: 406614417\n\n-- 1 of 1 --';
+test('Healthtech: masthead supplier above address, never the practice',()=>{
+ const c=extractInvoiceCandidates(healthtech);
+ assert.equal(c.supplier?.value,'Healthtech 1');
+ assert.equal(c.supplier?.uncertain,true);
+ assert.match(c.supplier?.evidence,/SE13 5AX/);
+});
+test('Healthtech: damaged dash in invoice number reconstructed and flagged',()=>{
+ const c=extractInvoiceCandidates(healthtech);
+ assert.equal(c.reference?.value,'HT1-34156');
+ assert.equal(c.reference?.uncertain,true);
+});
+test('Healthtech: "Date of issue" and "Date due" in Month D, YYYY style',()=>{
+ const c=extractInvoiceCandidates(healthtech);
+ assert.equal(c.invoiceDate?.value,'October 1, 2026');
+ assert.equal(c.dueDate?.value,'October 1, 2026');
+ assert.equal(c.grossAmount?.value,'£667.92');
+});
+test('a town line directly above the customer postcode is never the supplier',()=>{
+ const c=extractInvoiceCandidates('Issue date:\n03 November 2026\nDr Sufian Ali\n102 St Georges Road\nCOVENTRY\nCV1 2DL\nInvoice wp-INV1\nTotal Due: £1.00');
+ assert.equal(c.supplier,null);
+});
+test('date variants: 1 Oct 2026, 3rd November 2026, Tax point date',()=>{
+ assert.equal(extractInvoiceCandidates('Invoice No: A1\nInvoice Date: 1 Oct 2026\nTotal Due: £1.00').invoiceDate?.value,'1 Oct 2026');
+ assert.equal(extractInvoiceCandidates('Invoice No: A1\nTax point date 3rd November 2026\nTotal Due: £1.00').invoiceDate?.value,'3rd November 2026');
+ assert.equal(extractInvoiceCandidates('Invoice No: A1\nInvoice Date: 01/10/2026\nDue by 31/10/2026\nTotal Due: £1.00').dueDate?.value,'31/10/2026');
 });

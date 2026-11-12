@@ -114,13 +114,15 @@ export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[])
   const appended:string[]=[], already_present:string[]=[], skipped:string[]=[];
   for(const r of result.rows) {
     const a=r.assessment_json ?? {};
-    const uncertainties=applyPaymentIssuePolicy((Array.isArray(a.exceptions)?a.exceptions:[]).filter((x:unknown):x is string=>typeof x==='string'&&!/\bvat\b|tax treatment|tax rate/i.test(x)));
+    // Stored assessment notes are history only; the Sheet reports issues found at draft time
+    // (xero_draft_error), filtered by the payment policy.
+    const uncertainties=applyPaymentIssuePolicy(String(r.xero_draft_error??'').split(' | ').filter(Boolean));
     const failure=!r.xero_draft_id && !!r.xero_draft_error;
-    const hasUncertainty=uncertainties.length>0 || (!!r.xero_draft_error && !!r.xero_draft_id);
+    const hasUncertainty=uncertainties.length>0 && !!r.xero_draft_id;
     if(!failure && !(r.xero_draft_id && hasUncertainty)){skipped.push(r.id);continue;}
     const key=`review:${r.id}`;
     if(rows.some(row=>row[7]?.includes(key))){already_present.push(r.id);continue;}
-    const details=[key,...uncertainties, r.xero_draft_error].filter(Boolean).join(' | ');
+    const details=[key,...uncertainties].filter(Boolean).join(' | ');
     const values=[new Date(r.created_at).toISOString(),failure?'Technical failure':'Draft with uncertainty',
       r.xero_draft_id?`https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${r.xero_draft_id}`:'',
       String(r.supplier_name??''),String(r.invoice_number??''),String(a.gross_gbp??''),
