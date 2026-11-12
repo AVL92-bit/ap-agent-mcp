@@ -27,3 +27,8 @@ test('PDF parser receives a copy so the original bytes survive for the model and
  const s=read('ap-live-document-ports.ts');
  assert.match(s,/new PDFParse\(\{data:pdf\.bytes\.slice\(\)\}\)/);
 });
+test('full run confirms an uncertain supplier against previous invoice PDFs, as the supervised route does',()=>{
+ const s=read('ap-live-document-ports.ts');
+ assert.match(s,/command\.uncertainFields\.includes\('supplier'\) && extraction\.text/);
+ assert.match(s,/confirmContactByHistoricalPdf\(command\.supplierContactId, extraction\.text\)/);
+});

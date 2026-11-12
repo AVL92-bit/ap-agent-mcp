@@ -139,6 +139,12 @@ function samePrintedSupplier(incomingText:string,historicalText:string):boolean 
   return !!incoming && !!historical && incoming===historical;
 }
 
+/** Read-only: does the supplier name printed on the incoming PDF match the one printed on a
+ * PDF attached to one of this contact's three most recent Xero bills? Used by the full run to
+ * confirm an uncertain contact match the same way the supervised route does. */
+export async function confirmContactByHistoricalPdf(contactId:string,incomingPdfText:string):Promise<{matched:boolean;bill_id?:string;filename?:string}> {
+  return historicalInvoiceNameMatches(await getPilotXeroReadSessionForLink(),contactId,incomingPdfText);
+}
 async function historicalInvoiceNameMatches(api:Api,contactId:string,incomingPdfText:string):Promise<{matched:boolean;bill_id?:string;filename?:string}> {
   const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
   const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);

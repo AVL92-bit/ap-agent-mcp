@@ -2385,7 +2385,7 @@ server.registerTool(
     {
       title: "List Unlinked Pilot Draft Attempts",
       description:
-        "Read-only. Lists every review with a previous draft attempt but no linked Xero document (these block re-drafting), and searches Xero bills and credit notes for each stored number and its truncated form (e.g. HT1-34156 and HT1). Never clears, links or creates anything.",
+        "Read-only. Lists every unfinished draft attempt from BOTH routes: (1) supervised reviews with an attempt but no linked Xero document, with a Xero search on each stored number and its truncated form (e.g. HT1-34156 and HT1); (2) full-run (run_ap_inbox) attachments whose Xero write was claimed or started but has no Xero document recorded. Both block re-drafting. Never clears, links or creates anything.",
       inputSchema: {},
     },
     async () => {
@@ -2410,7 +2410,15 @@ server.registerTool(
             numbers_searched_in_xero: searched, xero_matches: matches,
             safe_to_clear: matches.length === 0 && ['creating', 'reconcile_required'].includes(r.xero_draft_status) });
         }
-        return toolResult({ status: 'ok', read_only: true, unlinked_attempts: attempts.length, attempts });
+        // Full-run attempt record: a claimed or in-progress Xero write with no Xero document id.
+        const journal = await pool.query(`SELECT conversation_id, attachment_id, status, write_intent, updated_at
+          FROM ap_document_journal WHERE xero_id IS NULL AND (write_intent OR status='processing') ORDER BY updated_at`)
+          .then((r: any) => r.rows as any[]).catch(() => [] as any[]);
+        const full_run_attempts = journal.map((j: any) => ({ conversation_id: j.conversation_id, attachment_id: j.attachment_id,
+          status: j.status, xero_write_claimed: !!j.write_intent, updated_at: j.updated_at,
+          note: j.write_intent ? 'Xero write was claimed: check Xero for this invoice before clearing' : 'Processing started but not finished (no Xero write claimed)' }));
+        return toolResult({ status: 'ok', read_only: true, unlinked_attempts: attempts.length, attempts,
+          full_run_unfinished_attempts: full_run_attempts.length, full_run_attempts });
       } catch (error) {
         return safeError("Draft attempt listing failed", error);
       } finally { await pool.end(); }
