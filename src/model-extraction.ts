@@ -27,27 +27,28 @@ export type ModelFields = {
 };
 export type ModelResult = { ok: true; fields: ModelFields; model: string } | { ok: false; reason: string };
 
+const nullable = (t: object) => ({ anyOf: [t, { type: 'null' }] });
 const FIELD_SCHEMA = {
   type: 'object',
+  additionalProperties: false,
   properties: {
     document_type: { type: 'string', enum: ['invoice', 'credit_note', 'receipt', 'statement', 'remittance', 'other'] },
-    supplier_name: { type: ['string', 'null'] }, supplier_evidence: { type: ['string', 'null'] },
-    invoice_number: { type: ['string', 'null'] }, invoice_number_evidence: { type: ['string', 'null'] },
-    invoice_date: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
-    due_date: { type: ['string', 'null'], description: 'YYYY-MM-DD' },
-    gross_total: { type: ['number', 'null'] }, gross_evidence: { type: ['string', 'null'] },
-    net_total: { type: ['number', 'null'] }, vat_total: { type: ['number', 'null'] },
-    currency: { type: ['string', 'null'], description: 'ISO 4217, e.g. GBP' },
-    account_balance: { type: ['number', 'null'] },
-    billed_to: { type: ['string', 'null'] },
+    supplier_name: nullable({ type: 'string' }), supplier_evidence: nullable({ type: 'string' }),
+    invoice_number: nullable({ type: 'string' }), invoice_number_evidence: nullable({ type: 'string' }),
+    invoice_date: nullable({ type: 'string' }), due_date: nullable({ type: 'string' }),
+    gross_total: nullable({ type: 'number' }), gross_evidence: nullable({ type: 'string' }),
+    net_total: nullable({ type: 'number' }), vat_total: nullable({ type: 'number' }),
+    currency: nullable({ type: 'string' }),
+    account_balance: nullable({ type: 'number' }),
+    billed_to: nullable({ type: 'string' }),
     low_confidence_fields: { type: 'array', items: { type: 'string', enum: ['document_type', 'supplier_name', 'invoice_number', 'invoice_date', 'due_date', 'gross_total', 'currency'] } },
-    notes: { type: ['string', 'null'] },
+    notes: nullable({ type: 'string' }),
   },
   required: ['document_type', 'supplier_name', 'supplier_evidence', 'invoice_number', 'invoice_number_evidence', 'invoice_date', 'due_date',
     'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'currency', 'account_balance', 'billed_to', 'low_confidence_fields', 'notes'],
 } as const;
 
-const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Surgery (a GP practice in Coventry, UK). Read the attached supplier document and record its fields with the record_invoice_fields tool. Rules:
+const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Surgery (a GP practice in Coventry, UK). Read the attached supplier document and return its fields as JSON matching the schema. Dates are ISO YYYY-MM-DD. Rules:
 - document_type: "invoice" or "credit_note" only if the document requests or credits payment for goods/services. A payment confirmation is "receipt"; an account summary listing several invoices is "statement"; a remittance advice is "remittance".
 - supplier_name: the company that ISSUED the document (letterhead, "payable to", registered name). Never the practice, a person at the practice, or the bill-to/customer. Prefer the trading name printed on the document; supplier_evidence quotes the line(s) you used.
 - invoice_number: the document's own number exactly as printed (keep dashes/slashes). Not an account number, order number or customer number. If a character is damaged, give your best reading and list invoice_number as low confidence.
@@ -71,9 +72,9 @@ export async function extractFieldsWithModel(input: { pdf?: Uint8Array; text?: s
     const response = await fetchImpl('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      // Structured outputs: the response is JSON guaranteed to match FIELD_SCHEMA.
       body: JSON.stringify({ model, max_tokens: 2000,
-        tools: [{ name: 'record_invoice_fields', description: 'Record the fields of the supplier document.', input_schema: FIELD_SCHEMA }],
-        tool_choice: { type: 'tool', name: 'record_invoice_fields' },
+        output_config: { format: { type: 'json_schema', schema: FIELD_SCHEMA } },
         messages: [{ role: 'user', content }] }),
       signal: AbortSignal.timeout(90000),
     });
@@ -86,9 +87,11 @@ export async function extractFieldsWithModel(input: { pdf?: Uint8Array; text?: s
       if (/authentication|invalid x-api-key/i.test(detail)) message = `API key rejected${message ? ` - ${message}` : ''}`;
       return { ok: false, reason: `Model extraction failed (HTTP ${response.status}${message ? `, ${message.slice(0, 300)}` : ''}); text rules used` };
     }
-    const body = await response.json() as { content?: Array<{ type: string; name?: string; input?: unknown }> };
-    const call = body.content?.find(c => c.type === 'tool_use' && c.name === 'record_invoice_fields');
-    const fields = call?.input as ModelFields | undefined;
+    const body = await response.json() as { stop_reason?: string; content?: Array<{ type: string; text?: string }> };
+    if (body.stop_reason === 'refusal') return { ok: false, reason: 'Model declined to read the document; text rules used' };
+    const text = body.content?.filter(c => c.type === 'text').map(c => c.text ?? '').join('') ?? '';
+    let fields: ModelFields | undefined;
+    try { fields = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as ModelFields; } catch { fields = undefined; }
     if (!fields || typeof fields.document_type !== 'string') return { ok: false, reason: 'Model extraction returned no fields; text rules used' };
     fields.low_confidence_fields = Array.isArray(fields.low_confidence_fields) ? fields.low_confidence_fields : [];
     return { ok: true, fields, model };
