@@ -2,7 +2,9 @@
 export type ContactCandidate = { id: string; name: string; defaultPurchaseCode?: string };
 export type AccountCandidate = { code: string; name: string; type: string; status: string };
 export type Selection<T> = { value: T; uncertainFields: string[]; explanation: string; score?: number };
-const norm = (s: string): string => s.toLowerCase().replace(/\b(ltd|limited|plc|llp|the)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim();
+// Legal forms and bookkeeping tags such as "(DD)" / "Direct Debit" are not part of a supplier's name.
+const norm = (s: string): string => s.toLowerCase().replace(/\(\s*dd\s*\)|\bdirect\s+debit\b/g, ' ')
+  .replace(/\b(ltd|limited|plc|llp|the)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').replace(/(?:\s+dd)+$/, '').trim();
 export function supplierScore(source: string, candidate: string): number {
   const a = norm(source), b = norm(candidate);
   if (!a || !b) return 0;
@@ -11,7 +13,8 @@ export function supplierScore(source: string, candidate: string): number {
   const intersection = [...x].filter(t => y.has(t)).length;
   return intersection / Math.max(x.size, y.size);
 }
-export function chooseSupplier(source: string, contacts: ContactCandidate[]): Selection<ContactCandidate> | null {
+export function chooseSupplier(source_: string, contacts: ContactCandidate[]): Selection<ContactCandidate> | null {
+  const source = source_;
   const valid = contacts.filter(c => c.id && c.name);
   if (!valid.length) return null;
   const ranked = valid.map(value => ({value, score: supplierScore(source, value.name)}))
@@ -19,7 +22,18 @@ export function chooseSupplier(source: string, contacts: ContactCandidate[]): Se
   const first = ranked[0];
   // Only existing Xero contacts with strictly greater than 40% similarity qualify.
   if (first.score <= 0.40) return null;
-  const ambiguous = first.score < 1 || (ranked[1] && ranked[1].score === first.score);
+  // Every word of the contact's name appears in the document's supplier name (e.g. "Henry Schein"
+  // in "Henry Schein Medical", "Modulr" in "Modulr Finance") and no other contact qualifies that way:
+  // the same supplier, not an uncertain match.
+  const tokens = (s: string) => new Set(norm(s).split(' ').filter(Boolean));
+  const sourceTokens = tokens(source_);
+  const contained = (name: string) => { const t = tokens(name); return t.size > 0 && [...t].every(x => sourceTokens.has(x)); };
+  // Extra words that name a different legal entity (e.g. "Water Plus Group" vs "Water Plus") never count.
+  const ENTITY_WORDS = new Set(['group', 'holdings', 'holding', 'select', 'trust', 'partnership', 'international', 'parent']);
+  const extraWords = [...sourceTokens].filter(x => !tokens(first.value.name).has(x));
+  const uniqueContainment = contained(first.value.name) && valid.filter(c => contained(c.name)).length === 1
+    && !extraWords.some(w => ENTITY_WORDS.has(w));
+  const ambiguous = (first.score < 1 && !uniqueContainment) || (ranked[1] && ranked[1].score === first.score);
   return {value:first.value, score:first.score, uncertainFields: ambiguous ? ['supplier'] : [],
     explanation: ambiguous ? 'Best available supplier contact; finance to verify' : 'Normalised supplier name match'};
 }

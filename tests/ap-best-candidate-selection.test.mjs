@@ -10,7 +10,7 @@ test('no generic fallback: without supplier history or contact default there is 
 test('bank and liability accounts are never selected, even from history',()=>{assert.equal(chooseAccount([{code:'001',name:'Bank',type:'BANK',status:'ACTIVE'}],'001'),null)});
 
 test('strictly greater than 40 percent supplier score qualifies',()=>{
- const match=chooseSupplier('Alpha Beta Gamma',[{id:'a',name:'Alpha Beta'}]);
+ const match=chooseSupplier('Alpha Beta Gamma',[{id:'a',name:'Alpha Delta Gamma'}]);
  assert.equal(match?.value.id,'a');
  assert.deepEqual(match?.uncertainFields,['supplier']);
 });
@@ -27,4 +27,20 @@ test('highest scoring existing contact wins and never creates a contact',()=>{
  const match=chooseSupplier('Water Plus Group Limited',[{id:'approved',name:'Water Plus Limited'},{id:'other',name:'Water Services Ltd'}]);
  assert.equal(match?.value.id,'approved');
  assert.deepEqual(match?.uncertainFields,['supplier']);
+});
+
+test('"(DD)" and "Direct Debit" tags in Xero contact names are ignored',()=>{
+ const m=chooseSupplier('Healthtech 1',[{id:'h',name:'Healthtech-1 (DD)'},{id:'x',name:'Other Ltd'}]);
+ assert.equal(m?.value.id,'h'); assert.equal(m?.score,1); assert.deepEqual(m?.uncertainFields,[]);
+ assert.equal(chooseSupplier('Wavenet Limited',[{id:'w',name:'Wavenet (DD)'}])?.score,1);
+});
+test('a contact name fully contained in the document supplier is the same supplier',()=>{
+ for (const [doc,contact] of [['Henry Schein Medical','Henry Schein'],['Modulr Finance Limited','Modulr (DD)'],['Aventis Pharma trading as Sanofi','Aventis Pharma/ Sanofi (DD)']]) {
+  const m=chooseSupplier(doc,[{id:'c',name:contact},{id:'x',name:'Unrelated Supplies Ltd'}]);
+  assert.deepEqual(m?.uncertainFields,[],doc);
+ }
+});
+test('containment is not certain when another contact also qualifies',()=>{
+ const m=chooseSupplier('Henry Schein Medical',[{id:'a',name:'Henry Schein'},{id:'b',name:'Schein'}]);
+ assert.deepEqual(m?.uncertainFields,['supplier']);
 });

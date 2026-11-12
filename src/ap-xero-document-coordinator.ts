@@ -21,6 +21,8 @@ export type DraftCommand = {
   uncertainFields: string[];
   /** Review notes for the Sheet (e.g. model and text rules disagree). Never blockers. */
   reviewNotes?: string[];
+  /** Informational notes written on the Xero draft line; never a reason for Human Review. */
+  infoNotes?: string[];
 };
 export type XeroDraftPort = {
   lookup(number: string): Promise<XeroPurchaseMatch[]>;
@@ -30,12 +32,15 @@ export type XeroDraftPort = {
   attachOriginal(kind: PurchaseKind, id: string, pdf: OriginalPdf): Promise<void>;
   /** Must verify the source PDF, not merely an arbitrary attachment. */
   verifyOriginal?(kind: PurchaseKind, id: string, pdf: OriginalPdf): Promise<boolean>;
+  /** Read-only summary of an existing Xero document: total, date and whether any PDF is attached. */
+  existingSummary?(kind: PurchaseKind, id: string): Promise<{ total: number | null; date: string | null; hasPdf: boolean }>;
 };
 export type DraftOutcome =
   | { status: 'already_in_xero'; kind: PurchaseKind; xeroId: string; xeroStatus?: string; uncertainFields: string[] }
   | { status: 'draft_created'; kind: PurchaseKind; xeroId: string; uncertainFields: string[] }
   | { status: 'attachment_failed'; kind: PurchaseKind; xeroId: string; uncertainFields: string[]; error: string }
-  | { status: 'reconciliation_required'; kind: PurchaseKind; uncertainFields: string[]; error: string };
+  | { status: 'reconciliation_required'; kind: PurchaseKind; uncertainFields: string[]; error: string }
+  | { status: 'possible_amendment'; kind: PurchaseKind; xeroId: string; uncertainFields: string[]; error: string };
 
 function validate(command: DraftCommand): void {
   if (!command.number.trim() || !command.supplierContactId || !command.accountCode ||
@@ -60,6 +65,22 @@ export async function reconcileCreateAndAttach(command: DraftCommand, port: Xero
   if (initial.length > 1) return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: 'Multiple matching Xero documents' };
   if (initial.length === 1) {
     const id = initial[0].id;
+    // Documents already in Xero are never changed by the agent. Same total = the same invoice
+    // (accounted for, whatever its PDF is called); different total = a possible amended version.
+    if (port.existingSummary) {
+      try {
+        const existing = await port.existingSummary(command.kind, id);
+        if (existing.total !== null && Math.abs(Math.abs(existing.total) - command.gross) > 0.011) {
+          return { status: 'possible_amendment', kind: command.kind, xeroId: id, uncertainFields: command.uncertainFields,
+            error: `Possible amended version of invoice ${command.number}: Xero £${Math.abs(existing.total).toFixed(2)}${existing.date ? ` dated ${existing.date}` : ''}, this document £${command.gross.toFixed(2)} dated ${command.invoiceDate}; compare and update manually` };
+        }
+        if (!existing.hasPdf) return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields,
+          error: `Existing Xero document ${id} has no PDF attached; finance to attach it (the agent does not change documents already in Xero)` };
+        return { status: 'already_in_xero', kind: command.kind, xeroId: id, xeroStatus: initial[0].status, uncertainFields: command.uncertainFields };
+      } catch (error) {
+        return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: `Existing Xero document ${id}: ${String(error)}` };
+      }
+    }
     // An invoice number match alone is NOT proof that the original PDF is accounted for.
     // Without an independent attachment verifier we must keep Front open.
     if (!port.verifyOriginal) return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: `Existing Xero document ${id}: original PDF not verified` };

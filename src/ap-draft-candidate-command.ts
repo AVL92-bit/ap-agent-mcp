@@ -38,8 +38,17 @@ export function buildDraftCommand(input: {
   if (!c.reference && number) uncertain.add('reference');
   const invoiceDate = normaliseInvoiceDate(c.invoiceDate?.value) || normaliseInvoiceDate(input.fallbackDate) || '';
   if (!c.invoiceDate || !normaliseInvoiceDate(c.invoiceDate.value)) uncertain.add('invoiceDate');
-  const dueDate = normaliseInvoiceDate(c.dueDate?.value) || invoiceDate;
-  if (!c.dueDate || !normaliseInvoiceDate(c.dueDate.value)) uncertain.add('dueDate');
+  // Policy: no printed due date -> invoice date + 30 days, written on the draft as a note.
+  // A defaulted due date is informational, never a reason for Human Review.
+  const printedDue = normaliseInvoiceDate(c.dueDate?.value);
+  const infoNotes: string[] = [];
+  let dueDate = printedDue || '';
+  if (!printedDue && invoiceDate) {
+    const d = new Date(`${invoiceDate}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 30);
+    dueDate = d.toISOString().slice(0, 10);
+    infoNotes.push('Due date not printed; set to invoice date + 30 days');
+  }
+  uncertain.delete('dueDate');
   const parsed = c.grossAmount ? Number(c.grossAmount.value.replace(/[^\d.]/g, '')) : NaN;
   const gross = Number.isFinite(parsed) && parsed > 0 ? parsed : input.fallbackGross ?? NaN;
   if (!Number.isFinite(parsed) || parsed <= 0) uncertain.add('grossAmount');
@@ -49,6 +58,7 @@ export function buildDraftCommand(input: {
     number, supplierContactId: input.supplierContactId, supplierName:input.supplierName, extractedSupplierName:input.extractedSupplierName, supplierMatchScore:input.supplierMatchScore, accountCode: input.accountCode,
     invoiceDate, dueDate, gross, pdf: input.pdf, uncertainFields: [...uncertain],
     ...(input.reviewNotes?.length ? { reviewNotes: input.reviewNotes } : {}),
+    ...(infoNotes.length ? { infoNotes } : {}),
   };
 }
 

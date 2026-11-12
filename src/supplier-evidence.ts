@@ -182,7 +182,7 @@ export function printedSupplierName(text: string, options: { exclude?: RegExp } 
 export function legalNameKey(s: string): string {
   return supplierComparisonKey(s)
     .replace(/^the\s+/, '')
-    .replace(/(?:\s+(?:limited|ltd|plc|llp))+$/, '')
+    .replace(/(?:\s+(?:limited|ltd|plc|llp|dd|direct debit))+$/, '')
     .trim();
 }
 export function sameSupplierIgnoringLegalSuffix(a: string, b: string): boolean {

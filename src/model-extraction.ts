@@ -8,7 +8,7 @@
  * AP_EXTRACTION_MODEL (optional, default claude-sonnet-5-5).
  */
 import { extractInvoiceCandidates, type CandidateField, type InvoiceCandidates } from './invoice-candidates.js';
-import { supplierComparisonKey, legalNameKey, PRACTICE_NAME } from './supplier-evidence.js';
+import { legalNameKey, PRACTICE_NAME, assessSupplierEvidence } from './supplier-evidence.js';
 
 export const DEFAULT_EXTRACTION_MODEL = 'claude-sonnet-5-5';
 export type ModelDocumentType = 'invoice' | 'credit_note' | 'receipt' | 'statement' | 'remittance' | 'other';
@@ -131,7 +131,7 @@ export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[];
 
 /** Model value wins; agreement with the text rules makes it confident; disagreement or
  * model low confidence makes it uncertain with a note. Without the model, text rules stand. */
-export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult): MergedExtraction {
+export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult, opts: { textSupplierStrong?: boolean } = {}): MergedExtraction {
   if (!result.ok) return { candidates: text, notes: [result.reason], source: 'text' };
   const f = result.fields;
   const low = new Set(f.low_confidence_fields);
@@ -151,9 +151,12 @@ export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult):
   };
 
   const supplierName = f.supplier_name && !PRACTICE_NAME.test(f.supplier_name) ? f.supplier_name : null;
-  const supplier = pick('Supplier', supplierName, f.supplier_evidence, text.supplier, sameSupplier, 'supplier_name');
-  // A supplier is never confident from the document alone; Xero contact matching decides.
-  if (supplier) supplier.uncertain = supplier.uncertain || !text.supplier;
+  // Text-rule supplier guesses are only weighed against the model when they rest on strong
+  // evidence ("Supplier:" label or a payment instruction). Weak guesses (a heading, a name above
+  // an address) are often the recipient or a label and would only add noise.
+  const supplier = pick('Supplier', supplierName, f.supplier_evidence, opts.textSupplierStrong ? text.supplier : null, sameSupplier, 'supplier_name');
+  if (supplier && !opts.textSupplierStrong) { supplier.uncertain = low.has('supplier_name');
+    const i = notes.findIndex(n => n.startsWith('Supplier: model found none')); if (i >= 0) notes.splice(i, 1); }
   const reference = pick('Invoice number', f.invoice_number, f.invoice_number_evidence, text.reference, (m, t) => refKey(m) === refKey(t), 'invoice_number');
   const invoiceDate = pick('Invoice date', f.invoice_date, f.invoice_date ? `Invoice date ${f.invoice_date}` : null,
     text.invoiceDate, (m, t) => isoDate(t) === m, 'invoice_date');
@@ -181,6 +184,7 @@ export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult):
 /** One extraction for every route: text rules always, model when available, merged. */
 export async function extractInvoiceFields(input: { text: string; pdf?: Uint8Array; filename: string }, fetchImpl?: typeof fetch): Promise<MergedExtraction & { text_candidates: InvoiceCandidates }> {
   const textCandidates = extractInvoiceCandidates(input.text);
+  const tier = assessSupplierEvidence(input.text).selected?.tier;
   const model = await extractFieldsWithModel({ pdf: input.pdf, text: input.pdf ? undefined : input.text, filename: input.filename }, fetchImpl);
-  return { ...mergeModelAndText(textCandidates, model), text_candidates: textCandidates };
+  return { ...mergeModelAndText(textCandidates, model, { textSupplierStrong: tier === 'labelled' || tier === 'payee' }), text_candidates: textCandidates };
 }

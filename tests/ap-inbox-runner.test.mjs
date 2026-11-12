@@ -38,3 +38,10 @@ test('a conversation tagged Human Review is never re-tagged or archived; new att
  const r=await runApInbox(f.port,f.xero);
  assert.equal(r.documents,1);assert.deepEqual(tags,[]);assert.equal(archived,0);assert.match(r.items[0].tag,/unchanged/);
 });
+test('Direct Debit collection notices are archived as AP Agent reviewed; statement-ready emails stay for review',async()=>{
+ const f=fixture([{id:'dd',subject:'Upcoming Direct Debit payment to Lantum',body:'Your payment will be collected on 1 Dec',attachments:[]},
+   {id:'st',subject:'Your statement 8053097617 is ready for review',body:'',attachments:[]}]);
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(r.items.find(i=>i.conversationId==='dd').tag,'AP Agent reviewed');
+ assert.equal(r.items.find(i=>i.conversationId==='st').tag,'No attachment - Human review');
+});
