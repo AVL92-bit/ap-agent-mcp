@@ -23,3 +23,7 @@ test('review writer targets only the agreed Finance review sheet',()=>{
  assert.match(s,/SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID/);
  assert.match(s,/inbox:\$\{input.conversationId\}:\$\{input.attachmentId\}/);
 });
+test('PDF parser receives a copy so the original bytes survive for the model and Xero',()=>{
+ const s=read('ap-live-document-ports.ts');
+ assert.match(s,/new PDFParse\(\{data:pdf\.bytes\.slice\(\)\}\)/);
+});

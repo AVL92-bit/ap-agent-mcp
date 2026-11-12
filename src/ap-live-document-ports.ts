@@ -59,7 +59,9 @@ export async function downloadFrontOriginalPdf(attachment: InboxAttachment, toke
  * text + page images) when available, cross-checked. Only agreed blockers throw:
  * receipt (supporting document), not an invoice/credit note, no gross amount. */
 export async function extractPdfCandidates(pdf: OriginalPdf) {
-  const parser = new PDFParse({data:pdf.bytes});
+  // pdf.js transfers (detaches) the buffer it is given: parse a copy so the original
+  // bytes remain intact for model extraction and the Xero attachment.
+  const parser = new PDFParse({data:pdf.bytes.slice()});
   let text = '';
   try {
     const info = await parser.getInfo();
@@ -89,7 +91,8 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
   const type = merged.candidates.documentType.value;
   if (type==='receipt') throw new DocumentNeedsHumanReview('supporting_document','Receipt: supporting document only; never posted to Xero');
   if (type!=='invoice' && type!=='credit_note') throw new DocumentNeedsHumanReview('not_invoice',`Not an invoice or credit note (${type})`);
-  if (!merged.candidates.grossAmount) throw new DocumentNeedsHumanReview('unclear','No gross amount found on the document; cannot draft');
+  if (!merged.candidates.grossAmount) throw new DocumentNeedsHumanReview('unclear',
+    ['No gross amount found on the document; cannot draft', ...merged.notes].join(' | '));
   return merged;
 }
 
