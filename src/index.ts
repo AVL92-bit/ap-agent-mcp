@@ -4,7 +4,7 @@ import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
 import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-journal.js';
 import { executeCompleteApInbox } from "./ap-inbox-execution.js";
 import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
-import { makeLiveDraftCommand } from "./ap-live-document-ports.js";
+import { makeLiveDraftCommand, previewLiveDraftCandidates } from "./ap-live-document-ports.js";
 import { previewApDraftSelection } from "./ap-draft-dry-run.js";
 import { appendApInboxException } from "./google-sheets-review.js";
 import { scanApFrontInbox } from "./ap-front-inbox-scan.js";
@@ -824,25 +824,45 @@ pages_scanned: visitedPages.size,
 
   // Application-owned complete scan and draft-only execution. Explicit opt-in,
   // never triggered by the read-only scanner or by correspondence triage.
-  server.registerTool("preview_ap_draft_selection_snapshot", {
-    title: "Preview AP draft selection from supplied evidence (strictly read only)",
-    description: "Run the real deterministic supplier and account selection against caller-supplied PDF text and Xero snapshots. No network, database or write calls. Not a live Xero verification.",
+  server.registerTool("preview_ap_draft_selection_live", {
+    title: "Preview real AP draft selection using live Xero (no business writes)",
+    description: "Verify the Front PDF, read current Xero contacts/accounts/invoice history and run the same selection as the inbox runner. Does not create drafts or change invoice-processing state. Xero authentication may refresh its stored token.",
     inputSchema: {
-      invoice_text: z.string().min(10).max(250000),
-      filename: z.string().min(5).max(255).regex(/\\.pdf$/i),
-      attachment_id: z.string().startsWith('fil_').max(100),
-      contacts: z.array(z.object({id:z.string().min(1),name:z.string().min(1)})).max(10000),
-      accounts: z.array(z.object({code:z.string(),name:z.string(),type:z.string(),status:z.string()})).max(1000),
-      historical_account_code: z.string().optional(),
-      fallback_account_code: z.string().optional(),
+      conversation_id:z.string().startsWith('cnv_').max(100),
+      message_id:z.string().startsWith('msg_').max(100),
+      attachment_id:z.string().startsWith('fil_').max(100),
     },
-  }, async ({invoice_text,filename,attachment_id,contacts,accounts,historical_account_code,fallback_account_code}) => {
+  }, async ({conversation_id,message_id,attachment_id}) => {
     try {
-      return toolResult(await previewApDraftSelection({
-        invoiceText:invoice_text,filename,attachmentId:attachment_id,contacts,accounts,
-        historicalAccountCode:historical_account_code,fallbackAccountCode:fallback_account_code,
-      }));
-    } catch(error) { return safeError('Read-only AP draft selection preview failed; no writes performed',error); }
+      const extracted = await extractVerifiedInvoiceAttachment({conversation_id,message_id,attachment_id});
+      if (extracted.isError) return extracted;
+      const payload = JSON.parse(extracted.content[0].text) as {status?:string;reason?:string;invoice_text?:string;original_filename?:string;original_content_type?:string};
+      if (payload.status !== 'ok' || payload.original_content_type !== 'application/pdf' || !payload.invoice_text || !payload.original_filename) {
+        return toolResult({status:'review_required',reason:payload.reason??'Verified embedded PDF text required',creates_draft:false});
+      }
+      const candidates = extractInvoiceCandidates(payload.invoice_text);
+      const command = await previewLiveDraftCandidates(candidates,payload.original_filename,attachment_id);
+      return toolResult({
+        status:'live_draft_selection_preview',read_only_business_operations:true,creates_draft:false,
+        xero_contacts_live_verified:true,xero_history_live_verified:true,
+        duplicate_check_completed:false,front_or_sheet_routing_verified:false,
+        authentication_token_refresh_may_update_postgresql:true,
+        conversation_id,message_id,attachment_id,
+        supplier_extracted:candidates.supplier,
+        supplier_selected:{name:command.supplierName,contact_id:command.supplierContactId,
+          similarity_score:command.supplierMatchScore,strictly_above_50_percent:(command.supplierMatchScore??0)>0.5},
+        invoice_reference:command.number,invoice_date:command.invoiceDate,due_date:command.dueDate,
+        gross_gbp:command.gross,account_code:command.accountCode,
+        uncertainty_fields:command.uncertainFields,
+        review_issues:command.uncertainFields.map(field=>field==='grossAmount'
+          ? 'Amount uncertain: verify current-period charges and carried-forward credit'
+          :field==='supplier'?'Supplier identity uncertain: verify selected existing Xero contact'
+          :field==='dueDate'?'Due date missing: human review required'
+          :field+' requires human review'),
+        requires_human_review:true,
+        note:'No Xero draft, Front change, Sheets row or processing journal write. Token refresh may update authentication storage. Duplicate checks and routing require separate verification.',
+      });
+    } catch(error) {return safeError('Live AP selection preview failed; no business writes performed',error);}
   });
 
   server.registerTool("run_ap_inbox", {
