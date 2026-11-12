@@ -15,11 +15,14 @@ export async function executeCompleteApInbox(input: {
   journal?: InboxPort['journal'];
   maxPages?: number;
   maxConversations?: number;
+  /** Optional limit applied AFTER the complete scan (named conversations / max count). */
+  select?: (all: InboxConversation[]) => InboxConversation[];
 }): Promise<InboxRunReport> {
-  const conversations: InboxConversation[] = await scanApFrontInbox({
+  const scanned: InboxConversation[] = await scanApFrontInbox({
     inboxId: input.inboxId, fetchPage: input.fetchFrontPage,
     maxPages: input.maxPages, maxConversations: input.maxConversations,
   });
+  const conversations = input.select ? input.select(scanned) : scanned;
   const port: InboxPort = {
     listAllOpenConversations: async () => conversations,
     makeDraftCommand: input.makeDraftCommand,

@@ -47,6 +47,7 @@ import { assessPilotHistoricalCoding } from "./historical-coding-assessment.js";
 import { investigatePilotHistoricalCodingException } from "./historical-comparables.js";
 
 import { matchFrontTag } from "./front-tag-match.js";
+import { dryRunApInbox, selectConversations } from "./ap-inbox-dry-run.js";
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -815,10 +816,24 @@ pages_scanned: visitedPages.size,
   // never triggered by the read-only scanner or by correspondence triage.
   server.registerTool("run_ap_inbox", {
     title: "Run complete AP inbox (draft only)",
-    description: "Scan all unassigned AP conversations and create/reconcile Xero DRAFT documents. Requires explicit execute=true and server-side write enablement.",
-    inputSchema: {execute:z.boolean().default(false)},
-  }, async ({execute}) => {
-    if (!execute) return toolResult({status:"dry_run_only",message:"Set execute=true to run the server-controlled AP inbox. No writes performed."});
+    description: "Scan all unassigned AP conversations and create/reconcile Xero DRAFT documents. dry_run=true runs the identical process with every write replaced by a report (no Xero draft, PDF upload, journal, Sheet, Front tag or archive) and does not need execute. A live run requires execute=true and server-side write enablement. conversation_ids / max_conversations limit either run after a complete scan.",
+    inputSchema: {execute:z.boolean().default(false),dry_run:z.boolean().default(false),
+      conversation_ids:z.array(z.string().regex(/^cnv_[A-Za-z0-9_-]+$/)).max(100).optional(),
+      max_conversations:z.number().int().min(1).max(1000).optional()},
+  }, async ({execute,dry_run,conversation_ids,max_conversations}) => {
+    const limit={conversationIds:conversation_ids,maxConversations:max_conversations};
+    if (dry_run) {
+      try {
+        const {inboxId}=frontConfig();
+        const scanned=await scanApFrontInbox({inboxId,fetchPage:async url=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as any;}});
+        const chosen=selectConversations(scanned,limit);
+        const report=await dryRunApInbox({conversations:chosen,conversationsScanned:scanned.length,
+          makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment),
+          liveXero:makeLiveXeroDraftPort()});
+        return toolResult({status:'dry_run_completed',...report});
+      } catch(error){return safeError('AP inbox dry run failed; no writes performed',error);}
+    }
+    if (!execute) return toolResult({status:"dry_run_only",message:"Set dry_run=true to see what a run would do, or execute=true to run the server-controlled AP inbox. No writes performed."});
     if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
     if (!process.env.DATABASE_URL) return toolFailure('DATABASE_URL required for exclusive inbox execution; no writes performed');
     const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
@@ -848,6 +863,7 @@ pages_scanned: visitedPages.size,
         archive:archiveApFrontConversation,
         reportReview:row=>sheetOutbox.enqueue(row),
         journal:makeApDocumentJournal(runClient),
+        select:all=>selectConversations(all,limit),
       });
       const sheetAfter=await sheetOutbox.flush();
       return toolResult({status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}});

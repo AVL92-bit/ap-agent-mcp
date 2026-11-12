@@ -43,7 +43,9 @@ const legalNameGlobal = () =>
 
 const LABEL = /^(?:from|supplier|seller|vendor|issued\s+by)\s*[:\-]\s*/i;
 const ACCOUNT_HOLDER = /^(?:account\s*(?:holder\s*)?name|beneficiary\s*name|payee\s*name)\s*[:\-]\s*/i;
-const RECIPIENT = /^(?:bill\s*to|invoice\s*to|sold\s*to|customer|ship\s*to|deliver\s*to|billed\s*to|recipient|to:)\b/i;
+// A recipient LABEL ("Bill to", "Invoice to:", "Customer:"), not any line that starts
+// with "customer" (e.g. "Customer Services", "Customer Information", customer.services@...).
+const RECIPIENT = /^(?:(?:bill(?:ed)?|invoice|sold|ship|deliver(?:y)?)\s*to|recipient|customer(?:\s+(?:name|address|details))?)\s*(?::|$)|^to:/i;
 const RECIPIENT_BLOCK_LINES = 5;
 // A recipient block ends at the first invoice field (amounts, dates, totals, references).
 const BLOCK_END = /[£$€]|\b(?:invoice|total|date|due|amount|vat|reference|account\s+number|supplier|from)\b/i;
@@ -55,7 +57,9 @@ const UK_POSTCODE = /\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b/;
 const MASTHEAD_NAME = /^[A-Za-z][A-Za-z0-9&'’().,-]*(?:\s+[A-Za-z0-9&'’().,-]+){0,5}$/;
 // Field labels, document words and address-like lines are never a supplier name.
 const NOT_A_NAME = /^(?:page|invoice|receipt|statement|credit\s+note|date|due|total|amount|subtotal|vat|tax|description|qty|bill(?:ed)?\s+to|ship\s+to|practice\s+name|account|customer|reference|order|po\b|tel|phone|email|e-mail|web|www|w:|t:|united\s+kingdom|england|london)\b/i;
-const NOT_ADDRESS = /[£$€]|\b(?:invoice|total|amount|vat|due|date)\b/i;
+const NOT_ADDRESS = /[£$€]|\b(?:invoice|total|amount|vat|due|date|visit|terms|conditions)\b|www\.|https?:|\.co\.uk\b|\.com\b/i;
+// Currency codes and other short all-caps tokens (GBP, VAT, EUR) are never a supplier.
+const CODE_TOKEN = /^[A-Z]{2,4}$/;
 const PERSON = /^(?:dr|mr|mrs|ms|miss|prof)\.?\s/i;
 // Pilot practice: never a supplier, whichever path asks.
 export const PRACTICE_NAME = /\bst\.?\s*george['’]?s?\s*road\s*surgery\b/i;
@@ -88,7 +92,10 @@ export function assessSupplierEvidence(text: string, options: { exclude?: RegExp
     && !recipientKeys.has(supplierComparisonKey(name)) && !PRACTICE_NAME.test(name)
     && !(options.exclude && options.exclude.test(name));
   const add = (tier: SupplierTier, value: string, evidence: string) => {
-    const v = clean(value).replace(/^(?:and|or)\s+/i, '');
+    // "A Division of Henry Schein UK Holdings Ltd" -> "Henry Schein UK Holdings Ltd"
+    const v = clean(value).replace(/^(?:and|or)\s+/i, '')
+      .replace(/^(?:an?\s+|the\s+)?(?:division|trading\s+name|subsidiary|part|member)\s+of\s+/i, '')
+      .replace(/^(?:an?)\s+(?=[A-Z])/, '');
     if (allowed(v)) tiers[tier].push({ value: v, evidence: clean(evidence), tier });
   };
 
@@ -122,7 +129,7 @@ export function assessSupplierEvidence(text: string, options: { exclude?: RegExp
   for (let i = 0; i < Math.min(lines.length, MASTHEAD_LINES); i++) {
     if (RECIPIENT.test(lines[i])) break;
     const name = lines[i];
-    if (!MASTHEAD_NAME.test(name) || NOT_A_NAME.test(name) || PERSON.test(name)) continue;
+    if (!MASTHEAD_NAME.test(name) || NOT_A_NAME.test(name) || PERSON.test(name) || CODE_TOKEN.test(name) || NOT_ADDRESS.test(name)) continue;
     const following = lines.slice(i + 1, i + 1 + ADDRESS_LINES);
     const postcodeAt = following.findIndex(l => UK_POSTCODE.test(l));
     // The name sits above at least one street/town line, so a town line directly above

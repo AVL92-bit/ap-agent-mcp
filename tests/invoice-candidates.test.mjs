@@ -145,3 +145,22 @@ test('date variants: 1 Oct 2026, 3rd November 2026, Tax point date',()=>{
  assert.equal(extractInvoiceCandidates('Invoice No: A1\nTax point date 3rd November 2026\nTotal Due: £1.00').invoiceDate?.value,'3rd November 2026');
  assert.equal(extractInvoiceCandidates('Invoice No: A1\nInvoice Date: 01/10/2026\nDue by 31/10/2026\nTotal Due: £1.00').dueDate?.value,'31/10/2026');
 });
+
+test('a column label after "Invoice" is never the reference',()=>{
+ const c=extractInvoiceCandidates('Invoice\nInvoice Date\nInvoice Period\nTotal Invoice\n1633437\n01/11/2026');
+ assert.equal(c.reference,null);
+ const d=extractInvoiceCandidates('INVOICE TO: SHIP TO: INVOICE DATE:\nInvoice No: 65930654\nTotal Due: £1.00');
+ assert.equal(d.reference?.value,'65930654');
+});
+test('Henry Schein: currency line above a terms/website block is never the supplier',()=>{
+ const c=extractInvoiceCandidates('GBP\nFor full Terms & Conditions visit\nhenryscheinmedical.co.uk\nMedcare House, Centurion Close, Gillingham Business Park, Gillingham, Kent, ME8 0SB\nINVOICE\nINVOICE TO: SHIP TO: INVOICE DATE:\nDr M Dadhania\n102 St. George Road\nCOVENTRY\nCV1 2DL\nA Division of Henry Schein UK Holdings Ltd.\nRegistered No: 11584480');
+ assert.equal(c.supplier?.value,'Henry Schein UK Holdings Ltd');
+});
+test('Wavenet: "Customer Information" and customer.services@ are not bill-to blocks',()=>{
+ const c=extractInvoiceCandidates('Invoice\nCustomer Information\nContact Us:\nWavenet Limited\nOne Central Boulevard\nShirley\nSolihull West Midlands B90 8BG\ncustomer.services@wavenet.co.uk\nCheque Please make cheques payable to Wavenet Ltd and send them to\nWavenet Ltd, One Central Boulevard\nTotal Invoice £172.81');
+ assert.equal(c.supplier?.value,'Wavenet Ltd');
+});
+test('a real "Bill to:" block is still excluded from supplier evidence',()=>{
+ const c=extractInvoiceCandidates('Invoice No: 1\nBill to:\nHarbour Medical Services Ltd\n1 High Street\nTotal Due: £1.00\nKestrel Office Supplies Limited');
+ assert.equal(c.supplier?.value,'Kestrel Office Supplies Limited');
+});
