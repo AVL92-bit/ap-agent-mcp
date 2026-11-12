@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractInvoiceCandidates } from '../src/invoice-candidates.ts';
+import { extractInvoiceCandidates } from '../dist/invoice-candidates.js';
 
 test('recognises explicit gross including comma-separated and whole amounts', () => {
   assert.equal(extractInvoiceCandidates('Invoice\nGrand Total: £1,234.50').grossAmount.value, '£1,234.50');

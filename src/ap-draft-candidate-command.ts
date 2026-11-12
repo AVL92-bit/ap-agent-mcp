@@ -68,7 +68,7 @@ export async function buildDraftFromAvailableCandidates(input: {
   const name = input.candidates.supplier?.value?.trim() || input.pdf.filename.replace(/\.pdf$/i, '').slice(0, 100);
   const matched = chooseSupplier(name, input.contacts);
   // Supplier uncertainty is recorded, not a draft veto. No new contacts are created.
-  if (!matched) throw new DocumentNeedsHumanReview('unclear','No existing Xero supplier contact exceeded 50% similarity; no Xero contact created');
+  if (!matched) throw new DocumentNeedsHumanReview('unclear','No existing Xero supplier contact exceeded 40% similarity; no Xero contact created');
   const supplier = matched;
   const historicalCode = input.recentAccountCodeForContact ? await input.recentAccountCodeForContact(supplier.value.id) : undefined;
   const account = chooseAccount(input.accounts, historicalCode, input.fallbackAccountCode);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-const moduleUrl=new URL('../src/invoice-candidates.ts',import.meta.url);
+const moduleUrl=new URL('../dist/invoice-candidates.js',import.meta.url);
 const {extractInvoiceCandidates}=await import(moduleUrl);
 test('extracts evidence-backed fields without declaring draft readiness',()=>{
  const r=extractInvoiceCandidates('From: Acme Supplies\nInvoice No: AB-123\nInvoice Date: 09/11/2026\nDue Date: 30/11/2026\nTotal Due: £48.67');
