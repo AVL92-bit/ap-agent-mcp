@@ -79,7 +79,12 @@ export async function extractFieldsWithModel(input: { pdf?: Uint8Array; text?: s
     });
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
-      return { ok: false, reason: `Model extraction failed (HTTP ${response.status}${/authentication|invalid x-api-key/i.test(detail) ? ', API key rejected' : ''}); text rules used` };
+      // Anthropic error bodies carry a type and message (never the key); show them so a
+      // credit, model or request problem can be fixed without reading server logs.
+      let message = '';
+      try { const e = JSON.parse(detail)?.error; message = [e?.type, e?.message].filter(Boolean).join(': '); } catch { /* not JSON */ }
+      if (/authentication|invalid x-api-key/i.test(detail)) message = `API key rejected${message ? ` - ${message}` : ''}`;
+      return { ok: false, reason: `Model extraction failed (HTTP ${response.status}${message ? `, ${message.slice(0, 300)}` : ''}); text rules used` };
     }
     const body = await response.json() as { content?: Array<{ type: string; name?: string; input?: unknown }> };
     const call = body.content?.find(c => c.type === 'tool_use' && c.name === 'record_invoice_fields');

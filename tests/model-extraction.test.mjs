@@ -64,3 +64,10 @@ test('text-rule date styles normalise to ISO', () => {
   assert.equal(isoDate('3rd November 2026'), '2026-11-03');
   assert.equal(isoDate('07/10/26'), '2026-10-07');
 });
+
+test('Anthropic error type and message are reported (e.g. low credit balance)', async () => {
+  process.env.ANTHROPIC_API_KEY = 'k';
+  const r = await extractFieldsWithModel({ text: 'x', filename: 'x.pdf' }, async () => ({ ok: false, status: 400,
+    text: async () => JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API.' } }) }));
+  assert.match(r.reason, /HTTP 400, invalid_request_error: Your credit balance is too low/);
+});
