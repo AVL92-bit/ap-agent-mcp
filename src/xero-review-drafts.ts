@@ -104,7 +104,7 @@ export function supplierNameSimilarity(a:string,b:string):number {
   return Math.max(tokenScore, prefix/Math.max(ax.length,by.length));
 }
 type ContactMatch={id:string;name:string;alias:boolean;confidence:string};
-/** A 50% contact-name match is only a candidate. The incoming supplier name
+/** A 40% contact-name match is only a candidate. The incoming supplier name
  * must appear as the supplier name on an attached invoice PDF belonging to one
  * of that contact's THREE most recent purchase bills (not three attached bills).
  * No address, registration or VAT comparisons, and no hard-coded aliases.
@@ -236,7 +236,7 @@ async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:stri
   const printedName=incomingPdfText?pdfSupplierName(incomingPdfText):null;
   if(!printedName) throw new Error('Incoming PDF has no unambiguous supplier name; supplier verification blocked');
   const candidates=contacts.map(c=>({c,score:supplierNameSimilarity(printedName,String(c.Name))}))
-    .filter(x=>x.score>=0.50).sort((a,b)=>b.score-a.score);
+    .filter(x=>x.score>=0.40.sort((a,b)=>b.score-a.score);
   if(!candidates.length) return null;
   const confirmed:ContactMatch[]=[];
   for(const {c,score} of candidates) {
@@ -244,7 +244,7 @@ async function findSupplierContact(api:Api,supplier:string,incomingPdfText?:stri
     if(evidence.matched) confirmed.push({id:String(c.ContactID),name:String(c.Name),alias:printedName!==comparableSupplierName(String(c.Name)),confidence:`historical_pdf_supplier_name_match; bill=${evidence.bill_id}; filename=${evidence.filename}; candidate_similarity=${score.toFixed(2)}`});
   }
   if(confirmed.length>1) throw new Error(`Multiple Xero contacts have matching historical supplier invoice names: ${confirmed.map(x=>x.name).join(', ')}`);
-  if(!confirmed.length) throw new Error(`No supplier-name match found in the three most recent Xero bills for any 50%+ candidate; supplier review required`);
+  if(!confirmed.length) throw new Error(`No supplier-name match found in the three most recent Xero bills for any 40%+ candidate; supplier review required`);
   return confirmed[0];
 }
 /** Read-only supplier identity check for a recorded Front invoice. Uses the exact
@@ -276,9 +276,9 @@ async function supplierContact(api: Api, supplier: string, incomingPdfText: stri
   const ranked = contacts.filter((c:any)=>c.ContactID && c.Name)
     .map((c:any)=>({contact:c, score:supplierNameSimilarity(supplier,String(c.Name))}))
     .sort((a:any,b:any)=>b.score-a.score);
-  if (ranked[0]?.score > 0.50) return {id:String(ranked[0].contact.ContactID),created:false,
+  if (ranked[0]?.score > 0.40) return {id:String(ranked[0].contact.ContactID),created:false,
     issue:`Supplier uncertain: existing Xero contact ${ranked[0].contact.Name} selected at similarity ${ranked[0].score.toFixed(2)}; finance must verify`};
-  throw new Error('No existing Xero contact exceeds 50% supplier-name similarity; no contact created');
+  throw new Error('No existing Xero contact exceeds 40% supplier-name similarity; no contact created');
 }
 
 /** Approved/paid Xero purchase bills are the supplier's authorised coding precedent.
