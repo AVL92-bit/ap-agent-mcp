@@ -12,7 +12,7 @@ export type DryRunDocument = {
   reason?: string;
   draft?: { number: string; supplierContactId: string; supplierName?: string; extractedSupplierName?: string;
     supplierMatchScore?: number; accountCode: string; invoiceDate: string; dueDate: string; gross: number;
-    kind: string; uncertainFields: string[] };
+    kind: string; uncertainFields: string[]; reviewNotes?: string[] };
   xeroId?: string;
 };
 export type DryRunConversation = {
@@ -70,7 +70,8 @@ export async function dryRunApInbox(input: {
         entry.draft = { number: command.number, supplierContactId: command.supplierContactId, supplierName: command.supplierName,
           extractedSupplierName: command.extractedSupplierName, supplierMatchScore: command.supplierMatchScore,
           accountCode: command.accountCode, invoiceDate: command.invoiceDate, dueDate: command.dueDate,
-          gross: command.gross, kind: command.kind, uncertainFields: command.uncertainFields };
+          gross: command.gross, kind: command.kind, uncertainFields: command.uncertainFields,
+          ...(command.reviewNotes?.length ? { reviewNotes: command.reviewNotes } : {}) };
         return command;
       } catch (error) {
         const e = error as { kind?: string; message?: string };
