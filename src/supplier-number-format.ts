@@ -16,3 +16,9 @@ export function alignToSupplierNumberFormat(number: string, historical: string[]
   if (history.every(h => shape(h) === shape(stripped)) && !history.some(h => h.toUpperCase().startsWith(m[1].toUpperCase()))) return stripped;
   return null;
 }
+
+/** The number already has the shape most of the supplier's Xero bills use (at least two). */
+export function matchesSupplierNumberFormat(number: string, historical: string[]): boolean {
+  const target = shape(number);
+  return historical.filter(h => h.trim() && shape(h) === target).length >= 2;
+}
