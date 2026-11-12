@@ -45,6 +45,8 @@ import {
 } from "./xero-invoice-history.js";
 import { assessPilotHistoricalCoding } from "./historical-coding-assessment.js";
 import { investigatePilotHistoricalCodingException } from "./historical-comparables.js";
+
+const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
 // in xero-pilot-test.ts.
@@ -2435,7 +2437,7 @@ server.registerTool(
         duplicate_check:z.string().max(500).nullable(),
         proposed_account:z.string().max(100).nullable(),
         proposed_vat_treatment:z.string().max(200).nullable(),
-        exceptions:z.array(z.string().max(500)).max(20),
+        exceptions:z.array(z.string().max(500)).max(20).describe(EXCEPTIONS_GUIDANCE),
         evidence_notes:z.string().max(3000).nullable(),
         requires_human_review:z.literal(true)
       }).strict()
@@ -2682,7 +2684,7 @@ server.registerTool(
     {
       title: "Record Pilot Invoice Assessment",
       description:
-        "Records a new supervised AP assessment in PostgreSQL for a verified PDF in the permitted pilot Front inbox. New records await human review. Existing records are never overwritten. Does not modify Front, Xero or Google Sheets.",
+        "Records a new supervised AP assessment in PostgreSQL for a verified PDF in the permitted pilot Front inbox. New records await human review. Existing records are never overwritten. Does not modify Front, Xero or Google Sheets. Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.",
       inputSchema: {
         conversation_id: z
           .string()
@@ -2757,7 +2759,8 @@ server.registerTool(
             .nullable(),
           exceptions: z
             .array(z.string().max(500))
-            .max(20),
+            .max(20)
+            .describe(EXCEPTIONS_GUIDANCE),
           evidence_notes: z
             .string()
             .max(3000)
