@@ -138,3 +138,17 @@ export function printedSupplierName(text: string, options: { exclude?: RegExp } 
   if (labelled.length === 1 && payees.length === 1 && labelled[0] !== payees[0]) return null;
   return assessment.selected ? supplierComparisonKey(assessment.selected.value) : null;
 }
+
+/** Supplier names that differ only by a legal-form suffix (Ltd, Limited, PLC, LLP)
+ * or a leading "The" are the same supplier, not an alias needing identity review.
+ * A different trading name is still a different name. */
+export function legalNameKey(s: string): string {
+  return supplierComparisonKey(s)
+    .replace(/^the\s+/, '')
+    .replace(/(?:\s+(?:limited|ltd|plc|llp))+$/, '')
+    .trim();
+}
+export function sameSupplierIgnoringLegalSuffix(a: string, b: string): boolean {
+  const x = legalNameKey(a), y = legalNameKey(b);
+  return !!x && x === y;
+}

@@ -91,3 +91,15 @@ test('readiness never treats the practice as the supplier', () => {
   const doc = "Invoice No: 13\nAccount name: St George's Road Surgery\nTotal Due: £1.00";
   assert.equal(printedSupplierName(doc, { exclude: PRACTICE }), null);
 });
+
+const { sameSupplierIgnoringLegalSuffix } = await import(new URL('../dist/supplier-evidence.js', import.meta.url));
+test('legal-form suffix alone is not a supplier alias', () => {
+  assert.equal(sameSupplierIgnoringLegalSuffix('water plus limited', 'Water Plus'), true);
+  assert.equal(sameSupplierIgnoringLegalSuffix('Acme Ltd', 'Acme Limited'), true);
+  assert.equal(sameSupplierIgnoringLegalSuffix('The Brightway Group PLC', 'Brightway Group'), true);
+});
+test('a different trading name is still an alias needing review', () => {
+  assert.equal(sameSupplierIgnoringLegalSuffix('Water Plus Group Limited', 'Water Plus'), false);
+  assert.equal(sameSupplierIgnoringLegalSuffix('Severn Trent Water Ltd', 'Water Plus'), false);
+  assert.equal(sameSupplierIgnoringLegalSuffix('Limited', ''), false);
+});
