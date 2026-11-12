@@ -44,7 +44,7 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
 }
 
 /** Live read-only Xero candidate listing. Never creates supplier contacts. */
-export async function makeLiveDraftCommand(conversation: InboxConversation, attachment: InboxAttachment, client: PoolClient): Promise<DraftCommand> {
+export async function makeLiveDraftCommand(conversation: InboxConversation, attachment: InboxAttachment, _client?: PoolClient): Promise<DraftCommand> {
   if (process.env.FRONT_ENABLED_INBOX_ID !== INBOX || process.env.XERO_PILOT_TENANT_ID !== TENANT || process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
     throw new Error('AP draft-only live processing is disabled for this inbox/tenant');
   }

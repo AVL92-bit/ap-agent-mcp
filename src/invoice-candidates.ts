@@ -49,10 +49,16 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
     }
     return f;
   };
+  // A document number contains at least one digit: words such as "Date" in
+  // "Invoice Date" are column labels, not references. Keep searching later lines.
+  const matchNumbered=(regex:RegExp):CandidateField|null=>{
+    for(const line of refLines){const m=line.match(regex); if(m?.[1] && /\d/.test(m[1])) return field(clean(m[1]),clean(line));}
+    return null;
+  };
   const reference=damaged(receipt
-    ? matchField(refLines,/\breceipt\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
-    : matchField(refLines,/\b(?:invoice|credit\s*note)\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i)
-      ?? matchField(refLines,/\b(?:summary\s+of\s+charges\s*:\s*)?invoice\s+([A-Z][A-Z0-9/_-]{3,60})\b/i));
+    ? (matchNumbered(/\breceipt\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i))
+    : (matchNumbered(/\b(?:invoice|credit\s*note)\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i))
+      ?? (matchNumbered(/\b(?:summary\s+of\s+charges\s*:\s*)?invoice\s+([A-Z][A-Z0-9/_-]{3,60})\b/i)));
   const linkedInvoiceReference=receipt
     ? damaged(matchField(refLines,/\binvoice\s*(?:number|no\.?|#|ref(?:erence)?\.?)\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{1,60})\b/i))
     : null;
