@@ -57,6 +57,7 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
     extraction_notes:merged.notes,text_rule_candidates:merged.text_candidates};
 }
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
+import { readFinanceReviewRows } from "./google-sheets-review.js";
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -2379,6 +2380,20 @@ server.registerTool(
    // --------------------------------------------------
   // PILOT DRAFT: DATABASE READINESS CHECK
   // --------------------------------------------------
+
+  server.registerTool(
+    "get_finance_review_rows",
+    {
+      title: "Read Finance Review Sheet Rows",
+      description:
+        "Read-only. Returns the most recent rows of the Finance review Google Sheet (newest first). incomplete_only=true returns only rows not yet ticked in column J \"Human review complete\" (when that column exists). Never writes to the Sheet.",
+      inputSchema: { limit: z.number().int().min(1).max(200).optional(), incomplete_only: z.boolean().optional() },
+    },
+    async ({ limit, incomplete_only }) => {
+      try { return toolResult(await readFinanceReviewRows({ limit, incompleteOnly: incomplete_only })); }
+      catch (error) { return safeError("Finance review Sheet read failed", error); }
+    }
+  );
 
   server.registerTool(
     "list_pilot_draft_attempts",
