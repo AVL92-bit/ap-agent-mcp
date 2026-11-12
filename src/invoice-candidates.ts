@@ -3,6 +3,7 @@
  * surface uncertainty; Xero contact/coding selection and document reconciliation
  * are separate application-controlled steps.
  */
+import { assessSupplierEvidence, rejectSupplierName } from './supplier-evidence.js';
 export type CandidateField = { value: string; evidence: string; uncertain: boolean };
 export type InvoiceCandidates = {
   documentType: CandidateField;
@@ -92,45 +93,14 @@ export function extractInvoiceCandidates(text:string):InvoiceCandidates {
   }
   const amountPaid=receipt?matchField(lines,/\bamount\s+paid\s*[:=]?\s*([£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i):null;
   const accountBalance=matchField(lines,/\b(?:total\s+amount|account\s+balance|balance\s+carried\s+forward)\s*[:=]?\s*([-−]?[£$€]?\s*\d[\d,]*(?:\.\d{1,2})?)\b/i);
-  const supplierLine=header.find(x=> /^(?:from|supplier|vendor|issued\s+by)\s*:/i.test(x));
-  const rejectName=(x:string)=>/^(?:page\s+\d+\s+of\s+\d+|invoice|receipt|issue\s+date|registered\s+office|cheques?\s+payable|vat\s+(?:registration|number)|company\s+(?:number|registration)|account\s+number|total|amount|summary|date)\b/i.test(x)
-    || /\b(?:road|street|postcode|telephone|email|www\.|@)\b/i.test(x);
-  // General payment-recipient evidence identifies the billing entity more strongly than a group
-  // registration footer. Never choose the first company in a multi-entity list.
-  const payeeEvidence:CandidateField[]=[];
-  const legalEvidence:CandidateField[]=[];
-  const legalPattern=/\b([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\s*\(\s*company\s+(?:number|no\.?)\s+[A-Za-z0-9]+\s*\)/gi;
-  for(const line of lines) {
-    const payee=line.match(/\b(?:(?:cheques?|payments?)\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to|(?:please\s+)?(?:make\s+)?payments?\s+to|(?:remit|remittance)\s+to|payable\s+to)\s*[:\-]?\s*([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/i);
-    if(payee) payeeEvidence.push(field(clean(payee[1]),line,true));
-    for(const legal of line.matchAll(legalPattern)) {
-      const name=clean(legal[1]).replace(/^(?:and|or)\s+/i,'');
-      if(!rejectName(name)) legalEvidence.push(field(name,line,true));
-    }
-    if(!payee && !/\b(?:cheques?|payable\s+to)\b/i.test(line)) {
-      const standalone=line.match(/^([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))$/i);
-      if(standalone && !rejectName(standalone[1])) legalEvidence.push(field(clean(standalone[1]),line,true));
-    }
-  }
-  // PDF text extraction may split the payee's legal name across physical lines.
-  // Match the complete payment instruction after collapsing whitespace across lines,
-  // but retain a bounded excerpt as audit evidence rather than a group footer.
-  const continuousText=clean(text);
-  const multilinePayee=/\b(?:(?:cheques?|payments?)\s+(?:should\s+be\s+)?(?:made\s+)?payable\s+to|(?:please\s+)?(?:make\s+)?payments?\s+to|(?:remit|remittance)\s+to|payable\s+to)\s*[:\-]?\s*([A-Z][A-Za-z0-9 &'().-]{2,80}?\s+(?:Limited|Ltd|LLP|PLC))\b/gi;
-  for(const match of continuousText.matchAll(multilinePayee)) {
-    const name=clean(match[1]);
-    if(!rejectName(name)) payeeEvidence.push(field(name,match[0],true));
-  }
-  const distinct=(values:CandidateField[])=>[...new Set(values.map(c=>c.value.toLowerCase()))];
-  const payeeNames=distinct(payeeEvidence);
-  const legalNames=distinct(legalEvidence);
+  // Supplier evidence is shared with review/readiness PDF checks (supplier-evidence.ts):
+  // labelled header > payment recipient > company registration > whole-document legal name.
+  const rejectName=rejectSupplierName;
+  const supplierAssessment=assessSupplierEvidence(text);
+  const chosen=supplierAssessment.selected;
   const receiptName=receipt?header.find(line=>!rejectName(line) && /^[A-Z][A-Za-z]+(?:\s+[A-Za-z0-9]+){1,3}$/.test(line)):null;
-  const supplier=supplierLine
-    ? field(clean(supplierLine.replace(/^(?:from|supplier|vendor|issued\s+by)\s*:/i,'')),supplierLine)
-    : payeeNames.length===1 ? payeeEvidence[0]
-    : payeeNames.length>1 ? payeeEvidence[0]
-    : legalNames.length===1 ? legalEvidence[0]
-    : legalEvidence.length ? legalEvidence[0]
+  const supplier=chosen
+    ? field(chosen.value,chosen.evidence,chosen.tier!=='labelled')
     : receiptName?field(receiptName,receiptName,true):null;
   const currency=field(/€|\bEUR\b/i.test(text)?'EUR':/\$|\bUSD\b/i.test(text)?'USD':'GBP','Currency inferred from document symbols or default GBP',!/£|\bGBP\b|€|\bEUR\b|\$|\bUSD\b/i.test(text));
   const result={documentType,supplier,reference,invoiceDate,dueDate,grossAmount,currency,accountBalance,amountPaid,linkedInvoiceReference};

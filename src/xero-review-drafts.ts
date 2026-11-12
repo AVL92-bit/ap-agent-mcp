@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { printedSupplierName } from './supplier-evidence.js';
 import { xeroFetch } from "./xero-rate-limit.js";
 import { PDFParse } from 'pdf-parse';
 /** Supervised AP draft creation. Uncertainty is recorded for review, not an approval gate.
@@ -112,59 +113,16 @@ type ContactMatch={id:string;name:string;alias:boolean;confidence:string};
 function comparableSupplierName(value:string):string {
   return value.toLowerCase().replace(/&/g,' and ').replace(/[^a-z0-9]+/g,' ').trim();
 }
-/** Extract supplier names from the PDF itself. Never use the review's supplier_name
- * as the string compared with historical PDF text. Keep extraction confined to
- * invoice header; do not match customer names or line-item descriptions.
- * An unreadable or ambiguous name fails closed.
- */
 /** A single supplier identity, taken only from the incoming or historical PDF.
- * Do not accept any legal name in a bill-to/customer block as supplier evidence.
- * Ambiguous header identities fail closed, rather than matching a shared customer.
+ * Uses the same evidence as get_invoice_attachment's extracted_candidates.supplier
+ * (supplier-evidence.ts), searching the whole document, so both paths agree.
+ * Never use the review's supplier_name as the string compared with historical PDF text.
+ * Names in a bill-to/customer block and the practice's own name are never supplier evidence.
+ * Conflicting labelled-issuer or payee identities fail closed rather than guess.
  */
+const PRACTICE_NAME=/\bst\.?\s*george[’'s\s.-]*road\s*surgery\b/i;
 function pdfSupplierName(text:string):string|null {
-  const lines=text.split(/\r?\n/).map(x=>x.trim()).filter(Boolean).slice(0,100);
-  const stop=/^(?:bill\s*to|invoice\s*to|sold\s*to|customer|ship\s*to|deliver\s*to|billed\s*to|recipient|to:)\b/i;
-  const label=/^(?:supplier|seller|vendor|issued\s+by|from)\s*[:\-]\s*/i;
-  const payee=/^(?:account\s*(?:holder\s*)?name|beneficiary\s*name|payee\s*name)\s*[:\-]\s*/i;
-  const legal=/\b(?:ltd|limited|llp|plc|inc|incorporated)\b/i;
-  const isName=(value:string)=>value.length>=5 && value.length<=110 && /[a-z]/i.test(value)
-    && !/^(?:\d|bank:|sort code|account number|vat number)/i.test(value);
-  const issuerNames:string[]=[];
-  const payeeNames:string[]=[];
-  let beforeRecipient=true;
-  for(let i=0;i<lines.length;i++) {
-    const line=lines[i];
-    if(stop.test(line)) beforeRecipient=false;
-    if(beforeRecipient && label.test(line)) {
-      const raw=line.replace(label,'').trim() || (lines[i+1]??'');
-      if(isName(raw)) issuerNames.push(comparableSupplierName(raw));
-    }
-    // A labelled remittance account holder is a candidate, not proof of issuer.
-    // Only accept it when historical Xero bill PDFs yield the same candidate.
-    if(payee.test(line)) {
-      const raw=line.replace(payee,'').trim() || (lines[i+1]??'');
-      if(isName(raw)) payeeNames.push(comparableSupplierName(raw));
-    }
-  }
-  const unique=(values:string[])=>[...new Set(values)];
-  const explicit=unique(issuerNames);
-  const payees=unique(payeeNames);
-  // Conflicting explicit issuer and payee identities are unsafe to auto-resolve.
-  if(explicit.length>1 || payees.length>1) return null;
-  if(explicit.length===1 && payees.length===1 && explicit[0]!==payees[0]) return null;
-  if(explicit.length===1) return explicit[0];
-  if(payees.length===1) return payees[0];
-  // Unlabelled masthead fallback only, never the recipient or a line item.
-  const masthead:string[]=[];
-  for(const line of lines.slice(0,15)) {
-    if(stop.test(line) || /^(?:tax\s+)?invoice\b/i.test(line)) break;
-    if(legal.test(line) && !/\b(?:st george'?s road surgery)\b/i.test(line)) {
-      const name=comparableSupplierName(line);
-      if(name.length>=8 && name.length<=110) masthead.push(name);
-    }
-  }
-  const names=unique(masthead);
-  return names.length===1?names[0]:null;
+  return printedSupplierName(text,{exclude:PRACTICE_NAME});
 }
 
 async function pdfText(bytes:Buffer):Promise<string> {
@@ -266,18 +224,25 @@ export async function resolveExistingXeroSupplierForReview(input:{
 export async function resolveExistingXeroSupplierForDraft(supplier:string):Promise<{contact_id:string;contact_name:string;match_confidence:string;alias:boolean}> {
   throw new Error('Incoming PDF required for supplier verification; use Front intake or review-based workflow');
 }
-async function supplierContact(api: Api, supplier: string, incomingPdfText: string): Promise<{id:string; created:boolean; issue?:string}> {
-  // Historical PDF matching improves the candidate but must not veto a draft.
-  let match: ContactMatch | null = null;
-  try { match = await findSupplierContact(api, supplier, incomingPdfText); } catch { /* use ranked contact fallback */ }
-  if (match) return {id:match.id,created:false,...(match.alias?{issue:`Supplier candidate ${match.name}; verify identity`}:{})};
+/** Best-candidate existing contact used when PDF-to-PDF verification fails.
+ * Shared by draft creation and the read-only preview so both report the same contact. */
+async function bestCandidateContact(api: Api, supplier: string): Promise<{id:string; name:string; score:number}|null> {
   const response = await xero(api, 'Contacts');
   const contacts = Array.isArray(response.Contacts) ? response.Contacts : [];
   const ranked = contacts.filter((c:any)=>c.ContactID && c.Name)
     .map((c:any)=>({contact:c, score:supplierNameSimilarity(supplier,String(c.Name))}))
     .sort((a:any,b:any)=>b.score-a.score);
-  if (ranked[0]?.score > 0.40) return {id:String(ranked[0].contact.ContactID),created:false,
-    issue:`Supplier uncertain: existing Xero contact ${ranked[0].contact.Name} selected at similarity ${ranked[0].score.toFixed(2)}; finance must verify`};
+  if (!(ranked[0]?.score > 0.40)) return null;
+  return {id:String(ranked[0].contact.ContactID),name:String(ranked[0].contact.Name),score:ranked[0].score};
+}
+async function supplierContact(api: Api, supplier: string, incomingPdfText: string): Promise<{id:string; created:boolean; issue?:string}> {
+  // Historical PDF matching improves the candidate but must not veto a draft.
+  let match: ContactMatch | null = null;
+  try { match = await findSupplierContact(api, supplier, incomingPdfText); } catch { /* use ranked contact fallback */ }
+  if (match) return {id:match.id,created:false,...(match.alias?{issue:`Supplier candidate ${match.name}; verify identity`}:{})};
+  const best = await bestCandidateContact(api, supplier);
+  if (best) return {id:best.id,created:false,
+    issue:`Supplier uncertain: existing Xero contact ${best.name} selected at similarity ${best.score.toFixed(2)}; finance must verify`};
   throw new Error('No existing Xero contact exceeds 40% supplier-name similarity; no contact created');
 }
 
@@ -383,9 +348,21 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     messageId:String(r.front_message_id),attachmentId:String(r.attachment_id)});
   const pdf=await pdfText(original.bytes);
   const api=await getPilotXeroReadSessionForLink();
-  const verified=await findSupplierContact(api,String(r.supplier_name??''),pdf);
-  const coding=verified?await inspectApprovedSupplierCoding(String(r.supplier_name??''),'',pdf):
-    {status:'contact_unresolved',account_code:null,issues:['Incoming and historical PDF supplier names did not match']};
+  // Supplier verification failure is a review issue, never a preview failure. Mirror
+  // createReviewDraft: verified contact, else best-candidate existing contact (>40%).
+  const printedSupplier=pdfSupplierName(pdf);
+  const supplierForMatch=printedSupplier || String(r.supplier_name??'');
+  let verified:ContactMatch|null=null;
+  let supplierVerificationError='';
+  try { verified=await findSupplierContact(api,supplierForMatch,pdf); }
+  catch(error){ supplierVerificationError=error instanceof Error?error.message:String(error); }
+  const fallbackContact=verified?null:await bestCandidateContact(api,supplierForMatch).catch(()=>null);
+  const coding:Record<string,unknown>=verified
+    ? await inspectApprovedSupplierCoding(supplierForMatch,'',pdf)
+        .catch(()=>({status:'history_unavailable',account_code:null,issues:['Historical coding unavailable']}))
+    : {status:'contact_unresolved',account_code:null,issues:[supplierVerificationError||'Incoming and historical PDF supplier names did not match']};
+  const draftAccount=await accountCode(api,coding.account_code || a.proposed_account)
+    .catch((error:unknown)=>({code:null as string|null,fallback:true,error:error instanceof Error?error.message:String(error)}));
   // Resolve old assessment warnings using current source evidence, not stored guesses.
   // A missing legal-entity label is not itself a conflict when the PDF names the
   // practice as recipient. A different named recipient must still be reviewed.
@@ -413,7 +390,11 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
     !(/supplier identity/i.test(issue) && !!verified) &&
     !(/billing entity|legal entity name/i.test(issue) && ((practiceRecipient||practiceAddress)&&!conflictingRecipient || historicalRecipientMatch)) &&
     !(/latest.version copy/i.test(issue) && latestVersionVerified));
-  if (!verified) issues.push('Supplier verification required — draft may proceed with a provisional or best-candidate Xero contact; finance must verify');
+  const draftBlockers:string[]=[];
+  if (!verified && fallbackContact) issues.push(`Supplier uncertain: existing Xero contact ${fallbackContact.name} selected at similarity ${fallbackContact.score.toFixed(2)}; finance must verify${supplierVerificationError?` (${supplierVerificationError})`:''}`);
+  if (!verified && !fallbackContact) draftBlockers.push('No existing Xero contact exceeds 40% supplier-name similarity; draft creation will not create a contact');
+  if (!draftAccount.code) draftBlockers.push(`No valid account code: ${(draftAccount as any).error ?? 'unavailable'}`);
+  else if (draftAccount.fallback) issues.push('Fallback expense account selected; finance must verify coding');
   if (!(practiceRecipient||practiceAddress||historicalRecipientMatch) || (conflictingRecipient && !historicalRecipientMatch))
     issues.push('Billed-to practice not unambiguously verified from invoice PDF and recorded recipient');
   if (!latestVersionVerified) issues.push(`Latest Front version not verified: ${latestVersionError}`);
@@ -423,6 +404,11 @@ export async function previewReviewDraft(pool:Pool, reviewId:string): Promise<Re
   const essential=(base.essential_missing as string[]);
   return {...base,review_id:reviewId,preview_source:'postgres_review_pdf_verified',
     supplier_verified:!!verified,verified_xero_contact_id:verified?.id??null,
+    printed_supplier_name:printedSupplier,supplier_verification_error:supplierVerificationError||null,
+    draft_contact:verified?{id:verified.id,name:verified.name,basis:'historical_pdf_verified',confidence:verified.confidence}
+      :fallbackContact?{id:fallbackContact.id,name:fallbackContact.name,basis:'best_candidate_similarity',similarity:Number(fallbackContact.score.toFixed(2)),exceeds_40_percent:fallbackContact.score>0.40}:null,
+    draft_account_code:draftAccount.code,draft_account_is_fallback:draftAccount.fallback,
+    draft_blockers:draftBlockers,draft_would_be_created:draftBlockers.length===0,
     supplier_verification_blocks_draft:false,
     latest_front_version_verified:latestVersionVerified,billed_to_practice_verified:(practiceRecipient||practiceAddress)&&!conflictingRecipient,
     billed_to_historical_supplier_verified:historicalRecipientMatch,
