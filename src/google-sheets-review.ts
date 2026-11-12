@@ -100,6 +100,33 @@ async function sheetsRequest(
 }
 
 
+/** Optional column J "Human review complete" (added by finance; checkbox recommended). When
+ * present, new rows are written with FALSE so outstanding reviews can be filtered. Columns A-I
+ * are unchanged and still checked exactly. */
+export const REVIEW_COMPLETE_HEADER = 'Human review complete';
+export function withReviewColumn(rows: string[][], values: unknown[]): unknown[] {
+  return (rows[0]?.[9] ?? '').trim() === REVIEW_COMPLETE_HEADER ? [...values, false] : values;
+}
+const isComplete = (v: unknown) => /^(true|yes|y|done|complete|completed|x|✓)$/i.test(String(v ?? '').trim());
+
+/** Read-only view of the Finance review tab: most recent rows first, optionally only those
+ * not yet marked complete in column J. */
+export async function readFinanceReviewRows(input: { limit?: number; incompleteOnly?: boolean } = {}): Promise<Record<string, unknown>> {
+  if (SPREADSHEET_ID !== EXPECTED_SPREADSHEET_ID || SHEET_NAME !== 'Finance review') throw new Error('Finance review Sheet target mismatch');
+  const token = await getAccessToken();
+  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:J10000")}`) as {values?:string[][]};
+  const rows = existing.values ?? [];
+  const header = rows[0] ?? [];
+  const hasReviewColumn = (header[9] ?? '').trim() === REVIEW_COMPLETE_HEADER;
+  let data = rows.slice(1).map((r, i) => ({ sheet_row: i + 2, logged_at: r[0] ?? '', outcome: r[1] ?? '', xero_draft_url: r[2] ?? '',
+    supplier: r[3] ?? '', reference: r[4] ?? '', gross: r[5] ?? '', field_or_failure: r[6] ?? '', detail: r[7] ?? '',
+    front_conversation_url: r[8] ?? '', ...(hasReviewColumn ? { human_review_complete: isComplete(r[9]) } : {}) }));
+  if (input.incompleteOnly && hasReviewColumn) data = data.filter(d => !(d as any).human_review_complete);
+  const limit = Math.min(Math.max(input.limit ?? 25, 1), 200);
+  return { read_only: true, total_rows: rows.length ? rows.length - 1 : 0, headers_ok: ['Logged at','Outcome','Xero draft URL','Supplier selected','Invoice / credit note ref','Gross amount','Field / failure','Question or error detail','Front conversation URL'].every((h, i) => header[i] === h),
+    human_review_complete_column: hasReviewColumn, rows: data.slice(-limit).reverse() };
+}
+
 /** Append-only exception reporting. Sheet writes are never a prerequisite for a Xero draft. */
 export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[]): Promise<{appended:string[];already_present:string[];skipped:string[]}> {
   if (SPREADSHEET_ID !== EXPECTED_SPREADSHEET_ID || SHEET_NAME !== 'Finance review') throw new Error('Finance review Sheet target mismatch');
@@ -107,7 +134,7 @@ export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[])
   const result = await pool.query(`SELECT id::text, created_at, front_conversation_id, supplier_name, invoice_number, document_type,
     assessment_json, xero_draft_id, xero_draft_error, xero_draft_status FROM pilot_invoice_reviews WHERE id::text = ANY($1::text[])`,[reviewIds]);
   const token = await getAccessToken();
-  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:I10000")}`) as {values?:string[][]};
+  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:J10000")}`) as {values?:string[][]};
   const rows = existing.values ?? [];
   const expected=['Logged at','Outcome','Xero draft URL','Supplier selected','Invoice / credit note ref','Gross amount','Field / failure','Question or error detail','Front conversation URL'];
   if (expected.some((h,i)=>rows[0]?.[i]!==h)) throw new Error('Finance review Sheet headers do not match');
@@ -128,7 +155,7 @@ export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[])
       String(r.supplier_name??''),String(r.invoice_number??''),String(a.gross_gbp??''),
       failure?'Processing failure':'Uncertain fields',details,
       `https://app.frontapp.com/open/${r.front_conversation_id}`];
-    await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:I10000")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, 'POST', {values:[values]});
+    await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:J10000")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, 'POST', {values:[withReviewColumn(rows,values)]});
     appended.push(r.id);rows.push(values);
   }
   return {appended,already_present,skipped};
@@ -146,7 +173,7 @@ export async function appendApInboxException(input: {
   if(SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID || SHEET_NAME!=='Finance review') throw new Error('Finance review Sheet target mismatch');
   if(!/^cnv_[\w-]+$/.test(input.conversationId)||!/^fil_[\w-]+$/.test(input.attachmentId)) throw new Error('Invalid review source IDs');
   const token=await getAccessToken();
-  const range=encodeURIComponent("'Finance review'!A1:I10000");
+  const range=encodeURIComponent("'Finance review'!A1:J10000");
   const existing=await sheetsRequest(token,`/values/${range}`) as {values?:string[][]};
   const rows=existing.values??[];
   const expected=['Logged at','Outcome','Xero draft URL','Supplier selected','Invoice / credit note ref','Gross amount','Field / failure','Question or error detail','Front conversation URL'];
@@ -158,5 +185,5 @@ export async function appendApInboxException(input: {
     input.xeroId?`https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${input.xeroId}`:'',
     input.supplier??'',input.reference??'',input.gross===undefined?'':String(input.gross),reviewOnly?'Document review':(input.outcome==='draft_uncertain'?'Uncertain fields':'Processing failure'),
     `${key} | ${input.filename ? `Document: ${input.filename} | ` : ''}${input.reason}${input.extractedSupplier ? ` | Extracted supplier: ${input.extractedSupplier}` : ''}${input.supplier ? ` | Selected Xero contact: ${input.supplier}` : ''}${input.supplierMatchScore===undefined ? '' : ` | Supplier match: ${(input.supplierMatchScore*100).toFixed(1)}%`}`,`https://app.frontapp.com/open/${input.conversationId}`];
-  await sheetsRequest(token,`/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,'POST',{values:[row]});
+  await sheetsRequest(token,`/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,'POST',{values:[withReviewColumn(rows,row)]});
 }
