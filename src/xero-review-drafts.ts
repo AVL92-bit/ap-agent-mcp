@@ -13,7 +13,7 @@ import { originalFrontDocument, attachAndVerifyOriginal } from './xero-draft-bil
 import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 import { vatPolicyForInbox, grossExpenseLine } from './inbox-vat-policy.js';
-import { reconcileInvoiceReviewIssues, billingRecipientCheck } from './ap-invoice-review-rules.js';
+import { reconcileInvoiceReviewIssues, billingRecipientCheck, applyPaymentIssuePolicy } from './ap-invoice-review-rules.js';
 export { selectLatestInvoiceVersion } from './invoice-version-policy.js';
 
 const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
@@ -47,7 +47,7 @@ export type DirectDraftPreview = {
 };
 function previewFields(data: DirectDraftPreview, linkedId?: string | null, attempt?: string | null) {
   const essential_missing:string[]=[];
-  const review_issues:string[]=[...(data.exceptions ?? [])];
+  const review_issues:string[]=applyPaymentIssuePolicy(data.exceptions ?? []);
   if (!['invoice','credit_note'].includes(data.document_type)) essential_missing.push('Not an invoice or credit note');
   if (!data.supplier_name?.trim()) essential_missing.push('Supplier name not available for Xero contact');
   if (!data.invoice_number?.trim()) essential_missing.push('Document number not available');
@@ -494,7 +494,7 @@ export async function createReviewDraft(pool:Pool, reviewId:string): Promise<Rec
     throw new Error('Document cannot be represented in Xero: supplier, number, date or gross amount missing');
   if (supplier.length > 150 || number.length > 100) throw new Error('Supplier or document number too long');
   const gross = Math.abs(a.gross_gbp as number);
-  const issues:string[] = reconcileInvoiceReviewIssues(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : [], {supplierVerified:false,vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
+  const issues:string[] = reconcileInvoiceReviewIssues(applyPaymentIssuePolicy(Array.isArray(a.exceptions) ? a.exceptions.filter((x:unknown):x is string=>typeof x==='string') : []), {supplierVerified:false,vatPolicyVerified:true,dueDateDefaulted:!dateOk(a.due_date)});
   if (a.gross_gbp < 0) issues.push('Negative source amount represented as positive supplier credit note');
   // Billing-entity assessment happens against the original PDF below, not stale extraction text.
   const onPresentation=/\bdue on presentation\b|\bdue immediately\b/i.test(String(a.evidence_notes??''));

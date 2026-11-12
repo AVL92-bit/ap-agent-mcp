@@ -1,6 +1,7 @@
 
 import { createSign } from "node:crypto";
 import type { Pool } from "pg";
+import { applyPaymentIssuePolicy } from "./ap-invoice-review-rules.js";
 
 // Configure a new trial spreadsheet without changing code. Never silently write to the old trial.
 const EXPECTED_SPREADSHEET_ID = "1Z33UUJFeUpws0DvqihlqKm01rgTBfIhrnZOqrvABzjo";
@@ -113,7 +114,7 @@ export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[])
   const appended:string[]=[], already_present:string[]=[], skipped:string[]=[];
   for(const r of result.rows) {
     const a=r.assessment_json ?? {};
-    const uncertainties=(Array.isArray(a.exceptions)?a.exceptions:[]).filter((x:unknown)=>typeof x==='string'&&!/\bvat\b|tax treatment|tax rate/i.test(x));
+    const uncertainties=applyPaymentIssuePolicy((Array.isArray(a.exceptions)?a.exceptions:[]).filter((x:unknown):x is string=>typeof x==='string'&&!/\bvat\b|tax treatment|tax rate/i.test(x)));
     const failure=!r.xero_draft_id && !!r.xero_draft_error;
     const hasUncertainty=uncertainties.length>0 || (!!r.xero_draft_error && !!r.xero_draft_id);
     if(!failure && !(r.xero_draft_id && hasUncertainty)){skipped.push(r.id);continue;}
