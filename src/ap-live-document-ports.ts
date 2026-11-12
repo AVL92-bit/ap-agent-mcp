@@ -77,18 +77,19 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     }
     throw new Error(`Xero ${resource} pagination incomplete`);
   }
-  const rawContacts=await readPaged<{ContactID?:string;Name?:string}>('Contacts','Contacts');
+  const rawContacts=await readPaged<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>('Contacts','Contacts');
   const rawAccounts=await readPaged<{Code?:string;Name?:string;Type?:string;Status?:string}>('Accounts','Accounts');
-  const contacts:ContactCandidate[]=rawContacts.filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!}));
+  const contacts:ContactCandidate[]=rawContacts.filter(c=>c.ContactID&&c.Name).map(c=>({id:c.ContactID!,name:c.Name!,
+    ...(c.PurchasesDefaultAccountCode?{defaultPurchaseCode:c.PurchasesDefaultAccountCode}:{})}));
   const accounts:AccountCandidate[]=rawAccounts.map(a=>({code:a.Code||'',name:a.Name||'',type:a.Type||'',status:a.Status||''}));
-  // Read-only history: use the newest purchase bill for this exact existing Xero contact.
-  // Ignore credit notes, voided/deleted bills and accounts not active/expense eligible.
+  // Read-only history: use the newest approved/paid purchase bill for this exact existing Xero contact.
   async function recentAccountCodeForContact(contactId:string):Promise<string|undefined> {
     type HistoricalBill = {Type?:string;Status?:string;DateString?:string;Date?:string;InvoiceID?:string;
       Contact?:{ContactID?:string};LineItems?:Array<{AccountCode?:string}>};
     const bills=await readPaged<HistoricalBill>('Invoices','Invoices');
+    // Only approved or paid bills are coding precedent; drafts (including the agent's own) are not.
     const eligible=bills.filter(b=>b.Type==='ACCPAY' && b.Contact?.ContactID===contactId &&
-      !['VOIDED','DELETED'].includes((b.Status??'').toUpperCase()) &&
+      ['AUTHORISED','PAID'].includes((b.Status??'').toUpperCase()) &&
       (b.DateString || b.Date) && b.LineItems?.some(line=>line.AccountCode));
     eligible.sort((a,b)=>String(b.DateString??b.Date).localeCompare(String(a.DateString??a.Date)) ||
       String(b.InvoiceID??'').localeCompare(String(a.InvoiceID??'')));
@@ -98,6 +99,5 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     fallbackDate:new Date().toISOString().slice(0,10),
     fallbackReference:`FRONT-${attachment.id}`,
     recentAccountCodeForContact,
-    fallbackAccountCode:process.env.AP_FALLBACK_ACCOUNT_CODE,
   });
 }

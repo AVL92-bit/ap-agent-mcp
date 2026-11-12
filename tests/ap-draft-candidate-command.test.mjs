@@ -32,25 +32,32 @@ test('unmatched supplier cannot create provisional Xero contact',async()=>{
  }),/No existing Xero supplier contact exceeded 40%/);
  assert.equal(created,0);
 });
-test('fallback account coding creates draft without separate coding review',async()=>{
+test('no supplier history and no contact default: not drafted, no generic fallback',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
- const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],fallbackAccountCode:'449',pdf});
- assert.equal(command.accountCode,'449');
- assert.ok(!command.uncertainFields.includes('accountCode'));
+ await assert.rejects(buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],pdf}),
+   /No approved bill history and no default purchase account for Example Limited/);
 });
-test('most recent matched supplier invoice code overrides fallback',async()=>{
+test('contact default purchase account drafts with account flagged uncertain',async()=>{
+ const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited',defaultPurchaseCode:'449'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],pdf});
+ assert.equal(command.accountCode,'449');
+ assert.ok(command.uncertainFields.includes('accountCode'));
+});
+test('most recent matched supplier invoice code wins over contact default',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
  let matchedId;
- const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Historical',type:'EXPENSE',status:'ACTIVE'}],fallbackAccountCode:'449',recentAccountCodeForContact:async id=>{matchedId=id;return '450'},pdf});
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited',defaultPurchaseCode:'449'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Historical',type:'EXPENSE',status:'ACTIVE'}],pdf,
+   recentAccountCodeForContact:async(id)=>{matchedId=id;return '450';}});
  assert.equal(matchedId,'known');
  assert.equal(command.accountCode,'450');
  assert.ok(!command.uncertainFields.includes('accountCode'));
 });
-test('inactive historical account never overrides valid fallback',async()=>{
+test('inactive historical account falls to contact default, never a generic account',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
- const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Inactive',type:'EXPENSE',status:'ARCHIVED'}],fallbackAccountCode:'449',recentAccountCodeForContact:async()=> '450',pdf});
+ const accounts=[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Inactive',type:'EXPENSE',status:'ARCHIVED'}];
+ await assert.rejects(buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts,pdf,recentAccountCodeForContact:async()=>'450'}),/not drafted/);
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited',defaultPurchaseCode:'449'}],accounts,pdf,recentAccountCodeForContact:async()=>'450'});
  assert.equal(command.accountCode,'449');
- assert.ok(!command.uncertainFields.includes('accountCode'));
 });
 
 test('Healthtech payment receipt is not an invoice and invoice number is not receipt reference',()=>{
@@ -74,7 +81,7 @@ test('negative account balance alone is never extracted as positive gross',()=>{
 
 test('existing Xero contact match carries source and score into draft audit',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nPayable to: Water Plus Limited\nInvoice No: WP-123\nTotal Due: £48.67');
- const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'approved',name:'Water Plus Ltd'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],preferredAccountCode:'449',pdf});
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'approved',name:'Water Plus Ltd'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],preferredAccountCode:'449',recentAccountCodeForContact:async()=>'449',pdf});
  assert.equal(command.supplierContactId,'approved');
  assert.equal(command.supplierName,'Water Plus Ltd');
  assert.equal(command.extractedSupplierName,'Water Plus Limited');

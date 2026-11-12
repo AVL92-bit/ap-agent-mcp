@@ -103,3 +103,13 @@ test('a different trading name is still an alias needing review', () => {
   assert.equal(sameSupplierIgnoringLegalSuffix('Severn Trent Water Ltd', 'Water Plus'), false);
   assert.equal(sameSupplierIgnoringLegalSuffix('Limited', ''), false);
 });
+
+test('readiness reads a masthead supplier the same way as invoice candidates', () => {
+  const doc = 'Invoice\nInvoice number HT1-1\nHealthtech 1\n91 Belmont Hill\nLondon\nSE13 5AX\nBill to\nSt Georges Road Surgery\nTotal £1.00';
+  assert.equal(printedSupplierName(doc), 'healthtech 1');
+  assert.equal(assessSupplierEvidence(doc).selected?.tier, 'masthead');
+});
+test('payee evidence still outranks a masthead', () => {
+  const doc = 'Invoice\nBrand Name\n1 Some Street\nLeeds\nLS1 1AA\nPayable to: Brand Holdings Limited\nTotal £1.00';
+  assert.equal(assessSupplierEvidence(doc).selected?.value, 'Brand Holdings Limited');
+});

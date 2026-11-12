@@ -80,11 +80,16 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
         xeroId = outcome.status === 'attachment_failed' ? outcome.xeroId : undefined;
         failure = outcome.error;
       } catch (e) {
+        if (e instanceof DocumentNeedsHumanReview && e.kind === 'supporting_document') {
+          // Receipts are supporting documents: never posted, no Sheet row, no failure.
+          dispositions.push({ attachmentId: attachment.id, disposition: 'supporting_document' });
+          continue;
+        }
         if (e instanceof DocumentNeedsHumanReview) {
           // No journal or Xero call is made for a non-invoice/unclear document.
           dispositions.push({ attachmentId: attachment.id, disposition: 'processing_failure' });
           try { await port.reportReview({conversationId:conversation.id,attachmentId:attachment.id,
-            filename:attachment.filename,reason:e.message,outcome:e.kind}); }
+            filename:attachment.filename,reason:e.message,outcome:e.kind as 'not_invoice'|'unclear'}); }
           catch (sheetError) { item.failures.push(`Sheet review log failed: ${String(sheetError)}`); }
           continue;
         }

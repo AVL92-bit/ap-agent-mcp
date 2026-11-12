@@ -2326,6 +2326,43 @@ server.registerTool(
   // --------------------------------------------------
 
   server.registerTool(
+    "list_pilot_draft_attempts",
+    {
+      title: "List Unlinked Pilot Draft Attempts",
+      description:
+        "Read-only. Lists every review with a previous draft attempt but no linked Xero document (these block re-drafting), and searches Xero bills and credit notes for each stored number and its truncated form (e.g. HT1-34156 and HT1). Never clears, links or creates anything.",
+      inputSchema: {},
+    },
+    async () => {
+      if (process.env.FRONT_ENABLED_INBOX_ID !== "inb_bys7q" ||
+        process.env.XERO_PILOT_TENANT_ID !== "45a1074b-b172-4f49-a192-f0a8e293b54d" || !process.env.DATABASE_URL)
+        return toolFailure("Pilot configuration is invalid");
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+      try {
+        const rows = await pool.query(`SELECT id::text, front_conversation_id, supplier_name, invoice_number, document_type,
+          xero_draft_status, left(coalesce(xero_draft_error,''),300) AS xero_draft_error, xero_draft_updated_at
+          FROM pilot_invoice_reviews WHERE xero_draft_id IS NULL AND xero_draft_status IS NOT NULL ORDER BY id`);
+        const session = await getPilotXeroReadSession();
+        const attempts = [];
+        for (const r of rows.rows) {
+          const number = String(r.invoice_number ?? '').trim();
+          const searched = [...new Set([number, number.split('-')[0]].filter(n => n.length >= 2))];
+          const matches = [];
+          for (const n of searched) for (const m of await lookupXeroPurchaseNumber(session, n)) matches.push({ searched: n, ...m });
+          attempts.push({ review_id: r.id, conversation_id: r.front_conversation_id, supplier_name: r.supplier_name,
+            invoice_number: number, document_type: r.document_type, attempt_status: r.xero_draft_status,
+            attempt_error: r.xero_draft_error || null, attempt_updated_at: r.xero_draft_updated_at,
+            numbers_searched_in_xero: searched, xero_matches: matches,
+            safe_to_clear: matches.length === 0 && ['creating', 'reconcile_required'].includes(r.xero_draft_status) });
+        }
+        return toolResult({ status: 'ok', read_only: true, unlinked_attempts: attempts.length, attempts });
+      } catch (error) {
+        return safeError("Draft attempt listing failed", error);
+      } finally { await pool.end(); }
+    }
+  );
+
+  server.registerTool(
     "check_pilot_draft_database_readiness",
     {
       title: "Check Pilot Draft Database Readiness",
