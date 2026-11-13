@@ -27,6 +27,10 @@ export function makeApDocumentJournal(client: PoolClient) {
         RETURNING attachment_id`,[conversationId,attachmentId]);
       return result.rowCount===1;
     },
+    async releaseCreate(conversationId:string,attachmentId:string):Promise<void> {
+      await client.query(`UPDATE ap_document_journal SET write_intent=false,updated_at=now()
+        WHERE conversation_id=$1 AND attachment_id=$2 AND xero_id IS NULL`,[conversationId,attachmentId]);
+    },
     async complete(conversationId:string,attachmentId:string,status:string,xeroId?:string):Promise<void> {
       if (!['existing_verified','draft_verified','draft_uncertain','technical_failure'].includes(status)) throw new Error('Invalid journal outcome');
       const result = await client.query(`UPDATE ap_document_journal SET status=$3,xero_id=COALESCE($4,xero_id),updated_at=now()
@@ -42,4 +46,12 @@ export async function ensureApDocumentJournal(client:PoolClient):Promise<void> {
     xero_id text, write_intent boolean NOT NULL DEFAULT false, updated_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY(conversation_id,attachment_id))`);
   await client.query(`ALTER TABLE ap_document_journal ADD COLUMN IF NOT EXISTS write_intent boolean NOT NULL DEFAULT false`);
+}
+
+/** Operator repair for the full run: clear a write intent after confirming in Xero that no
+ * document exists for this attachment. Refuses when a Xero ID is recorded. */
+export async function clearFullRunWriteIntent(client:PoolClient,conversationId:string,attachmentId:string):Promise<{cleared:boolean;status?:string}> {
+  const r=await client.query(`UPDATE ap_document_journal SET write_intent=false,updated_at=now()
+    WHERE conversation_id=$1 AND attachment_id=$2 AND xero_id IS NULL AND write_intent=true RETURNING status`,[conversationId,attachmentId]);
+  return r.rowCount ? {cleared:true,status:String(r.rows[0].status)} : {cleared:false};
 }

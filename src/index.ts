@@ -1,7 +1,7 @@
 import { classifyFrontCorrespondence, actionableAttachments, isSupportedDocument } from "./front-triage-classification.js";
 import { ensureApContactIntent } from './ap-contact-write-intent.js';
 import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
-import { ensureApDocumentJournal, makeApDocumentJournal } from './ap-document-journal.js';
+import { ensureApDocumentJournal, makeApDocumentJournal, clearFullRunWriteIntent } from './ap-document-journal.js';
 import { executeCompleteApInbox } from "./ap-inbox-execution.js";
 import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
 import { makeLiveDraftCommand, expandFrontEmail } from "./ap-live-document-ports.js";
@@ -2676,6 +2676,24 @@ server.registerTool(
     try{return toolResult(await linkExistingReviewDraft(pool,review_id,xero_document_id,verified_xero_contact_id));}
     catch(error){return safeError('Existing draft link failed',error);}
     finally{await pool.end();}
+  });
+  server.registerTool('clear_full_run_write_attempt', {
+    title:'Clear A Full-Run Xero Write Attempt',
+    description:'Operator repair for run_ap_inbox: clears the write-intent flag for one attachment so the next run may draft it. Searches Xero for the invoice number first and refuses if a document exists. Requires operator confirmation. Never touches Xero.',
+    inputSchema:{conversation_id:z.string().regex(/^cnv_[\w-]+$/),attachment_id:z.string().regex(/^fil_[\w-]+(?:~\d+)?$/),invoice_number:z.string().min(1).max(100),operator_confirmed_no_xero_document:z.literal(true)}
+  },async ({conversation_id,attachment_id,invoice_number}:{conversation_id:string;attachment_id:string;invoice_number:string;operator_confirmed_no_xero_document:true})=>{
+    if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
+    const pool=new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+    const client=await pool.connect();
+    try{
+      const session=await getPilotXeroReadSession();
+      const found=await lookupXeroPurchaseNumber(session,invoice_number);
+      if(found.length) return toolFailure(`Xero already has ${found.length} document(s) numbered like ${invoice_number}; not cleared`);
+      await ensureApDocumentJournal(client);
+      return toolResult({...await clearFullRunWriteIntent(client,conversation_id,attachment_id),xero_documents_found:0});
+    }
+    catch(error){return safeError('Full-run write attempt clear refused',error);}
+    finally{client.release();await pool.end();}
   });
   server.registerTool('clear_confirmed_failed_pilot_draft_attempt', {
     title:'Clear Confirmed Pre-Xero-POST Attempt Flag',
