@@ -43,5 +43,17 @@ export async function lookupXeroPurchaseNumber(session:{tenantId:string;accessTo
       if(!complete) throw new Error(`Xero ${kind} duplicate lookup exceeded page limit`);
     }
   }
+  // Voided/deleted bills (often under archived contacts) are not returned by the where-filter
+  // above: search them explicitly by number. One extra call per invoice.
+  if(opts.includeRemoved) {
+    const response=await xeroFetch(`https://api.xero.com/api.xro/2.0/Invoices?InvoiceNumbers=${encodeURIComponent(number.trim())}&Statuses=VOIDED,DELETED&includeArchived=true`,{
+      headers:{Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'},signal:AbortSignal.timeout(20000)});
+    if(!response.ok) throw new Error(`Xero voided/deleted lookup HTTP ${response.status}`);
+    const docs=((await response.json()) as Record<string,any>).Invoices;
+    for(const d of Array.isArray(docs)?docs:[]) {
+      if(d.InvoiceNumber!==number.trim() || (d.Type && d.Type!=='ACCPAY') || typeof d.InvoiceID!=='string') continue;
+      if(!found.some(x=>x.kind==='Invoices'&&x.id===d.InvoiceID)) found.push({kind:'Invoices',id:d.InvoiceID,number:d.InvoiceNumber,status:String(d.Status??'UNKNOWN'),contactId:d.Contact?.ContactID??null,contactName:d.Contact?.Name??null,exact:true});
+    }
+  }
   return found;
 }
