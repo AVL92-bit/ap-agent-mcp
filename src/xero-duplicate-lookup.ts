@@ -14,7 +14,8 @@ export function candidateNumbers(number:string):string[] {
   if (suffix && !suffix[1].endsWith('*')) candidates.push(`${suffix[1]}*${suffix[2]}`);
   return candidates;
 }
-export async function lookupXeroPurchaseNumber(session:{tenantId:string;accessToken:string},number:string):Promise<XeroPurchaseMatch[]> {
+/** includeRemoved: also return VOIDED/DELETED documents (status says which), at no extra API cost. */
+export async function lookupXeroPurchaseNumber(session:{tenantId:string;accessToken:string},number:string,opts:{includeRemoved?:boolean}={}):Promise<XeroPurchaseMatch[]> {
   const found:XeroPurchaseMatch[]=[];
   for(const kind of ['Invoices','CreditNotes'] as const) {
     const field=kind==='Invoices'?'InvoiceNumber':'CreditNoteNumber';
@@ -30,7 +31,7 @@ export async function lookupXeroPurchaseNumber(session:{tenantId:string;accessTo
         const docs=data[kind];
         if(!Array.isArray(docs)||docs.length>100) throw new Error(`Invalid Xero ${kind} duplicate response`);
         for(const d of docs) {
-          if(d[field]!==candidate || ['DELETED','VOIDED'].includes(d.Status)) continue;
+          if(d[field]!==candidate || (!opts.includeRemoved && ['DELETED','VOIDED'].includes(d.Status))) continue;
           if(kind==='Invoices' && d.Type && d.Type!=='ACCPAY') continue;
           if(kind==='CreditNotes' && d.Type && d.Type!=='ACCPAYCREDIT') continue;
           const id=d[kind==='Invoices'?'InvoiceID':'CreditNoteID'];
