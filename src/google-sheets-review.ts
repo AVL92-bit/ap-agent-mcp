@@ -168,7 +168,7 @@ export async function assertReviewNotHeldInSheet(_reviewId:string,_conversationI
  * This never controls whether Xero may create a draft. */
 export async function appendApInboxException(input: {
   conversationId:string; attachmentId:string; xeroId?:string; reason:string;
-  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
+  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
 }):Promise<void> {
   if(SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID || SHEET_NAME!=='Finance review') throw new Error('Finance review Sheet target mismatch');
   if(!/^cnv_[\w-]+$/.test(input.conversationId)||!/^fil_[\w-]+(?:~\d+)?$/.test(input.attachmentId)) throw new Error('Invalid review source IDs');
@@ -181,9 +181,9 @@ export async function appendApInboxException(input: {
   const key=`inbox:${input.conversationId}:${input.attachmentId}:${input.outcome}`;
   if(rows.some(r=>r[7]?.includes(key))) return;
   const reviewOnly=input.outcome==='not_invoice'||input.outcome==='unclear';
-  const row=[new Date().toISOString(),reviewOnly?(input.outcome==='not_invoice'?'Not an invoice':'Unclear document'):(input.outcome==='draft_uncertain'?'Draft with uncertainty':'Technical failure'),
+  const row=[new Date().toISOString(),reviewOnly?(input.outcome==='not_invoice'?'Not an invoice':'Unclear document'):input.outcome==='not_posted'?'Not posted - check Xero':(input.outcome==='draft_uncertain'?'Draft with uncertainty':'Technical failure'),
     input.xeroId?`https://go.xero.com/AccountsPayable/View.aspx?InvoiceID=${input.xeroId}`:'',
-    input.supplier??'',input.reference??'',input.gross===undefined?'':String(input.gross),reviewOnly?'Document review':(input.outcome==='draft_uncertain'?'Uncertain fields':'Processing failure'),
+    input.supplier??'',input.reference??'',input.gross===undefined?'':String(input.gross),reviewOnly?'Document review':input.outcome==='not_posted'?'Already in Xero (voided or different total)':(input.outcome==='draft_uncertain'?'Uncertain fields':'Processing failure'),
     `${key} | ${input.filename ? `Document: ${input.filename} | ` : ''}${input.reason}${input.extractedSupplier ? ` | Extracted supplier: ${input.extractedSupplier}` : ''}${input.supplier ? ` | Selected Xero contact: ${input.supplier}` : ''}${input.supplierMatchScore===undefined ? '' : ` | Supplier match: ${(input.supplierMatchScore*100).toFixed(1)}%`}`,`https://app.frontapp.com/open/${input.conversationId}`];
   await sheetsRequest(token,`/values/${range}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,'POST',{values:[withReviewColumn(rows,row)]});
 }

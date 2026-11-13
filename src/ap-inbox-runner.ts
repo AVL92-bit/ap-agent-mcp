@@ -14,7 +14,7 @@ export type InboxPort = {
   makeDraftCommand(conversation: InboxConversation, attachment: InboxAttachment): Promise<DraftCommand>;
   applyTag(conversationId: string, tag: string): Promise<void>;
   archive(conversationId: string): Promise<void>;
-  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
+  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
   /** Open an attached email (.eml) and return the PDFs inside it as attachments. */
   expandEmail?(conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]>;
   journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; releaseCreate?(conversationId:string, attachmentId:string):Promise<void>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
@@ -121,7 +121,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
           // Not drafted: the invoice number is already in Xero with a different total.
           dispositions.push({ attachmentId: attachment.id, disposition: 'draft_uncertain_attached' });
           try { await port.reportReview({ conversationId: conversation.id, attachmentId: attachment.id, xeroId: outcome.xeroId,
-            reason: outcome.error, outcome: 'draft_uncertain', filename: attachment.filename, reference: command.number, gross: command.gross }); }
+            reason: outcome.error, outcome: 'not_posted', filename: attachment.filename, reference: command.number, gross: command.gross }); }
           catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
           continue;
         }
