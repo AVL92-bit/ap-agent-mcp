@@ -77,3 +77,11 @@ test('a DRAFT with no PDF that the agent did not create is left alone for financ
  const r=await runApInbox(f.port,f.xero);
  assert.equal(attached,0);assert.equal(r.archived,0);
 });
+test('a Xero 400 rejection releases the write intent so the next run may retry',async()=>{
+ const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);
+ let released=0;
+ f.port.journal={previous:async()=>null,begin:async()=>{},claimCreate:async()=>true,releaseCreate:async()=>{released++},complete:async()=>{}};
+ f.xero.createDraft=async()=>{throw Error('Xero rejected the draft; nothing was created (HTTP 400): Document date is before the lock date')};
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(released,1);assert.match(r.items[0].failures[0],/lock date/);
+});

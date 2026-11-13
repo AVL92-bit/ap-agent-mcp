@@ -14,6 +14,7 @@ type Session = { tenantId: string; accessToken: string };
 /** Live Xero adapter. Only creates DRAFT purchase documents and attaches source PDFs.
  * Contact selection and coding are upstream; this adapter cannot approve or pay.
  */
+export const XERO_REJECTED = 'Xero rejected the draft; nothing was created';
 export function makeLiveXeroDraftPort(
   getSession: () => Promise<Session> = getPilotXeroWriteSession,
 ): XeroDraftPort {
@@ -57,7 +58,19 @@ export function makeLiveXeroDraftPort(
         body: JSON.stringify({ [kind]: [document] }),
         signal: AbortSignal.timeout(25000),
       });
-      if (!response.ok) throw new Error(`Xero DRAFT ${kind} POST HTTP ${response.status}; reconcile before retry`);
+      if (!response.ok) {
+        const raw = await response.text().catch(() => '');
+        let messages: string[] = [];
+        try {
+          const b = JSON.parse(raw) as any;
+          messages = [b?.Message, ...(b?.Elements ?? []).flatMap((e: any) => (e?.ValidationErrors ?? []).map((v: any) => v?.Message))]
+            .filter((m: unknown): m is string => typeof m === 'string' && m.length > 0 && m !== 'A validation exception occurred');
+        } catch { /* not JSON */ }
+        const detail = messages.length ? `: ${[...new Set(messages)].join('; ').slice(0, 400)}` : '';
+        // HTTP 400 is a validation rejection: Xero created nothing, so the attempt may be retried.
+        if (response.status === 400) throw new Error(`${XERO_REJECTED} (HTTP 400)${detail}`);
+        throw new Error(`Xero DRAFT ${kind} POST HTTP ${response.status}${detail}; reconcile before retry`);
+      }
       const body = await response.json() as Record<string, any>;
       const created = body[kind]?.[0];
       const id = created?.[kind === 'Invoices' ? 'InvoiceID' : 'CreditNoteID'];

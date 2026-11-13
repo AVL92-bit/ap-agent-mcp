@@ -17,7 +17,7 @@ export type InboxPort = {
   reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
   /** Open an attached email (.eml) and return the PDFs inside it as attachments. */
   expandEmail?(conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]>;
-  journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
+  journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; releaseCreate?(conversationId:string, attachmentId:string):Promise<void>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
 };
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
 export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[]; stoppedEarly?: string };
@@ -95,7 +95,8 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
         uncertain = command.uncertainFields.length > 0 || (command.reviewNotes?.length ?? 0) > 0;
         await port.journal?.begin(conversation.id, attachment.id, createHash('sha256').update(command.pdf.bytes).digest('hex'));
         const guardedXero = {
-          ...(port.journal?.claimCreate ? {...xero, beforeCreate:()=>port.journal!.claimCreate!(conversation.id,attachment.id)} : xero),
+          ...(port.journal?.claimCreate ? {...xero, beforeCreate:()=>port.journal!.claimCreate!(conversation.id,attachment.id),
+            releaseCreate:async()=>{ await port.journal?.releaseCreate?.(conversation.id,attachment.id); }} : xero),
           ownPendingDraft: previous?.writeIntent === true,
         };
         const outcome = await reconcileCreateAndAttach(command, guardedXero);

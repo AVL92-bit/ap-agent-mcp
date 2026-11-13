@@ -29,6 +29,8 @@ export type XeroDraftPort = {
   createDraft(command: DraftCommand): Promise<string>;
   /** Persist a one-way write intent before POST. False means a prior attempt may have committed. */
   beforeCreate?(): Promise<boolean>;
+  /** Undo the write intent after Xero definitively rejected the POST (HTTP 400: nothing created). */
+  releaseCreate?(): Promise<void>;
   attachOriginal(kind: PurchaseKind, id: string, pdf: OriginalPdf): Promise<void>;
   /** Must verify the source PDF, not merely an arbitrary attachment. */
   verifyOriginal?(kind: PurchaseKind, id: string, pdf: OriginalPdf): Promise<boolean>;
@@ -118,6 +120,10 @@ export async function reconcileCreateAndAttach(command: DraftCommand, port: Xero
     id = await port.createDraft(command);
     if (!id) throw new Error('Xero draft creation returned no ID');
   } catch (error) {
+    if (String(error).includes('Xero rejected the draft; nothing was created')) {
+      await port.releaseCreate?.().catch(() => {});
+      return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: String(error).replace(/^Error: /, '') };
+    }
     // An HTTP timeout can occur after Xero commits. Never blindly POST again.
     try {
       const after = matchForKind(await port.lookup(command.number), command.kind);
