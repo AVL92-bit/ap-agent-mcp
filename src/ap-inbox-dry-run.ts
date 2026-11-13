@@ -89,7 +89,7 @@ export async function dryRunApInbox(input: {
       // Attachments rejected before extraction (e.g. images) still appear in the report.
       if (!d) item(row.conversationId).documents.push({ attachmentId: row.attachmentId, filename: row.filename ?? '',
         outcome: 'not_drafted', reason: row.reason });
-      else if (/^Possible amended version/.test(row.reason)) { d.outcome = 'possible_amendment'; d.reason = row.reason; d.xeroId = row.xeroId; }
+      else if (/^(Possible amended version|Xero has a (voided|deleted) bill)/.test(row.reason)) { d.outcome = 'possible_amendment'; d.reason = row.reason; d.xeroId = row.xeroId; }
       else if (d.outcome === 'failure' && row.outcome === 'technical_failure') d.reason = row.reason;
     },
     expandEmail: input.expandEmail,

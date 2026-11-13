@@ -57,15 +57,25 @@ function validate(command: DraftCommand): void {
     throw new Error('Cannot construct a valid Xero draft from supplied fields and original PDF');
   }
 }
+const isRemoved = (m: XeroPurchaseMatch) => ['VOIDED', 'DELETED'].includes(String(m.status ?? '').toUpperCase());
 function matchForKind(matches: XeroPurchaseMatch[], kind: PurchaseKind): XeroPurchaseMatch[] {
-  return matches.filter(m => m.kind === kind && m.exact);
+  return matches.filter(m => m.kind === kind && m.exact && !isRemoved(m));
 }
 /** Never create when the Xero read fails or yields multiple exact-number matches.
  * If creation may have succeeded but the response failed, reconcile instead of retrying.
  */
 export async function reconcileCreateAndAttach(command: DraftCommand, port: XeroDraftPort): Promise<DraftOutcome> {
   validate(command);
-  const initial = matchForKind(await port.lookup(command.number), command.kind);
+  const found = await port.lookup(command.number);
+  const initial = matchForKind(found, command.kind);
+  // Finance voided or deleted this supplier's bill with the same number: never re-post it.
+  const removed = initial.length ? [] : found.filter(m => m.kind === command.kind && m.exact && isRemoved(m)
+    && (!m.contactId || !command.supplierContactId || m.contactId.toLowerCase() === command.supplierContactId.toLowerCase()));
+  if (removed.length) {
+    const r = removed[0];
+    return { status: 'possible_amendment', kind: command.kind, xeroId: r.id, uncertainFields: command.uncertainFields,
+      error: `Xero has a ${String(r.status).toLowerCase()} bill ${command.number}${command.supplierName ? ` for ${command.supplierName}` : ''}; not re-posted - check whether it should be re-entered` };
+  }
   if (initial.length > 1) return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: 'Multiple matching Xero documents' };
   if (initial.length === 1) {
     const id = initial[0].id;

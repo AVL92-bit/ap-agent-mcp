@@ -30,7 +30,7 @@ export function makeLiveXeroDraftPort(
   return {
     async lookup(number) {
       const s = await session();
-      return lookupXeroPurchaseNumber(s, number);
+      return lookupXeroPurchaseNumber(s, number, { includeRemoved: true });
     },
     async createDraft(command: DraftCommand) {
       const s = await session();

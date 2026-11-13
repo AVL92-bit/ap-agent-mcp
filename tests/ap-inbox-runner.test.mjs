@@ -85,3 +85,14 @@ test('a Xero 400 rejection releases the write intent so the next run may retry',
  const r=await runApInbox(f.port,f.xero);
  assert.equal(released,1);assert.match(r.items[0].failures[0],/lock date/);
 });
+test('a voided bill with the same number and supplier is not re-posted: Sheet row, left open',async()=>{
+ const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);
+ let created=0;
+ f.xero.lookup=async()=>[{id:'old',kind:'Invoices',status:'VOIDED',exact:true,contactId:null}];
+ f.xero.createDraft=async()=>{created++;return 'x'};
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(created,0);assert.equal(r.archived,0);
+ let reason='';f.port.reportReview=async(row)=>{reason=row.reason;f.calls.push(['sheet',row.outcome])};
+ const r2=await runApInbox(f.port,f.xero);
+ assert.match(reason,/voided bill i1; not re-posted/);assert.equal(r2.archived,0);
+});
