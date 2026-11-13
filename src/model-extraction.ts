@@ -9,6 +9,8 @@
  */
 import { extractInvoiceCandidates, type CandidateField, type InvoiceCandidates } from './invoice-candidates.js';
 import { legalNameKey, PRACTICE_NAME, assessSupplierEvidence } from './supplier-evidence.js';
+import { createHash } from 'node:crypto';
+import type { Pool } from 'pg';
 
 export const DEFAULT_EXTRACTION_MODEL = 'claude-sonnet-5-5';
 export type ModelDocumentType = 'invoice' | 'credit_note' | 'receipt' | 'statement' | 'remittance' | 'other';
@@ -22,6 +24,7 @@ export type ModelFields = {
   currency: string | null;
   account_balance: number | null;
   billed_to: string | null;
+  customer_account_number: string | null;
   low_confidence_fields: string[];
   notes: string | null;
 };
@@ -41,11 +44,12 @@ const FIELD_SCHEMA = {
     currency: nullable({ type: 'string' }),
     account_balance: nullable({ type: 'number' }),
     billed_to: nullable({ type: 'string' }),
+    customer_account_number: nullable({ type: 'string' }),
     low_confidence_fields: { type: 'array', items: { type: 'string', enum: ['document_type', 'supplier_name', 'invoice_number', 'invoice_date', 'due_date', 'gross_total', 'currency'] } },
     notes: nullable({ type: 'string' }),
   },
   required: ['document_type', 'supplier_name', 'supplier_evidence', 'invoice_number', 'invoice_number_evidence', 'invoice_date', 'due_date',
-    'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'currency', 'account_balance', 'billed_to', 'low_confidence_fields', 'notes'],
+    'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'currency', 'account_balance', 'billed_to', 'customer_account_number', 'low_confidence_fields', 'notes'],
 } as const;
 
 const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Surgery (a GP practice in Coventry, UK). Read the attached supplier document and return its fields as JSON matching the schema. Dates are ISO YYYY-MM-DD. Rules:
@@ -55,7 +59,37 @@ const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Sur
 - invoice_date / due_date: ISO YYYY-MM-DD. If no due date is printed, null.
 - gross_total: the total payable for THIS document's charges including VAT, as a positive number. Never use a brought-forward, carried-forward or account balance as the gross. If the account is in credit, still give this period's charges as gross_total and put the account balance (negative if in credit) in account_balance.
 - net_total and vat_total when printed; otherwise null.
+- customer_account_number: the account/customer number the supplier uses for the practice (e.g. "Account No", "Customer Ref", "Account number"), exactly as printed. Not the invoice number. null if none is printed.
 - List in low_confidence_fields any field you are not sure of. Quote evidence exactly as printed. Do not guess values that are not on the document: use null.`;
+
+// ---------- Extraction cache ----------
+// The same PDF is never sent to the model twice: results are stored by PDF hash, model and
+// prompt version, so dry runs, re-runs and the live run share one paid read per document.
+let cachePool: Promise<Pool> | null = null;
+function extractionCache(): Promise<Pool> | null {
+  if (!process.env.DATABASE_URL || process.env.AP_EXTRACTION_CACHE === 'off') return null;
+  if (!cachePool) {
+    cachePool = import('pg').then(async ({ Pool }) => {
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2, connectionTimeoutMillis: 5000 });
+      await pool.query(`CREATE TABLE IF NOT EXISTS ap_model_extraction_cache (
+        cache_key text PRIMARY KEY, model text NOT NULL, fields jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now())`);
+      return pool;
+    });
+    cachePool.catch(() => { cachePool = null; });
+  }
+  return cachePool;
+}
+const promptVersion = () => createHash('sha256').update(INSTRUCTIONS + JSON.stringify(FIELD_SCHEMA)).digest('hex').slice(0, 16);
+async function cachedFields(key: string): Promise<ModelFields | null> {
+  const pending = extractionCache(); if (!pending) return null;
+  try { const pool = await pending; const r = await pool.query('SELECT fields FROM ap_model_extraction_cache WHERE cache_key=$1', [key]); return (r.rows[0]?.fields as ModelFields) ?? null; }
+  catch (e) { console.warn('Extraction cache read failed', String(e)); return null; }
+}
+async function storeFields(key: string, model: string, fields: ModelFields): Promise<void> {
+  const pending = extractionCache(); if (!pending) return;
+  try { const pool = await pending; await pool.query('INSERT INTO ap_model_extraction_cache(cache_key,model,fields) VALUES($1,$2,$3) ON CONFLICT (cache_key) DO NOTHING', [key, model, JSON.stringify(fields)]); }
+  catch (e) { console.warn('Extraction cache write failed', String(e)); }
+}
 
 /** Call the model. Never throws: failure returns a reason and the caller uses text rules. */
 export async function extractFieldsWithModel(input: { pdf?: Uint8Array; text?: string; filename: string },
@@ -63,6 +97,11 @@ export async function extractFieldsWithModel(input: { pdf?: Uint8Array; text?: s
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return { ok: false, reason: 'Model extraction unavailable (no ANTHROPIC_API_KEY); text rules used' };
   const model = process.env.AP_EXTRACTION_MODEL?.trim() || DEFAULT_EXTRACTION_MODEL;
+  const cacheKey = input.pdf ? `${createHash('sha256').update(input.pdf).digest('hex')}:${model}:${promptVersion()}` : null;
+  if (cacheKey) {
+    const hit = await cachedFields(cacheKey);
+    if (hit) { console.info('Model extraction', JSON.stringify({ file: input.filename, cached: true })); return { ok: true, fields: hit, model }; }
+  }
   const content: unknown[] = [];
   if (input.pdf) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: Buffer.from(input.pdf).toString('base64') } });
   else if (input.text) content.push({ type: 'text', text: `Document "${input.filename}" (extracted text):\n\n${input.text.slice(0, 100000)}` });
@@ -87,13 +126,15 @@ export async function extractFieldsWithModel(input: { pdf?: Uint8Array; text?: s
       if (/authentication|invalid x-api-key/i.test(detail)) message = `API key rejected${message ? ` - ${message}` : ''}`;
       return { ok: false, reason: `Model extraction failed (HTTP ${response.status}${message ? `, ${message.slice(0, 300)}` : ''}); text rules used` };
     }
-    const body = await response.json() as { stop_reason?: string; content?: Array<{ type: string; text?: string }> };
+    const body = await response.json() as { stop_reason?: string; content?: Array<{ type: string; text?: string }>; usage?: { input_tokens?: number; output_tokens?: number } };
+    console.info('Model extraction', JSON.stringify({ file: input.filename, cached: false, model, input_tokens: body.usage?.input_tokens ?? null, output_tokens: body.usage?.output_tokens ?? null }));
     if (body.stop_reason === 'refusal') return { ok: false, reason: 'Model declined to read the document; text rules used' };
     const text = body.content?.filter(c => c.type === 'text').map(c => c.text ?? '').join('') ?? '';
     let fields: ModelFields | undefined;
     try { fields = JSON.parse(text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)) as ModelFields; } catch { fields = undefined; }
     if (!fields || typeof fields.document_type !== 'string') return { ok: false, reason: 'Model extraction returned no fields; text rules used' };
     fields.low_confidence_fields = Array.isArray(fields.low_confidence_fields) ? fields.low_confidence_fields : [];
+    if (cacheKey) await storeFields(cacheKey, model, fields);
     return { ok: true, fields, model };
   } catch (error) {
     return { ok: false, reason: `Model extraction error (${error instanceof Error ? error.name : 'unknown'}); text rules used` };
@@ -127,7 +168,7 @@ function sameSupplier(a: string, b: string): boolean {
   return common / Math.max(ta.size, tb.size) >= 0.6;
 }
 
-export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[]; source: 'model+text' | 'text'; model?: string };
+export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[]; source: 'model+text' | 'text'; model?: string; customerAccountNumber?: string | null };
 
 /** Model value wins; agreement with the text rules makes it confident; disagreement or
  * model low confidence makes it uncertain with a note. Without the model, text rules stand. */
@@ -178,7 +219,8 @@ export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult, 
   const uncertainFields = Object.entries(critical).filter(([, v]) => !v || v.uncertain).map(([k]) => k);
   if (accountBalance?.uncertain) uncertainFields.push('accountBalance');
   return { candidates: { documentType, supplier, reference, invoiceDate, dueDate, grossAmount, currency, accountBalance,
-    amountPaid: text.amountPaid, linkedInvoiceReference: text.linkedInvoiceReference, uncertainFields }, notes, source: 'model+text', model: result.model };
+    amountPaid: text.amountPaid, linkedInvoiceReference: text.linkedInvoiceReference, uncertainFields }, notes, source: 'model+text', model: result.model,
+    customerAccountNumber: typeof f.customer_account_number === 'string' && f.customer_account_number.trim() ? f.customer_account_number.trim() : null };
 }
 
 /** One extraction for every route: text rules always, model when available, merged. */

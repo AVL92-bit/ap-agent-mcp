@@ -5,9 +5,9 @@ import type { PoolClient } from 'pg';
 export function makeApDocumentJournal(client: PoolClient) {
   return {
     /** Outcome of an earlier run for this attachment, if any. */
-    async previous(conversationId: string, attachmentId: string): Promise<{status:string; xeroId:string|null}|null> {
-      const r = await client.query(`SELECT status, xero_id FROM ap_document_journal WHERE conversation_id=$1 AND attachment_id=$2`,[conversationId,attachmentId]);
-      return r.rowCount ? {status:String(r.rows[0].status),xeroId:r.rows[0].xero_id??null} : null;
+    async previous(conversationId: string, attachmentId: string): Promise<{status:string; xeroId:string|null; writeIntent:boolean}|null> {
+      const r = await client.query(`SELECT status, xero_id, write_intent FROM ap_document_journal WHERE conversation_id=$1 AND attachment_id=$2`,[conversationId,attachmentId]);
+      return r.rowCount ? {status:String(r.rows[0].status),xeroId:r.rows[0].xero_id??null,writeIntent:r.rows[0].write_intent===true} : null;
     },
     async begin(conversationId: string, attachmentId: string, sha256: string): Promise<void> {
       if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error('Invalid source digest');

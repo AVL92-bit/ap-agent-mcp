@@ -8,7 +8,7 @@ import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.
 import { extractInvoiceFields } from './model-extraction.js';
 import { extractPdfsFromEml } from './eml-attachments.js';
 import { alignToSupplierNumberFormat, matchesSupplierNumberFormat } from './supplier-number-format.js';
-import { confirmContactByHistoricalPdf } from './xero-review-drafts.js';
+import { confirmContactByHistoricalPdf, accountNumberOnPreviousBills } from './xero-review-drafts.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -196,6 +196,14 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
       command.uncertainFields = command.uncertainFields.filter(f => f !== 'supplier');
       command.reviewNotes = (command.reviewNotes ?? []).filter(n => !n.startsWith('Supplier:'));
       command.infoNotes = [...(command.infoNotes ?? []), 'Supplier confirmed against a previous invoice PDF in Xero'];
+    }
+  }
+  // A customer account number not seen on this supplier's recent bills may be a different
+  // account (e.g. another site or a closed line): drafted, but flagged for finance.
+  if (extraction.customerAccountNumber) {
+    const acct = await accountNumberOnPreviousBills(command.supplierContactId, extraction.customerAccountNumber).catch(() => null);
+    if (acct?.checked && !acct.found) {
+      command.reviewNotes = [...(command.reviewNotes ?? []), `Account number ${extraction.customerAccountNumber} is not on ${command.supplierName ?? 'this supplier'}'s recent invoices (${(acct.compared_with ?? []).join(', ')}); check it is the right account before approving`];
     }
   }
   return command;

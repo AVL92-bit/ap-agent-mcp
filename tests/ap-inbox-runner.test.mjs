@@ -58,3 +58,22 @@ test('Xero rate limit stops the run: no Sheet row, tag or archive for that conve
  assert.deepEqual(f.calls,[]);
  assert.equal(r.items.length,1);
 });
+test('the agent finishes its own interrupted draft (DRAFT, same total, no PDF) by attaching the PDF',async()=>{
+ const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);
+ let attached=0;
+ f.port.journal={previous:async()=>({status:'processing',xeroId:null,writeIntent:true}),begin:async()=>{},claimCreate:async()=>false,complete:async()=>{}};
+ f.xero.lookup=async()=>[{id:'mine',kind:'Invoices',status:'DRAFT',exact:true}];
+ f.xero.existingSummary=async()=>({total:12,date:'2026-11-09',hasPdf:false});
+ f.xero.attachOriginal=async()=>{attached++};
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(attached,1);assert.equal(r.archived,1);
+});
+test('a DRAFT with no PDF that the agent did not create is left alone for finance',async()=>{
+ const f=fixture([{id:'a',subject:'',body:'',attachments:[{id:'i1',filename:'a.pdf',messageId:'m'}]}]);
+ let attached=0;
+ f.xero.lookup=async()=>[{id:'theirs',kind:'Invoices',status:'DRAFT',exact:true}];
+ f.xero.existingSummary=async()=>({total:12,date:'2026-11-09',hasPdf:false});
+ f.xero.attachOriginal=async()=>{attached++};
+ const r=await runApInbox(f.port,f.xero);
+ assert.equal(attached,0);assert.equal(r.archived,0);
+});
