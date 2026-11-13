@@ -34,6 +34,8 @@ export type XeroDraftPort = {
   verifyOriginal?(kind: PurchaseKind, id: string, pdf: OriginalPdf): Promise<boolean>;
   /** Read-only summary of an existing Xero document: total, date and whether any PDF is attached. */
   existingSummary?(kind: PurchaseKind, id: string): Promise<{ total: number | null; date: string | null; hasPdf: boolean }>;
+  /** The agent itself POSTed a draft for this source attachment on an earlier, interrupted run. */
+  ownPendingDraft?: boolean;
 };
 export type DraftOutcome =
   | { status: 'already_in_xero'; kind: PurchaseKind; xeroId: string; xeroStatus?: string; uncertainFields: string[] }
@@ -73,6 +75,17 @@ export async function reconcileCreateAndAttach(command: DraftCommand, port: Xero
         if (existing.total !== null && Math.abs(Math.abs(existing.total) - command.gross) > 0.011) {
           return { status: 'possible_amendment', kind: command.kind, xeroId: id, uncertainFields: command.uncertainFields,
             error: `Possible amended version of invoice ${command.number}: Xero £${Math.abs(existing.total).toFixed(2)}${existing.date ? ` dated ${existing.date}` : ''}, this document £${command.gross.toFixed(2)} dated ${command.invoiceDate}; compare and update manually` };
+        }
+        // The agent's own interrupted draft (same number and total, still DRAFT, no PDF): finish it
+        // by attaching this original PDF. Documents created by anyone else are never changed.
+        if (!existing.hasPdf && port.ownPendingDraft && String(initial[0].status ?? '').toUpperCase() === 'DRAFT') {
+          try {
+            await port.attachOriginal(command.kind, id, command.pdf);
+            if (!port.verifyOriginal || !(await port.verifyOriginal(command.kind, id, command.pdf))) throw new Error('Original PDF not verified after upload');
+            return { status: 'draft_created', kind: command.kind, xeroId: id, uncertainFields: command.uncertainFields };
+          } catch (error) {
+            return { status: 'attachment_failed', kind: command.kind, xeroId: id, uncertainFields: command.uncertainFields, error: String(error) };
+          }
         }
         if (!existing.hasPdf) return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields,
           error: `Existing Xero document ${id} has no PDF attached; finance to attach it (the agent does not change documents already in Xero)` };

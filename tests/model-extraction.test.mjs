@@ -72,3 +72,13 @@ test('Anthropic error type and message are reported (e.g. low credit balance)', 
     text: async () => JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low to access the Anthropic API.' } }) }));
   assert.match(r.reason, /HTTP 400, invalid_request_error: Your credit balance is too low/);
 });
+
+import { mergeModelAndText as mergeForAccount } from '../dist/model-extraction.js';
+import { extractInvoiceCandidates as textForAccount } from '../dist/invoice-candidates.js';
+test('customer account number from the model is carried through the merge', () => {
+  const fields = { document_type:'invoice', supplier_name:'Wavenet Ltd', supplier_evidence:'Wavenet Ltd', invoice_number:'1576614', invoice_number_evidence:'1576614',
+    invoice_date:'2026-07-01', due_date:null, gross_total:235.81, gross_evidence:'235.81', net_total:null, vat_total:null, currency:'GBP', account_balance:null,
+    billed_to:null, customer_account_number:'XLS000708', low_confidence_fields:[], notes:null };
+  const merged = mergeForAccount(textForAccount('Wavenet Ltd\nInvoice 1576614\nTotal £235.81'), { ok:true, fields, model:'m' });
+  assert.equal(merged.customerAccountNumber, 'XLS000708');
+});

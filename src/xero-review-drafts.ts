@@ -170,6 +170,32 @@ async function historicalInvoiceNameMatches(api:Api,contactId:string,incomingPdf
   }
   return {matched:false};
 }
+/** Is this customer account number printed on any of the supplier's three most recent
+ * approved/paid bill PDFs? checked=false when no previous PDF could be read (no flag then). */
+export async function accountNumberOnPreviousBills(contactId:string,accountNumber:string):Promise<{checked:boolean;found:boolean;compared_with?:string[]}> {
+  const key=(s:string)=>s.toLowerCase().replace(/[^a-z0-9]/g,'');
+  const wanted=key(accountNumber);
+  if(wanted.length<4) return {checked:false,found:false};
+  const api=await getPilotXeroReadSessionForLink();
+  const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
+  const response=await xero(api,`Invoices?where=${filter}&order=${encodeURIComponent('Date DESC')}&page=1`);
+  const bills=(Array.isArray(response.Invoices)?response.Invoices:[])
+    .filter((b:any)=>['AUTHORISED','PAID'].includes(String(b.Status)) && b.InvoiceID && String(b.Contact?.ContactID??'').toLowerCase()===contactId.toLowerCase()).slice(0,3);
+  const compared:string[]=[];
+  for(const bill of bills) {
+    const listing=await xero(api,`Invoices/${encodeURIComponent(bill.InvoiceID)}/Attachments`);
+    const attachment=(Array.isArray(listing.Attachments)?listing.Attachments:[]).find((a:any)=>/\.pdf$/i.test(String(a.FileName??'')));
+    if(!attachment) continue;
+    const path=`Invoices/${encodeURIComponent(bill.InvoiceID)}/Attachments/${encodeURIComponent(attachment.FileName)}`;
+    const file=await xeroFetch(API+path,{headers:{Authorization:`Bearer ${api.accessToken}`,'xero-tenant-id':api.tenantId,Accept:'application/pdf'},signal:AbortSignal.timeout(25000)});
+    if(!file.ok) continue;
+    const bytes=Buffer.from(await file.arrayBuffer());
+    if(!bytes.length || bytes.length>15*1024*1024) continue;
+    compared.push(String(bill.InvoiceNumber??bill.InvoiceID));
+    if(key(await pdfText(bytes)).includes(wanted)) return {checked:true,found:true,compared_with:compared};
+  }
+  return {checked:compared.length>0,found:false,compared_with:compared};
+}
 /** Compare the latest approved/paid supplier bill's original PDF, not the contact name. */
 async function latestHistoricalBillingPdf(api:Api,contactId:string):Promise<string|null> {
   const filter=encodeURIComponent(`Type=="ACCPAY"&&Contact.ContactID==Guid("${contactId}")`);
