@@ -69,12 +69,12 @@ export async function reconcileCreateAndAttach(command: DraftCommand, port: Xero
   const found = await port.lookup(command.number);
   const initial = matchForKind(found, command.kind);
   // Finance voided or deleted this supplier's bill with the same number: never re-post it.
-  const removed = initial.length ? [] : found.filter(m => m.kind === command.kind && m.exact && isRemoved(m)
-    && (!m.contactId || !command.supplierContactId || m.contactId.toLowerCase() === command.supplierContactId.toLowerCase()));
+  // Any contact: finance may have moved a closed account to its own (archived) contact.
+  const removed = initial.length ? [] : found.filter(m => m.kind === command.kind && m.exact && isRemoved(m));
   if (removed.length) {
     const r = removed[0];
     return { status: 'possible_amendment', kind: command.kind, xeroId: r.id, uncertainFields: command.uncertainFields,
-      error: `Xero has a ${String(r.status).toLowerCase()} bill ${command.number}${command.supplierName ? ` for ${command.supplierName}` : ''}; not re-posted - check whether it should be re-entered` };
+      error: `Xero has a ${String(r.status).toLowerCase()} bill ${command.number}${r.contactName ? ` under contact "${r.contactName}"` : command.supplierName ? ` for ${command.supplierName}` : ''}; not re-posted - check whether it should be re-entered` };
   }
   if (initial.length > 1) return { status: 'reconciliation_required', kind: command.kind, uncertainFields: command.uncertainFields, error: 'Multiple matching Xero documents' };
   if (initial.length === 1) {
