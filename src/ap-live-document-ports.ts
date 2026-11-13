@@ -8,7 +8,7 @@ import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.
 import { extractInvoiceFields } from './model-extraction.js';
 import { extractPdfsFromEml } from './eml-attachments.js';
 import { alignToSupplierNumberFormat, matchesSupplierNumberFormat } from './supplier-number-format.js';
-import { confirmContactByHistoricalPdf, accountNumberOnPreviousBills } from './xero-review-drafts.js';
+import { confirmContactByHistoricalPdf, accountNumberOnPreviousBills, getXeroLockDate, moveOutOfLockedPeriod } from './xero-review-drafts.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
@@ -197,6 +197,14 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
       command.reviewNotes = (command.reviewNotes ?? []).filter(n => !n.startsWith('Supplier:'));
       command.infoNotes = [...(command.infoNotes ?? []), 'Supplier confirmed against a previous invoice PDF in Xero'];
     }
+  }
+  // Xero refuses any document (even a draft) dated in a locked period: draft it on the first
+  // open day instead and flag the original date for finance.
+  const lock = await getXeroLockDate().catch(() => null);
+  const moved = moveOutOfLockedPeriod(command.invoiceDate, command.dueDate, lock);
+  if (moved.note) {
+    command.invoiceDate = moved.invoiceDate; command.dueDate = moved.dueDate;
+    command.reviewNotes = [...(command.reviewNotes ?? []), moved.note];
   }
   // A customer account number not seen on this supplier's recent bills may be a different
   // account (e.g. another site or a closed line): drafted, but flagged for finance.

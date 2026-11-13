@@ -170,6 +170,31 @@ async function historicalInvoiceNameMatches(api:Api,contactId:string,incomingPdf
   }
   return {matched:false};
 }
+/** Xero lock date (the later of the period and end-of-year lock dates), cached 10 minutes.
+ * Documents dated on or before it cannot be saved, even as drafts. */
+let lockCache:{at:number;date:string|null}|null=null;
+export function xeroDateToIso(v:unknown):string|null {
+  if(typeof v!=='string'||!v) return null;
+  const ms=/\/Date\((\d+)/.exec(v);
+  if(ms) return new Date(Number(ms[1])).toISOString().slice(0,10);
+  return /^\d{4}-\d{2}-\d{2}/.test(v)?v.slice(0,10):null;
+}
+export async function getXeroLockDate():Promise<string|null> {
+  if(lockCache && Date.now()-lockCache.at<10*60*1000) return lockCache.date;
+  const api=await getPilotXeroReadSessionForLink();
+  const org=(await xero(api,'Organisation')).Organisations?.[0]??{};
+  const dates=[xeroDateToIso(org.PeriodLockDate),xeroDateToIso(org.EndOfYearLockDate)].filter((d):d is string=>!!d).sort();
+  lockCache={at:Date.now(),date:dates[dates.length-1]??null};
+  return lockCache.date;
+}
+/** Move a draft out of a locked period: date becomes the first open day; due date never before it. */
+export function moveOutOfLockedPeriod(invoiceDate:string,dueDate:string,lockDate:string|null):{invoiceDate:string;dueDate:string;note?:string} {
+  if(!lockDate || invoiceDate>lockDate) return {invoiceDate,dueDate};
+  const d=new Date(lockDate+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+1);
+  const open=d.toISOString().slice(0,10);
+  return {invoiceDate:open,dueDate:dueDate<open?open:dueDate,
+    note:`Invoice dated ${invoiceDate} falls in a locked Xero period (locked to ${lockDate}); drafted with date ${open} - finance to confirm the date before approving`};
+}
 /** Is this customer account number printed on any of the supplier's three most recent
  * approved/paid bill PDFs? checked=false when no previous PDF could be read (no flag then). */
 export async function accountNumberOnPreviousBills(contactId:string,accountNumber:string):Promise<{checked:boolean;found:boolean;compared_with?:string[]}> {
