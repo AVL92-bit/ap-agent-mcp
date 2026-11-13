@@ -58,6 +58,51 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 }
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
+/** One live inbox run (shared by run_ap_inbox execute and the daily schedule). */
+async function runLiveInbox(limit:{conversationIds?:string[];maxConversations?:number},progress:(m:string)=>void):Promise<Record<string,unknown>> {
+  const fetchFrontPage=async (url:string)=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as any;};
+  const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
+  let runClient: PoolClient | undefined;
+  try {
+    const activeRunClient = await runPool.connect();
+    runClient = activeRunClient;
+    const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
+    if (lock.rows[0]?.acquired !== true) throw new Error('Another AP inbox run holds the PostgreSQL execution lock');
+    await ensureApDocumentJournal(runClient);
+    await ensureApContactIntent(runClient);
+    await ensureApSheetOutbox(runClient);
+    const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
+    const sheetBefore=await sheetOutbox.flush();
+    const {inboxId}=frontConfig();
+    progress('Running inbox');
+    const result=await executeCompleteApInbox({
+      inboxId,
+      fetchFrontPage,
+      makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,activeRunClient),
+      xero:makeLiveXeroDraftPort(),
+      applyTag:async (id,tag)=>{
+        if(tag==='AP Agent reviewed')await applyApFrontTag(id,'reviewed');
+        else if(tag==='Human review')await applyApFrontTag(id,'human_review');
+        else if(tag==='No attachment - Human review')await applyApFrontTag(id,'no_attachment');
+        else throw new Error('Unknown AP Front tag');
+      },
+      archive:archiveApFrontConversation,
+      reportReview:row=>sheetOutbox.enqueue(row),
+      journal:makeApDocumentJournal(runClient),
+      expandEmail:expandFrontEmail,
+      select:all=>selectConversations(all,limit),
+    });
+    const sheetAfter=await sheetOutbox.flush();
+    return {status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}};
+  } finally {
+    if (runClient) {
+      try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
+    }
+    await runPool.end();
+  }
+}
+
+import { startDailySchedule, recentScheduledRuns } from "./ap-schedule.js";
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -863,47 +908,7 @@ pages_scanned: visitedPages.size,
     if (!process.env.DATABASE_URL) return toolFailure('DATABASE_URL required for exclusive inbox execution; no writes performed');
     let job;
     try {
-      job=startRunJob('execute',async progress=>{
-        const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
-        let runClient: PoolClient | undefined;
-        try {
-          const activeRunClient = await runPool.connect();
-          runClient = activeRunClient;
-          const lock = await runClient.query('SELECT pg_try_advisory_lock(928172, 1204) AS acquired');
-          if (lock.rows[0]?.acquired !== true) throw new Error('Another AP inbox run holds the PostgreSQL execution lock');
-          await ensureApDocumentJournal(runClient);
-          await ensureApContactIntent(runClient);
-          await ensureApSheetOutbox(runClient);
-          const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
-          const sheetBefore=await sheetOutbox.flush();
-          const {inboxId}=frontConfig();
-          progress('Running inbox');
-          const result=await executeCompleteApInbox({
-            inboxId,
-            fetchFrontPage,
-            makeDraftCommand:(conversation,attachment)=>makeLiveDraftCommand(conversation,attachment,activeRunClient),
-            xero:makeLiveXeroDraftPort(),
-            applyTag:async (id,tag)=>{
-              if(tag==='AP Agent reviewed')await applyApFrontTag(id,'reviewed');
-              else if(tag==='Human review')await applyApFrontTag(id,'human_review');
-              else if(tag==='No attachment - Human review')await applyApFrontTag(id,'no_attachment');
-              else throw new Error('Unknown AP Front tag');
-            },
-            archive:archiveApFrontConversation,
-            reportReview:row=>sheetOutbox.enqueue(row),
-            journal:makeApDocumentJournal(runClient),
-            expandEmail:expandFrontEmail,
-            select:all=>selectConversations(all,limit),
-          });
-          const sheetAfter=await sheetOutbox.flush();
-          return {status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}};
-        } finally {
-          if (runClient) {
-            try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
-          }
-          await runPool.end();
-        }
-      });
+      job=startRunJob('execute',progress=>runLiveInbox(limit,progress));
     } catch(error){return safeError('AP inbox run could not start; no writes performed',error);}
     return toolResult({status:'execute_started',job_id:job.id,
       next:'Call run_ap_inbox with this job_id to get progress and the result. Inspect for partial writes if the job fails.'});
@@ -2410,6 +2415,24 @@ server.registerTool(
   );
 
   server.registerTool(
+    "get_scheduled_run_history",
+    {
+      title: "Scheduled AP Run History",
+      description: "Read-only. Lists recent daily scheduled inbox runs (date, start/finish, status and counts) and the schedule settings.",
+      inputSchema: { limit: z.number().int().min(1).max(60).optional() },
+    },
+    async ({ limit }) => {
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+      try {
+        return toolResult({ read_only: true, schedule_london_time: process.env.AP_SCHEDULE_LONDON_TIME ?? null,
+          schedule_days: process.env.AP_SCHEDULE_DAYS ?? 'every day', runner_enabled: process.env.AP_INBOX_RUNNER_ENABLED === 'true',
+          runs: await recentScheduledRuns(pool, limit ?? 14) });
+      } catch (error) { return safeError("Scheduled run history read failed", error); }
+      finally { await pool.end(); }
+    }
+  );
+
+  server.registerTool(
     "get_finance_review_rows",
     {
       title: "Read Finance Review Sheet Rows",
@@ -3544,6 +3567,12 @@ import("./pilot-review-register.js")
           console.log(
             "MCP endpoint: /mcp"
           );
+
+          let schedulePool: Pool | undefined;
+          startDailySchedule({
+            pool: () => (schedulePool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 })),
+            run: progress => runLiveInbox({}, progress),
+          });
         }
       );
     } finally {
