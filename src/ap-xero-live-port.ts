@@ -68,7 +68,22 @@ export function makeLiveXeroDraftPort(
         } catch { /* not JSON */ }
         const detail = messages.length ? `: ${[...new Set(messages)].join('; ').slice(0, 400)}` : '';
         // HTTP 400 is a validation rejection: Xero created nothing, so the attempt may be retried.
-        if (response.status === 400) throw new Error(`${XERO_REJECTED} (HTTP 400)${detail}`);
+        if (response.status === 400) {
+          // "not of valid status for modification": Xero matched an existing document with this
+          // number. Find it (any type or status, including voided/deleted) and say which.
+          let clash = '';
+          if (messages.some(m => /not of valid status for modification/i.test(m))) {
+            try {
+              const q = await xeroFetch(`${API}${kind}?${kind === 'Invoices' ? 'InvoiceNumbers' : 'CreditNoteNumbers'}=${encodeURIComponent(command.number)}&Statuses=DRAFT,SUBMITTED,AUTHORISED,PAID,VOIDED,DELETED&includeArchived=true`,
+                { headers: { Authorization: `Bearer ${s.accessToken}`, 'xero-tenant-id': s.tenantId, Accept: 'application/json' }, signal: AbortSignal.timeout(20000) });
+              const docs = q.ok ? ((await q.json()) as any)[kind] ?? [] : [];
+              clash = docs.length
+                ? ` | Existing Xero document(s) numbered ${command.number}: ${docs.slice(0, 3).map((d: any) => `${d.Type ?? kind} ${d.Status} for ${d.Contact?.Name ?? 'unknown contact'} (${d.InvoiceID ?? d.CreditNoteID})`).join('; ')}`
+                : ` | No Xero document numbered ${command.number} found by status search`;
+            } catch { /* diagnostic only */ }
+          }
+          throw new Error(`${XERO_REJECTED} (HTTP 400)${detail}${clash}`);
+        }
         throw new Error(`Xero DRAFT ${kind} POST HTTP ${response.status}${detail}; reconcile before retry`);
       }
       const body = await response.json() as Record<string, any>;
