@@ -83,7 +83,8 @@ contact above **40%** match; no supplier-specific coding; already in Xero. Every
 - **Supplier**: existing Xero contacts only (no new contacts). Legal suffixes, "(DD)", "direct debit" ignored when matching. Unique containment counts as certain unless extra words are entity words (group, holdings, trust…). If uncertain, confirmed against the supplier's previous invoice PDF in Xero.
 - **Coding**: supplier-led from history / contact default. No generic fallback code.
 - **VAT**: none. Tax type `NONE`, gross amount as expense (`config/coding-policies.json`).
-- **Due date** not printed → invoice date + 30 days (info note in the line, not a flag).
+- **Line description** = what the invoice is for (Sonnet summarises the line items, e.g. "GP Voice users and Sogea 80/20 line rental, October 2026"); fallback "Supplier invoice <number>". Agent notes (due date defaulted, supplier confirmed…) go to the bill's **History & Notes** in Xero, not the line.
+- **Due date** not printed → invoice date + 30 days (History note, not a flag).
 - **Invoice number** follows the supplier's existing Xero format (e.g. Henry Schein `RI 659…`).
 - **Already in Xero, same total** (±0.01) → treated as done; never uploads to someone else's document.
 - **Same number, different total** → "Not posted - check Xero" row (possible amended version); not drafted.

@@ -198,6 +198,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
       command.infoNotes = [...(command.infoNotes ?? []), 'Supplier confirmed against a previous invoice PDF in Xero'];
     }
   }
+  if (extraction.lineDescription) command.description = extraction.lineDescription;
   // Xero refuses any document (even a draft) dated in a locked period: draft it on the first
   // open day instead and flag the original date for finance.
   const lock = await getXeroLockDate().catch(() => null);

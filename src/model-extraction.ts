@@ -25,6 +25,7 @@ export type ModelFields = {
   account_balance: number | null;
   billed_to: string | null;
   customer_account_number: string | null;
+  line_description: string | null;
   low_confidence_fields: string[];
   notes: string | null;
 };
@@ -45,11 +46,12 @@ const FIELD_SCHEMA = {
     account_balance: nullable({ type: 'number' }),
     billed_to: nullable({ type: 'string' }),
     customer_account_number: nullable({ type: 'string' }),
+    line_description: nullable({ type: 'string' }),
     low_confidence_fields: { type: 'array', items: { type: 'string', enum: ['document_type', 'supplier_name', 'invoice_number', 'invoice_date', 'due_date', 'gross_total', 'currency'] } },
     notes: nullable({ type: 'string' }),
   },
   required: ['document_type', 'supplier_name', 'supplier_evidence', 'invoice_number', 'invoice_number_evidence', 'invoice_date', 'due_date',
-    'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'currency', 'account_balance', 'billed_to', 'customer_account_number', 'low_confidence_fields', 'notes'],
+    'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'currency', 'account_balance', 'billed_to', 'customer_account_number', 'line_description', 'low_confidence_fields', 'notes'],
 } as const;
 
 const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Surgery (a GP practice in Coventry, UK). Read the attached supplier document and return its fields as JSON matching the schema. Dates are ISO YYYY-MM-DD. Rules:
@@ -59,6 +61,7 @@ const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Sur
 - invoice_date / due_date: ISO YYYY-MM-DD. If no due date is printed, null.
 - gross_total: the total payable for THIS document's charges including VAT, as a positive number. Never use a brought-forward, carried-forward or account balance as the gross. If the account is in credit, still give this period's charges as gross_total and put the account balance (negative if in credit) in account_balance.
 - net_total and vat_total when printed; otherwise null.
+- line_description: what the supplier is charging for, taken from the document's line items, as a short accounting description (max 100 characters): goods or services, plus the period or site when printed. Examples: "GP Voice users and Sogea 80/20 line rental, October 2026"; "Boiler service, 102 St Georges Road"; "Payroll bureau services, October 2026". Never describe the email, the payment method or the document type. null if no charges are listed.
 - customer_account_number: the account/customer number the supplier uses for the practice (e.g. "Account No", "Customer Ref", "Account number"), exactly as printed. Not the invoice number. null if none is printed.
 - List in low_confidence_fields any field you are not sure of. Quote evidence exactly as printed. Do not guess values that are not on the document: use null.`;
 
@@ -168,7 +171,14 @@ function sameSupplier(a: string, b: string): boolean {
   return common / Math.max(ta.size, tb.size) >= 0.6;
 }
 
-export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[]; source: 'model+text' | 'text'; model?: string; customerAccountNumber?: string | null };
+/** Short, single-line accounting description from the model (max 120 characters). */
+export function cleanLineDescription(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const t = v.replace(/\s+/g, ' ').trim();
+  if (t.length < 3) return null;
+  return t.length > 120 ? `${t.slice(0, 117).trimEnd()}...` : t;
+}
+export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[]; source: 'model+text' | 'text'; model?: string; customerAccountNumber?: string | null; lineDescription?: string | null };
 
 /** Model value wins; agreement with the text rules makes it confident; disagreement or
  * model low confidence makes it uncertain with a note. Without the model, text rules stand. */
@@ -220,7 +230,8 @@ export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult, 
   if (accountBalance?.uncertain) uncertainFields.push('accountBalance');
   return { candidates: { documentType, supplier, reference, invoiceDate, dueDate, grossAmount, currency, accountBalance,
     amountPaid: text.amountPaid, linkedInvoiceReference: text.linkedInvoiceReference, uncertainFields }, notes, source: 'model+text', model: result.model,
-    customerAccountNumber: typeof f.customer_account_number === 'string' && f.customer_account_number.trim() ? f.customer_account_number.trim() : null };
+    customerAccountNumber: typeof f.customer_account_number === 'string' && f.customer_account_number.trim() ? f.customer_account_number.trim() : null,
+    lineDescription: cleanLineDescription(f.line_description) };
 }
 
 /** One extraction for every route: text rules always, model when available, merged. */
