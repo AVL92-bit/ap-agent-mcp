@@ -75,6 +75,8 @@ Railway restarts; nothing is written until set back to `true`.
 6. Front tag + archive decision; Sheet row when needed (via `ap_sheet_outbox`, retried until delivered).
 
 ### Agreed rules (owner decisions; keep them)
+**Never** (owner decision): manual journals, payments, approving/submitting, creating contacts. The Xero OAuth scopes deliberately exclude journals and payments (`offline_access accounting.invoices accounting.attachments accounting.attachments.read accounting.contacts.read accounting.settings.read`); do not add them.
+
 **The only blockers** (no draft): not an invoice/credit note; no gross amount; no existing Xero
 contact above **40%** match; no supplier-specific coding; already in Xero. Everything else is a note.
 
