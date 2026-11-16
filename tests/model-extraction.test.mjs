@@ -82,3 +82,11 @@ test('customer account number from the model is carried through the merge', () =
   const merged = mergeForAccount(textForAccount('Wavenet Ltd\nInvoice 1576614\nTotal £235.81'), { ok:true, fields, model:'m' });
   assert.equal(merged.customerAccountNumber, 'XLS000708');
 });
+
+import { cleanLineDescription } from '../dist/model-extraction.js';
+test('line description is single-line, trimmed and capped', () => {
+  assert.equal(cleanLineDescription('  Boiler service,\n 102 St Georges Road '), 'Boiler service, 102 St Georges Road');
+  assert.equal(cleanLineDescription(null), null);
+  assert.equal(cleanLineDescription('ab'), null);
+  assert.equal(cleanLineDescription('x'.repeat(200)).length, 120);
+});

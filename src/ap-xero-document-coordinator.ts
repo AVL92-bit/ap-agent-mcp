@@ -21,8 +21,10 @@ export type DraftCommand = {
   uncertainFields: string[];
   /** Review notes for the Sheet (e.g. model and text rules disagree). Never blockers. */
   reviewNotes?: string[];
-  /** Informational notes written on the Xero draft line; never a reason for Human Review. */
+  /** Informational agent notes, written to the draft's History & Notes in Xero; never a reason for Human Review. */
   infoNotes?: string[];
+  /** What the invoice is for (from the document's line items); the Xero line description. */
+  description?: string;
 };
 export type XeroDraftPort = {
   lookup(number: string): Promise<XeroPurchaseMatch[]>;

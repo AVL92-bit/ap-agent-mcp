@@ -43,7 +43,7 @@ export function makeLiveXeroDraftPort(
         CurrencyCode: 'GBP',
         LineAmountTypes: 'Exclusive',
         LineItems: [grossExpenseLine({
-          inboxId: INBOX, description: [`${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`, ...(command.infoNotes ?? [])].join(' - '),
+          inboxId: INBOX, description: command.description?.trim() || `${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`,
           gross: command.gross, accountCode: command.accountCode,
         })],
       };
@@ -92,6 +92,15 @@ export function makeLiveXeroDraftPort(
       if (!id || created.Status !== 'DRAFT' || created.HasErrors || created.ValidationErrors?.length) {
         throw new Error('Xero DRAFT response indeterminate; reconcile before retry');
       }
+      // Agent notes go to the draft's History & Notes, keeping the line description about the
+      // invoice itself. Best effort: a failure here never affects the draft.
+      const notes = ['Created as DRAFT by AP agent', ...(command.infoNotes ?? [])].join('. ').slice(0, 450);
+      await xeroFetch(`${API}${kind}/${encodeURIComponent(String(id))}/History`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${s.accessToken}`, 'xero-tenant-id': s.tenantId, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ HistoryRecords: [{ Details: notes }] }),
+        signal: AbortSignal.timeout(20000),
+      }).then(r => { if (!r.ok) console.warn('Xero history note failed', r.status); }).catch(e => console.warn('Xero history note failed', String(e)));
       return String(id);
     },
     async existingSummary(kind, id) {
