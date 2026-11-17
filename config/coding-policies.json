@@ -19,5 +19,11 @@
     }
   },
   "vat_policy_scope": "front_inbox_id",
-  "unconfigured_inbox_behavior": "block_draft_creation"
+  "unconfigured_inbox_behavior": "block_draft_creation",
+  "statement_is_invoice_suppliers": {
+    "_comment": "Suppliers whose statements ARE their invoices (owner decision). A statement from these suppliers is drafted as an invoice: statement number = invoice number, statement total = gross.",
+    "suppliers": [
+      "Lantum"
+    ]
+  }
 }
