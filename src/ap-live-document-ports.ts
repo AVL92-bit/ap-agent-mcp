@@ -8,6 +8,7 @@ import { buildDraftFromAvailableCandidates } from './ap-draft-candidate-command.
 import { extractInvoiceFields } from './model-extraction.js';
 import { extractPdfsFromEml } from './eml-attachments.js';
 import { alignToSupplierNumberFormat, matchesSupplierNumberFormat } from './supplier-number-format.js';
+import { statementInvoiceSupplier } from './supplier-document-rules.js';
 import { confirmContactByHistoricalPdf, accountNumberOnPreviousBills, getXeroLockDate, moveOutOfLockedPeriod } from './xero-review-drafts.js';
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
@@ -90,12 +91,22 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
       merged.notes.push(`Invoice number "${ref.value}" differs from the number in the filename ${pdf.filename} - verify`);
     }
   }
+  // Owner rule: for some suppliers (Lantum) the statement IS the invoice.
+  let statementAsInvoice: string | null = null;
+  if (merged.candidates.documentType.value === 'statement') {
+    statementAsInvoice = statementInvoiceSupplier(merged.candidates.supplier?.value, text);
+    if (statementAsInvoice) {
+      merged.candidates.documentType = { ...merged.candidates.documentType, value: 'invoice', uncertain: false };
+      merged.candidates.uncertainFields = merged.candidates.uncertainFields.filter(f => f !== 'documentType');
+      merged.notes = merged.notes.filter(n => !/^Document type:/.test(n));
+    }
+  }
   const type = merged.candidates.documentType.value;
   if (type==='receipt') throw new DocumentNeedsHumanReview('supporting_document','Receipt: supporting document only; never posted to Xero');
   if (type!=='invoice' && type!=='credit_note') throw new DocumentNeedsHumanReview('not_invoice',`Not an invoice or credit note (${type})`);
   if (!merged.candidates.grossAmount) throw new DocumentNeedsHumanReview('unclear',
     ['No gross amount found on the document; cannot draft', ...merged.notes].join(' | '));
-  return {...merged, text};
+  return {...merged, text, statementAsInvoice};
 }
 
 const CACHE_MS = 10 * 60 * 1000;
@@ -199,6 +210,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     }
   }
   if (extraction.lineDescription) command.description = extraction.lineDescription;
+  if (extraction.statementAsInvoice) command.infoNotes = [...(command.infoNotes ?? []), `${extraction.statementAsInvoice} statement drafted as the invoice (statements are this supplier's invoices)`];
   // Xero refuses any document (even a draft) dated in a locked period: draft it on the first
   // open day instead and flag the original date for finance.
   const lock = await getXeroLockDate().catch(() => null);

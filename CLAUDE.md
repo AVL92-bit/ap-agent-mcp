@@ -82,6 +82,7 @@ contact above **40%** match; no supplier-specific coding; already in Xero. Every
 
 - **Receipts** are supporting documents only: never posted, no Sheet row.
 - **Statements / letters / forms** → Sheet "Not an invoice" + Human Review.
+- **Statement = invoice suppliers** (`config/coding-policies.json` → `statement_is_invoice_suppliers`, currently **Lantum**): their statements are drafted as invoices (statement number = invoice number, statement total = gross), with a History note. Add suppliers there, not in code.
 - **Supplier**: existing Xero contacts only (no new contacts). Legal suffixes, "(DD)", "direct debit" ignored when matching. Unique containment counts as certain unless extra words are entity words (group, holdings, trust…). If uncertain, confirmed against the supplier's previous invoice PDF in Xero.
 - **Coding**: supplier-led from history / contact default. No generic fallback code.
 - **VAT**: none. Tax type `NONE`, gross amount as expense (`config/coding-policies.json`).
