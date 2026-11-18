@@ -58,8 +58,21 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 }
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
-/** One live inbox run (shared by run_ap_inbox execute and the daily schedule). */
-async function runLiveInbox(limit:{conversationIds?:string[];maxConversations?:number},progress:(m:string)=>void):Promise<Record<string,unknown>> {
+import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull } from "./companies.js";
+/** The company named by an optional `company` key; with none given, the legacy env-configured company. */
+function resolveCompany(key?:string):Company {
+  const c=key?companyByKey(key):currentCompany();
+  if(!c) throw new Error(`Unknown company "${key}"`);
+  return c;
+}
+const companyKeySchema=()=>z.string().regex(/^[a-z0-9-]{2,40}$/).optional();
+/** One live inbox run for one company (shared by run_ap_inbox execute and the daily schedule).
+ * The company is the only source of the inbox and Xero organisation used for the whole run. */
+function runLiveInbox(company:Company,limit:{conversationIds?:string[];maxConversations?:number},progress:(m:string)=>void):Promise<Record<string,unknown>> {
+  return runAsCompany(company,()=>runLiveInboxForCurrentCompany(limit,progress));
+}
+async function runLiveInboxForCurrentCompany(limit:{conversationIds?:string[];maxConversations?:number},progress:(m:string)=>void):Promise<Record<string,unknown>> {
+  const company=currentCompany();
   const fetchFrontPage=async (url:string)=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as any;};
   const runPool = new Pool({connectionString:process.env.DATABASE_URL,max:1,connectionTimeoutMillis:5000});
   let runClient: PoolClient | undefined;
@@ -74,7 +87,7 @@ async function runLiveInbox(limit:{conversationIds?:string[];maxConversations?:n
     const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
     const sheetBefore=await sheetOutbox.flush();
     const {inboxId}=frontConfig();
-    progress('Running inbox');
+    progress(`Running inbox for ${company.name}`);
     const result=await executeCompleteApInbox({
       inboxId,
       fetchFrontPage,
@@ -87,13 +100,13 @@ async function runLiveInbox(limit:{conversationIds?:string[];maxConversations?:n
         else throw new Error('Unknown AP Front tag');
       },
       archive:archiveApFrontConversation,
-      reportReview:row=>sheetOutbox.enqueue(row),
+      reportReview:row=>sheetOutbox.enqueue({...row,company:company.name}),
       journal:makeApDocumentJournal(runClient),
       expandEmail:expandFrontEmail,
       select:all=>selectConversations(all,limit),
     });
     const sheetAfter=await sheetOutbox.flush();
-    return {status:"completed",...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}};
+    return {status:"completed",company:company.key,...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}};
   } finally {
     if (runClient) {
       try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
@@ -102,6 +115,15 @@ async function runLiveInbox(limit:{conversationIds?:string[];maxConversations?:n
   }
 }
 
+/** The daily run: every live company in turn. One company failing never stops the others. */
+async function runAllLiveCompanies(progress:(m:string)=>void):Promise<Record<string,unknown>> {
+  const companies:Record<string,unknown>={};
+  for (const company of liveCompanies()) {
+    try { companies[company.key]=await runLiveInbox(company,{},m=>progress(`[${company.key}] ${m}`)); }
+    catch(error){ console.error(`Scheduled AP run failed for ${company.key}`,String(error)); companies[company.key]={status:'failed',error:String(error).slice(0,500)}; }
+  }
+  return {companies};
+}
 import { startDailySchedule, recentScheduledRuns } from "./ap-schedule.js";
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
@@ -141,7 +163,8 @@ function toolFailure(
 
 function frontConfig() {
   const token = process.env.FRONT_API_TOKEN;
-  const inboxId = process.env.FRONT_ENABLED_INBOX_ID;
+  // Inside a company run this is that company's inbox; otherwise the legacy env-configured one.
+  const inboxId = currentCompanyOrNull()?.frontInboxId ?? process.env.FRONT_ENABLED_INBOX_ID;
 
   if (!token || !inboxId) {
     throw new Error(
@@ -846,12 +869,13 @@ pages_scanned: visitedPages.size,
   // have been connected and end-to-end verified.
   server.registerTool("scan_ap_inbox_complete", {
     title: "Scan complete AP inbox (read only)",
-    description: "Enumerate all unassigned AP conversations, all message pages and all attachment identities. No Front, Xero or Sheet writes.",
-    inputSchema: {},
-  }, async () => {
+    description: "Enumerate all unassigned AP conversations, all message pages and all attachment identities. No Front, Xero or Sheet writes. Optional company key (see config/companies.json); default is the St George's inbox.",
+    inputSchema: {company:companyKeySchema()},
+  }, async ({company}) => {
     try {
+      const conversations = await runAsCompany(resolveCompany(company), async () => {
       const { inboxId } = frontConfig();
-      const conversations = await scanApFrontInbox({
+      return await scanApFrontInbox({
         inboxId,
         fetchPage: async (url) => {
           const response = await frontGet(url);
@@ -859,6 +883,7 @@ pages_scanned: visitedPages.size,
           return await response.json() as {_results?: unknown[]; _pagination?: {next?: string | null}};
         },
       });
+      }, 'read');
       return toolResult({status:"ok",read_only:true,complete:true,
         conversations:conversations.length,
         attachments:conversations.reduce((sum,c)=>sum+c.attachments.length,0),
@@ -875,16 +900,19 @@ pages_scanned: visitedPages.size,
     inputSchema: {execute:z.boolean().default(false),dry_run:z.boolean().default(false),
       conversation_ids:z.array(z.string().regex(/^cnv_[A-Za-z0-9_-]+$/)).max(100).optional(),
       max_conversations:z.number().int().min(1).max(1000).optional(),
+      company:companyKeySchema(),
       job_id:z.string().regex(/^job_[0-9a-f-]{36}$/).optional()},
-  }, async ({execute,dry_run,conversation_ids,max_conversations,job_id}) => {
+  }, async ({execute,dry_run,conversation_ids,max_conversations,company:companyKey,job_id}) => {
     if (job_id) {
       const job=getRunJob(job_id);
       return job ? toolResult(job) : toolFailure('Unknown job_id (jobs are kept in memory until the server restarts)');
     }
     const limit={conversationIds:conversation_ids,maxConversations:max_conversations};
     const fetchFrontPage=async (url:string)=>{const r=await frontGet(url);if(!r.ok)throw new Error(`Front scan HTTP ${r.status}`);return await r.json() as any;};
+    let company:Company;
+    try { company=resolveCompany(companyKey); } catch(error){return safeError('AP inbox run could not start; no writes performed',error);}
     if (dry_run) {
-      const job=startRunJob('dry_run',async progress=>{
+      const job=startRunJob('dry_run',progress=>runAsCompany(company,async ()=>{
         const {inboxId}=frontConfig();
         progress('Scanning Front inbox');
         const scanned=await scanApFrontInbox({inboxId,fetchPage:fetchFrontPage});
@@ -899,8 +927,8 @@ pages_scanned: visitedPages.size,
             previous:pool?async (c,a)=>{const r=await pool.query(`SELECT status,xero_id FROM ap_document_journal WHERE conversation_id=$1 AND attachment_id=$2`,[c,a]).catch(()=>({rowCount:0,rows:[]} as any));return r.rowCount?{status:String(r.rows[0].status),xeroId:r.rows[0].xero_id??null}:null;}:undefined,
             onProgress:progress});
         } finally { await pool?.end(); }
-      });
-      return toolResult({status:'dry_run_started',job_id:job.id,writes_performed:0,
+      },'read'));
+      return toolResult({status:'dry_run_started',company:company.key,job_id:job.id,writes_performed:0,
         next:'Call run_ap_inbox with this job_id to get progress and the report.'});
     }
     if (!execute) return toolResult({status:"dry_run_only",message:"Set dry_run=true to see what a run would do, or execute=true to run the server-controlled AP inbox. No writes performed."});
@@ -908,9 +936,9 @@ pages_scanned: visitedPages.size,
     if (!process.env.DATABASE_URL) return toolFailure('DATABASE_URL required for exclusive inbox execution; no writes performed');
     let job;
     try {
-      job=startRunJob('execute',progress=>runLiveInbox(limit,progress));
+      job=startRunJob('execute',progress=>runLiveInbox(company,limit,progress));
     } catch(error){return safeError('AP inbox run could not start; no writes performed',error);}
-    return toolResult({status:'execute_started',job_id:job.id,
+    return toolResult({status:'execute_started',company:company.key,job_id:job.id,
       next:'Call run_ap_inbox with this job_id to get progress and the result. Inspect for partial writes if the job fails.'});
   });
 
@@ -2401,16 +2429,38 @@ server.registerTool(
         gross: z.number().optional(),
         filename: z.string().max(200).optional(),
         note: z.string().min(3).max(500),
+        company: companyKeySchema(),
       },
     },
-    async ({ conversation_id, attachment_id, xero_invoice_id, supplier, reference, gross, filename, note }) => {
+    async ({ conversation_id, attachment_id, xero_invoice_id, supplier, reference, gross, filename, note, company }) => {
       const a = { conversation_id, attachment_id, xero_invoice_id, supplier, reference, gross, filename, note };
       if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
       try {
+        const companyName = resolveCompany(company).name; // column K: which company this row belongs to
         await appendApInboxException({ conversationId: a.conversation_id, attachmentId: a.attachment_id, xeroId: a.xero_invoice_id, outcome: 'draft_uncertain',
-          reason: a.note, filename: a.filename, supplier: a.supplier, reference: a.reference, gross: a.gross });
+          reason: a.note, filename: a.filename, supplier: a.supplier, reference: a.reference, gross: a.gross, company: companyName });
         return toolResult({ status: 'sheet_row_written_or_already_present', conversation_id: a.conversation_id, attachment_id: a.attachment_id });
       } catch (error) { return safeError("Finance review note failed", error); }
+    }
+  );
+
+  server.registerTool(
+    "list_xero_connections",
+    {
+      title: "List Xero Connections",
+      description: "Read-only. Lists the Xero organisations authorised through /xero/connect (connection id, tenant id, exact organisation name, connected date) and which configured company each one matches. No tokens are read or returned and Xero is not called. Use it to fill in a company's tenant ID and name in config/companies.json.",
+      inputSchema: {},
+    },
+    async () => {
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+      try {
+        const r = await pool.query(`SELECT connection_id, tenant_id, tenant_name, tenant_type, connected_at FROM xero_oauth_connections ORDER BY connected_at`);
+        const companies = loadCompanies();
+        return toolResult({ read_only: true, connections: r.rows.map((c: any) => ({ connection_id: c.connection_id, tenant_id: c.tenant_id,
+          tenant_name: c.tenant_name, tenant_type: c.tenant_type, connected_at: c.connected_at,
+          matches_company: companies.find(x => x.xeroTenantId === c.tenant_id)?.key ?? null })) });
+      } catch (error) { return safeError("Xero connection listing failed", error); }
+      finally { await pool.end(); }
     }
   );
 
@@ -3571,7 +3621,7 @@ import("./pilot-review-register.js")
           let schedulePool: Pool | undefined;
           startDailySchedule({
             pool: () => (schedulePool ??= new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 })),
-            run: progress => runLiveInbox({}, progress),
+            run: progress => runAllLiveCompanies(progress),
           });
         }
       );

@@ -1,6 +1,7 @@
 import { xeroFetch } from "./xero-rate-limit.js";
 import { createDecipheriv, createCipheriv, randomBytes } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
+import { currentCompany } from "./companies.js";
 
 const EXPECTED_INBOX_ID = "inb_bys7q";
 const EXPECTED_TENANT_NAME = "St George's Road Surgery";
@@ -903,20 +904,22 @@ export type PilotXeroWriteSession = {
 };
 
 const SESSION_REUSE_MS = 10 * 60 * 1000;
-let verifiedSession: { tenantId: string; accessToken: string; verifiedAt: number; tokenExpiresAt: number } | null = null;
+/** Verified sessions are kept per Xero organisation so one company's session is never reused for another. */
+const verifiedSessions = new Map<string, { tenantId: string; accessToken: string; verifiedAt: number; tokenExpiresAt: number }>();
 
 async function getPilotXeroSession(
   readOnly: boolean
 ): Promise<PilotXeroWriteSession> {
 
-  const expectedTenantId =
-    "45a1074b-b172-4f49-a192-f0a8e293b54d";
+  // The company this call is working for: the run's company, or the legacy env-configured one.
+  // Throws if it is disabled, not fully configured, or the env values disagree with the registry.
+  const company = currentCompany();
+  const expectedTenantId = company.xeroTenantId;
+  const expectedTenantName = company.xeroTenantName;
 
   if (
  (!readOnly &&
   process.env.XERO_DRAFT_WRITES_ENABLED !== "true") ||
-    process.env.FRONT_ENABLED_INBOX_ID !== EXPECTED_INBOX_ID ||
-    process.env.XERO_PILOT_TENANT_ID !== expectedTenantId ||
     !process.env.DATABASE_URL ||
     !process.env.XERO_CLIENT_ID ||
     !process.env.XERO_CLIENT_SECRET
@@ -927,6 +930,7 @@ async function getPilotXeroSession(
   // Reuse a recently verified session: the connection/organisation checks cost two Xero API
   // calls each time and count against the daily limit. Env gates above are still applied per call.
   const now = Date.now();
+  const verifiedSession = verifiedSessions.get(expectedTenantId);
   if (verifiedSession && now < verifiedSession.verifiedAt + SESSION_REUSE_MS && now < verifiedSession.tokenExpiresAt - 5 * 60 * 1000) {
     return { tenantId: verifiedSession.tenantId, accessToken: verifiedSession.accessToken };
   }
@@ -958,7 +962,7 @@ async function getPilotXeroSession(
     if (
       result.rows.length !== 1 ||
       connection.tenant_id !== expectedTenantId ||
-      connection.tenant_name !== EXPECTED_TENANT_NAME ||
+      connection.tenant_name !== expectedTenantName ||
       connection.tenant_type !== "ORGANISATION" ||
       connection.enabled !== false ||
       !connection.connection_id
@@ -1069,7 +1073,7 @@ async function getPilotXeroSession(
         (item) =>
           item.id === connection.connection_id &&
           item.tenantId === expectedTenantId &&
-          item.tenantName === EXPECTED_TENANT_NAME &&
+          item.tenantName === expectedTenantName &&
           item.tenantType === "ORGANISATION"
       ).length !== 1
     ) {
@@ -1098,23 +1102,23 @@ async function getPilotXeroSession(
 
     if (
       organisation.Organisations?.length !== 1 ||
-      organisation.Organisations[0].Name !== EXPECTED_TENANT_NAME
+      organisation.Organisations[0].Name !== expectedTenantName
     ) {
       throw new Error("Xero organisation verification failed");
     }
 
-    verifiedSession = {
+    verifiedSessions.set(expectedTenantId, {
       tenantId: expectedTenantId,
       accessToken: tokens.access_token,
       verifiedAt: Date.now(),
       tokenExpiresAt: tokens.obtained_at + (typeof tokens.expires_in === "number" ? tokens.expires_in : 0) * 1000,
-    };
+    });
     return {
       tenantId: expectedTenantId,
       accessToken: tokens.access_token,
     };
   } catch (error) {
-    verifiedSession = null;
+    verifiedSessions.delete(expectedTenantId);
     await client.query("ROLLBACK").catch(() => {});
     throw error;
   } finally {

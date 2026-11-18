@@ -1,0 +1,21 @@
+{
+  "_comment": "One entry per company/practice. frontInboxId and xeroTenantId are identifiers, not secrets. status: off = never touched; dry_run = may be scanned and dry-run (reads only), never written to or scheduled; live = included in the daily schedule and execute runs. A company that is not off must have its Xero tenant ID and name. Each Front inbox may only ever write to its own Xero organisation; xeroTenantName must match the organisation name Xero reports exactly. VAT treatment for each inbox is set in coding-policies.json.",
+  "companies": [
+    {
+      "key": "st-georges",
+      "name": "St George's Road Surgery",
+      "frontInboxId": "inb_bys7q",
+      "xeroTenantId": "45a1074b-b172-4f49-a192-f0a8e293b54d",
+      "xeroTenantName": "St George's Road Surgery",
+      "status": "live"
+    },
+    {
+      "key": "lamberhurst",
+      "name": "Lamberhurst",
+      "frontInboxId": "inb_bys46",
+      "xeroTenantId": null,
+      "xeroTenantName": null,
+      "status": "off"
+    }
+  ]
+}

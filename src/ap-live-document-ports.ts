@@ -14,8 +14,7 @@ import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
 
-const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
-const INBOX = 'inb_bys7q';
+import { currentCompany } from './companies.js';
 const MAX_BYTES = 15 * 1024 * 1024;
 const MAX_PAGES = 100;
 const API = 'https://api.xero.com/api.xro/2.0';
@@ -110,12 +109,15 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
 }
 
 const CACHE_MS = 10 * 60 * 1000;
-let xeroCache: {at:number; contacts:Array<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>;
-  accounts:Array<{Code?:string;Name?:string;Type?:string;Status?:string}>; bills:unknown[]|null} | null = null;
+type XeroCache = {at:number; contacts:Array<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>;
+  accounts:Array<{Code?:string;Name?:string;Type?:string;Status?:string}>; bills:unknown[]|null};
+/** Reference data is cached per Xero organisation: one company's contacts must never be offered to another. */
+const xeroCaches = new Map<string, XeroCache>();
 
 /** Live read-only Xero candidate listing. Never creates supplier contacts. */
 export async function makeLiveDraftCommand(conversation: InboxConversation, attachment: InboxAttachment, _client?: PoolClient): Promise<DraftCommand> {
-  if (process.env.FRONT_ENABLED_INBOX_ID !== INBOX || process.env.XERO_PILOT_TENANT_ID !== TENANT || process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
+  const company = currentCompany();
+  if (process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
     throw new Error('AP draft-only live processing is disabled for this inbox/tenant');
   }
   const frontToken = process.env.FRONT_API_TOKEN;
@@ -124,7 +126,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   const extraction = await extractPdfCandidates(pdf);
   const candidates = extraction.candidates;
   const session = await getPilotXeroWriteSession();
-  if (session.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
+  if (session.tenantId !== company.xeroTenantId) throw new Error('Unexpected Xero tenant');
   const headers = {Authorization:`Bearer ${session.accessToken}`,'xero-tenant-id':session.tenantId,Accept:'application/json'};
   async function readPaged<T>(resource:string,key:string):Promise<T[]> {
     const all:T[]=[];
@@ -141,6 +143,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
   }
   // Xero reference data is read once and reused for the run (10-minute cache).
   // Accounts is not paginated in Xero: one request returns the whole chart.
+  let xeroCache = xeroCaches.get(session.tenantId);
   if (!xeroCache || Date.now() - xeroCache.at > CACHE_MS) {
     const accountsResponse=await xeroFetch(`${API}/Accounts`,{headers,signal:AbortSignal.timeout(25000)});
     if(!accountsResponse.ok) throw new Error(`Xero Accounts read HTTP ${accountsResponse.status}`);
@@ -149,6 +152,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     xeroCache={at:Date.now(),
       contacts:await readPaged<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>('Contacts','Contacts'),
       accounts:accountsBody.Accounts,bills:null};
+    xeroCaches.set(session.tenantId, xeroCache);
   }
   const cache=xeroCache;
   const rawContacts=cache.contacts;

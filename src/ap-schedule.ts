@@ -32,6 +32,20 @@ export async function recentScheduledRuns(pool: Pool, limit = 14): Promise<unkno
 
 /** Summary kept for each scheduled run (counts only, no document contents). */
 export function summariseRun(result: Record<string, any>): Record<string, unknown> {
+  // Multi-company run: { companies: { <key>: <single-company result> | {status:'failed', error} } }.
+  // Top-level counts are totals across companies; `by_company` keeps each company's own numbers
+  // so the failure/query rate can be read per inbox.
+  if (result.companies && typeof result.companies === 'object') {
+    const by: Record<string, Record<string, unknown>> = {};
+    const failedCompanies: string[] = [];
+    for (const [key, r] of Object.entries(result.companies as Record<string, Record<string, any>>)) {
+      if (r?.status === 'failed') { failedCompanies.push(key); by[key] = { status: 'failed', error: String(r.error ?? '').slice(0, 300) }; }
+      else by[key] = summariseRun(r);
+    }
+    const sum = (field: string) => Object.values(by).reduce((n, s) => n + (typeof s[field] === 'number' ? s[field] as number : 0), 0);
+    return { conversations: sum('conversations'), documents: sum('documents'), archived: sum('archived'), left_open: sum('left_open'), failures: sum('failures'),
+      stopped_early: Object.values(by).some(s => s.stopped_early) ? true : null, failed_companies: failedCompanies, by_company: by };
+  }
   const items: any[] = Array.isArray(result.items) ? result.items : [];
   return { conversations: result.conversations ?? items.length, documents: result.documents ?? null, archived: result.archived ?? null,
     left_open: items.filter(i => !i.archived).length, failures: items.reduce((n, i) => n + (i.failures?.length ?? 0), 0),
@@ -61,7 +75,7 @@ export function startDailySchedule(deps: { pool: () => Pool; run: (progress: (m:
         const result = await deps.run(m => console.log(`Scheduled AP run: ${m}`));
         const summary = summariseRun(result);
         await pool.query(`UPDATE ap_scheduled_runs SET finished_at=now(), status=$2, summary=$3 WHERE run_date=$1`,
-          [now.date, summary.stopped_early ? 'stopped_early' : 'completed', JSON.stringify(summary)]);
+          [now.date, summary.stopped_early ? 'stopped_early' : (Array.isArray(summary.failed_companies) && summary.failed_companies.length ? 'completed_with_errors' : 'completed'), JSON.stringify(summary)]);
         console.log(`Scheduled AP run finished ${JSON.stringify(summary)}`);
       } catch (error) {
         await pool.query(`UPDATE ap_scheduled_runs SET finished_at=now(), status='failed', summary=$2 WHERE run_date=$1`,
