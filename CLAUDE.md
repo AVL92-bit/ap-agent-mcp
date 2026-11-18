@@ -24,7 +24,7 @@ approves, submits, pays or changes documents created by anyone else.
 | Deploys | Railway auto-deploys every push to `main` (about 2-3 min). A deploy restarts the server. |
 | CI | GitHub Actions: `npm run build` then `node --experimental-strip-types --test tests/*.test.mjs` |
 | Companies (Front inbox + Xero organisation) | `config/companies.json` is the registry: one entry per company/practice pairing ONE Front inbox with ONE Xero organisation, with a `status` of `off`, `dry_run` (scan + dry run only) or `live` (daily schedule and execute runs). St George's Road Surgery = `inb_bys7q` + tenant `45a1074b-b172-4f49-a192-f0a8e293b54d`. Lamberhurst = `inb_bys46`. Everything on the live-run path asks `currentCompany()` (`src/companies.ts`), so a document from one inbox can only be written to that company's Xero organisation. |
-| Finance review Sheet | spreadsheet `1Z33UUJFeUpws0DvqihlqKm01rgTBfIhrnZOqrvABzjo`, tab `Finance review`: one console for every company; column K says which |
+| Finance review Sheet | spreadsheet `1Z33UUJFeUpws0DvqihlqKm01rgTBfIhrnZOqrvABzjo`, tab `Finance review`: one console for every company; column L says which |
 | Model | Anthropic API, Claude Sonnet 5.5 (`claude-sonnet-5-5`), key in Railway |
 | Claude access | MCP server added in the Claude desktop app (tools appear as `ap-agent__*`). New tools appear only after the app is closed and reopened. |
 
@@ -107,8 +107,9 @@ Columns **A-I are checked exactly** before any write (a renamed/inserted column 
 queue in the outbox and retry):
 `Logged at | Outcome | Xero draft URL | Supplier selected | Invoice / credit note ref | Gross amount | Field / failure | Question or error detail | Front conversation URL`
 Column **J `Human review complete`** (checkbox): the agent writes FALSE on new rows; finance ticks it.
-Column **K `Practice / company`**: the company name from `config/companies.json`, written on every row. Both J and K headers must exist: without them the agent refuses to write the row (it stays in the outbox and retries), so a row is never unattributed. Rows from before multi-company support carry the first company's name.
-Add any new column **after K**, never in between.
+Column **K `MV Comment`**: the management accountant's own column. The agent never writes it (it leaves it blank) and never reads anything into it.
+Column **L `Practice / company`**: the company name from `config/companies.json`, written on every row. The J and L headers must exist: without them the agent refuses to write the row (it stays in the outbox and retries), so a row is never unattributed. Rows from before multi-company support carry the first company's name.
+Add any new column **after L**, never in between.
 
 Outcome labels: `Draft with uncertainty`, `Not posted - check Xero`, `Not an invoice`, `Unclear document`, `Technical failure`.
 Each row's key (column H prefix, e.g. `inbox:cnv_…:fil_…:outcome`) prevents duplicates.
@@ -175,6 +176,6 @@ Postgres tables: `ap_document_journal`, `ap_model_extraction_cache`, `ap_schedul
 ## 11. Open items / next steps
 
 - Word and Excel invoices: read them (currently a Technical failure row + Human Review).
-- Multi-company (owner plans 8 more companies/inboxes): registry, per-company run, schedule loop and Sheet column K are built (Lamberhurst is the second). Still open: per-company coding rules beyond VAT, an AVL entry with its own VAT policy, and the Xero Core tier (>5 connections).
+- Multi-company (owner plans 8 more companies/inboxes): registry, per-company run, schedule loop and Sheet column L are built (Lamberhurst is the second). Still open: per-company coding rules beyond VAT, an AVL entry with its own VAT policy, and the Xero Core tier (>5 connections).
 - Optional: Anthropic Batch API for the 6am run (half price, slower).
 - Minor: meter-reading emails classified inconsistently (one archived, one human review).

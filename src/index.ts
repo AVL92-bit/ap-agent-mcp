@@ -2436,7 +2436,7 @@ server.registerTool(
       const a = { conversation_id, attachment_id, xero_invoice_id, supplier, reference, gross, filename, note };
       if (process.env.AP_INBOX_RUNNER_ENABLED !== 'true') return toolFailure('AP_INBOX_RUNNER_ENABLED is not true; no writes performed');
       try {
-        const companyName = resolveCompany(company).name; // column K: which company this row belongs to
+        const companyName = resolveCompany(company).name; // column L: which company this row belongs to
         await appendApInboxException({ conversationId: a.conversation_id, attachmentId: a.attachment_id, xeroId: a.xero_invoice_id, outcome: 'draft_uncertain',
           reason: a.note, filename: a.filename, supplier: a.supplier, reference: a.reference, gross: a.gross, company: companyName });
         return toolResult({ status: 'sheet_row_written_or_already_present', conversation_id: a.conversation_id, attachment_id: a.attachment_id });

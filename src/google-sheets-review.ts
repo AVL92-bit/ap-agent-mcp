@@ -105,16 +105,19 @@ async function sheetsRequest(
  * present, new rows are written with FALSE so outstanding reviews can be filtered. Columns A-I
  * are unchanged and still checked exactly. */
 export const REVIEW_COMPLETE_HEADER = 'Human review complete';
-/** Column K "Practice / company": which company's inbox the row came from. One Sheet serves every inbox. */
+/** Column K "MV Comment" belongs to the management accountant: the agent never writes it (left blank). */
+export const MV_COMMENT_COLUMN_INDEX = 10;
+/** Column L "Practice / company": which company's inbox the row came from. One Sheet serves every inbox. */
 export const COMPANY_HEADER = 'Practice / company';
-/** Row values for columns A-I, then J (if finance has added it), then K when a company is given.
- * With a company, both J and K headers must be present: a row is never written without saying whose it is. */
+export const COMPANY_COLUMN_INDEX = 11;
+/** Row values for columns A-I, then J (if finance has added it), then K blank and L the company when a company is given.
+ * With a company, the J and L headers must be present: a row is never written without saying whose it is. */
 export function withReviewColumn(rows: string[][], values: unknown[], company?: string): unknown[] {
   const hasJ = (rows[0]?.[9] ?? '').trim() === REVIEW_COMPLETE_HEADER;
   if (company === undefined) return hasJ ? [...values, false] : values;
-  if (!hasJ || (rows[0]?.[10] ?? '').trim() !== COMPANY_HEADER)
-    throw new Error(`Finance review Sheet needs column J "${REVIEW_COMPLETE_HEADER}" and column K "${COMPANY_HEADER}"; row not written`);
-  return [...values, false, company];
+  if (!hasJ || (rows[0]?.[COMPANY_COLUMN_INDEX] ?? '').trim() !== COMPANY_HEADER)
+    throw new Error(`Finance review Sheet needs column J "${REVIEW_COMPLETE_HEADER}" and column L "${COMPANY_HEADER}"; row not written`);
+  return [...values, false, '', company];
 }
 const isComplete = (v: unknown) => /^(true|yes|y|done|complete|completed|x|✓)$/i.test(String(v ?? '').trim());
 
@@ -123,15 +126,16 @@ const isComplete = (v: unknown) => /^(true|yes|y|done|complete|completed|x|✓)$
 export async function readFinanceReviewRows(input: { limit?: number; incompleteOnly?: boolean } = {}): Promise<Record<string, unknown>> {
   if (SPREADSHEET_ID !== EXPECTED_SPREADSHEET_ID || SHEET_NAME !== 'Finance review') throw new Error('Finance review Sheet target mismatch');
   const token = await getAccessToken();
-  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:K10000")}`) as {values?:string[][]};
+  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:L10000")}`) as {values?:string[][]};
   const rows = existing.values ?? [];
   const header = rows[0] ?? [];
   const hasReviewColumn = (header[9] ?? '').trim() === REVIEW_COMPLETE_HEADER;
-  const hasCompanyColumn = (header[10] ?? '').trim() === COMPANY_HEADER;
+  const hasCompanyColumn = (header[COMPANY_COLUMN_INDEX] ?? '').trim() === COMPANY_HEADER;
   let data = rows.slice(1).map((r, i) => ({ sheet_row: i + 2, logged_at: r[0] ?? '', outcome: r[1] ?? '', xero_draft_url: r[2] ?? '',
     supplier: r[3] ?? '', reference: r[4] ?? '', gross: r[5] ?? '', field_or_failure: r[6] ?? '', detail: r[7] ?? '',
     front_conversation_url: r[8] ?? '', ...(hasReviewColumn ? { human_review_complete: isComplete(r[9]) } : {}),
-    ...(hasCompanyColumn ? { practice_company: r[10] ?? '' } : {}) }));
+    mv_comment: r[MV_COMMENT_COLUMN_INDEX] ?? '',
+    ...(hasCompanyColumn ? { practice_company: r[COMPANY_COLUMN_INDEX] ?? '' } : {}) }));
   if (input.incompleteOnly && hasReviewColumn) data = data.filter(d => !(d as any).human_review_complete);
   const limit = Math.min(Math.max(input.limit ?? 25, 1), 200);
   return { read_only: true, total_rows: rows.length ? rows.length - 1 : 0, headers_ok: ['Logged at','Outcome','Xero draft URL','Supplier selected','Invoice / credit note ref','Gross amount','Field / failure','Question or error detail','Front conversation URL'].every((h, i) => header[i] === h),
@@ -145,7 +149,7 @@ export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[])
   const result = await pool.query(`SELECT id::text, created_at, front_conversation_id, supplier_name, invoice_number, document_type,
     assessment_json, xero_draft_id, xero_draft_error, xero_draft_status FROM pilot_invoice_reviews WHERE id::text = ANY($1::text[])`,[reviewIds]);
   const token = await getAccessToken();
-  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:K10000")}`) as {values?:string[][]};
+  const existing = await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:L10000")}`) as {values?:string[][]};
   const rows = existing.values ?? [];
   const expected=['Logged at','Outcome','Xero draft URL','Supplier selected','Invoice / credit note ref','Gross amount','Field / failure','Question or error detail','Front conversation URL'];
   if (expected.some((h,i)=>rows[0]?.[i]!==h)) throw new Error('Finance review Sheet headers do not match');
@@ -167,7 +171,7 @@ export async function syncPilotReviewExceptions(pool: Pool, reviewIds: string[])
       failure?'Processing failure':'Uncertain fields',details,
       `https://app.frontapp.com/open/${r.front_conversation_id}`];
     // The supervised (pilot) route is pinned to the legacy env-configured company.
-    await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:K10000")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, 'POST', {values:[withReviewColumn(rows,values,currentCompany().name)]});
+    await sheetsRequest(token, `/values/${encodeURIComponent("'Finance review'!A1:L10000")}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, 'POST', {values:[withReviewColumn(rows,values,currentCompany().name)]});
     appended.push(r.id);rows.push(values);
   }
   return {appended,already_present,skipped};
@@ -181,13 +185,13 @@ export async function assertReviewNotHeldInSheet(_reviewId:string,_conversationI
 export async function appendApInboxException(input: {
   conversationId:string; attachmentId:string; xeroId?:string; reason:string;
   outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
-  /** Company name for column K. Rows queued before multi-company support carry none: they are the first company's. */
+  /** Company name for column L. Rows queued before multi-company support carry none: they are the first company's. */
   company?:string;
 }):Promise<void> {
   if(SPREADSHEET_ID!==EXPECTED_SPREADSHEET_ID || SHEET_NAME!=='Finance review') throw new Error('Finance review Sheet target mismatch');
   if(!/^cnv_[\w-]+$/.test(input.conversationId)||!/^fil_[\w-]+(?:~\d+)?$/.test(input.attachmentId)) throw new Error('Invalid review source IDs');
   const token=await getAccessToken();
-  const range=encodeURIComponent("'Finance review'!A1:K10000");
+  const range=encodeURIComponent("'Finance review'!A1:L10000");
   const existing=await sheetsRequest(token,`/values/${range}`) as {values?:string[][]};
   const rows=existing.values??[];
   const expected=['Logged at','Outcome','Xero draft URL','Supplier selected','Invoice / credit note ref','Gross amount','Field / failure','Question or error detail','Front conversation URL'];
