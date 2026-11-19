@@ -14,7 +14,7 @@ export type InboxPort = {
   makeDraftCommand(conversation: InboxConversation, attachment: InboxAttachment): Promise<DraftCommand>;
   applyTag(conversationId: string, tag: string): Promise<void>;
   archive(conversationId: string): Promise<void>;
-  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
+  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'|'supplier_missing'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
   /** Open an attached email (.eml) and return the PDFs inside it as attachments. */
   expandEmail?(conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]>;
   journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; releaseCreate?(conversationId:string, attachmentId:string):Promise<void>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
@@ -137,7 +137,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
           // No journal or Xero call is made for a non-invoice/unclear document.
           dispositions.push({ attachmentId: attachment.id, disposition: 'processing_failure' });
           try { await port.reportReview({conversationId:conversation.id,attachmentId:attachment.id,
-            filename:attachment.filename,reason:e.message,outcome:e.kind as 'not_invoice'|'unclear'}); }
+            filename:attachment.filename,reason:e.message,outcome:e.kind as 'not_invoice'|'unclear'|'supplier_missing'}); }
           catch (sheetError) { item.failures.push(`Sheet review log failed: ${String(sheetError)}`); }
           continue;
         }

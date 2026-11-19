@@ -112,7 +112,7 @@ Column **K `MV Comment`**: the management accountant's own column. The agent nev
 Column **L `Practice / company`**: the company name from `config/companies.json`, written on every row. The J and L headers must exist: without them the agent refuses to write the row (it stays in the outbox and retries), so a row is never unattributed. Rows from before multi-company support carry the first company's name.
 Add any new column **after L**, never in between.
 
-Outcome labels: `Draft with uncertainty`, `Not posted - check Xero`, `Not an invoice`, `Unclear document`, `Technical failure`.
+Outcome labels: `Draft with uncertainty`, `Not posted - check Xero`, `Not an invoice`, `Unclear document`, `Technical failure`, `Supplier not in Xero` (a genuine invoice whose supplier has no Xero contact: the row names the supplier the agent read, the invoice number and amount, and asks finance to create the contact; the conversation is tagged Human review and the next run drafts it automatically once the contact exists, because blocked documents are re-read each run).
 Each row's key (column H prefix, e.g. `inbox:cnv_…:fil_…:outcome`) prevents duplicates.
 
 ## 6. Limits and costs (Nov 2026)
