@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 
 export type ReviewRow = {
   conversationId:string; attachmentId:string; xeroId?:string; reason:string;
-  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'|'supplier_missing'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
+  outcome:'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'|'supplier_missing'|'long_thread'; filename?:string; supplier?:string; extractedSupplier?:string; supplierMatchScore?:number; reference?:string; gross?:number;
   /** Company name for Sheet column L (set by the runner; absent on rows queued before multi-company support). */
   company?:string;
 };

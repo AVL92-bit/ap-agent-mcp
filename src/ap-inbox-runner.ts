@@ -4,22 +4,27 @@ import { classifyNoAttachment, FRONT_OUTCOME_POLICY } from './ap-outcome-policy.
 import { decideDocumentConversation, type DocumentDisposition } from './ap-conversation-completion.js';
 import { reconcileCreateAndAttach, type DraftCommand, type XeroDraftPort } from './ap-xero-document-coordinator.js';
 import { frontTagKey } from './front-tag-match.js';
+import { planLongThread, longThreadNote } from './ap-long-thread.js';
 
 /** Application-owned orchestration boundary. All conversation IDs and attachments
  * come from the inbox port, never from an LLM-supplied selection. */
-export type InboxAttachment = { id: string; filename: string; messageId: string };
+/** sourceId: the email a document came from when it is not its own message (a PDF inside an attached .eml).
+ * receivedAt: when that email was sent (epoch ms); used to find the newest email in a long thread. */
+export type InboxAttachment = { id: string; filename: string; messageId: string; sourceId?: string; receivedAt?: number };
 export type InboxConversation = { id: string; subject: string; body: string; attachments: InboxAttachment[]; tags?: string[] };
 export type InboxPort = {
   listAllOpenConversations(): Promise<InboxConversation[]>; // MUST throw on truncated pagination
   makeDraftCommand(conversation: InboxConversation, attachment: InboxAttachment): Promise<DraftCommand>;
   applyTag(conversationId: string, tag: string): Promise<void>;
   archive(conversationId: string): Promise<void>;
-  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'|'supplier_missing'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
+  reportReview(row: { conversationId: string; attachmentId: string; xeroId?: string; reason: string; outcome: 'draft_uncertain'|'technical_failure'|'not_invoice'|'unclear'|'not_posted'|'supplier_missing'|'long_thread'; filename?: string; supplier?: string; extractedSupplier?: string; supplierMatchScore?: number; reference?: string; gross?: number }): Promise<void>;
   /** Open an attached email (.eml) and return the PDFs inside it as attachments. */
   expandEmail?(conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]>;
-  journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; releaseCreate?(conversationId:string, attachmentId:string):Promise<void>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void> };
+  journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; releaseCreate?(conversationId:string, attachmentId:string):Promise<void>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void>;
+    /** Record an older document of a long thread as skipped, so it is never re-read or re-reported. */
+    skip?(conversationId:string, attachmentId:string):Promise<void> };
 };
-export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[] };
+export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[]; skippedOlder?: number };
 export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[]; stoppedEarly?: string };
 
 /** A Xero rate-limit failure stops the whole run: later documents would fail the same way. */
@@ -69,6 +74,28 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
       continue;
     }
     const dispositions: DocumentDisposition[] = [];
+    // Earlier outcomes are looked up once per document (a lookup error is raised again where the document is processed).
+    const previousRows = new Map<string, { status: string; xeroId?: string | null; writeIntent?: boolean } | null>();
+    const previousErrors = new Map<string, unknown>();
+    if (port.journal?.previous) {
+      for (const a of conversation.attachments) {
+        if (!a.id || previousRows.has(a.id) || previousErrors.has(a.id)) continue;
+        try { previousRows.set(a.id, await port.journal.previous(conversation.id, a.id)); } catch (e) { previousErrors.set(a.id, e); }
+      }
+    }
+    // Long forwarded thread: only the newest email's documents are processed; older ones are skipped for good.
+    const plan = planLongThread(conversation.attachments, new Map([...previousRows].flatMap(([id, p]) => p ? [[id, p.status] as [string, string]] : [])));
+    if (plan.isLong) {
+      for (const old of plan.skipped) {
+        try { await port.journal?.skip?.(conversation.id, old.id); }
+        catch (e) { item.failures.push(`Journal skip failed for ${old.id}: ${String(e)}`); }
+      }
+      item.skippedOlder = plan.skipped.length;
+      try { await port.reportReview({ conversationId: conversation.id, attachmentId: plan.skipped[0]!.id, reason: longThreadNote(plan), outcome: 'long_thread' }); }
+      catch (e) { item.failures.push(`Sheet report pending: ${String(e)}`); }
+      for (const old of plan.skipped) dispositions.push({ attachmentId: old.id, disposition: 'long_thread_skipped' });
+      conversation = { ...conversation, attachments: plan.keep };
+    }
     const attachmentIds = new Set<string>();
     for (const attachment of conversation.attachments) {
       item.documents++; report.documents++;
@@ -83,7 +110,13 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
       let uncertain = false;
       try {
         // Attachments already drafted or found in Xero on an earlier run are not re-read.
-        const previous = await port.journal?.previous?.(conversation.id, attachment.id);
+        if (previousErrors.has(attachment.id)) throw previousErrors.get(attachment.id);
+        const previous = previousRows.get(attachment.id) ?? null;
+        if (previous && previous.status === 'skipped_long_thread') {
+          // Skipped on an earlier run as an older document of a long thread: still keeps the conversation with finance.
+          dispositions.push({ attachmentId: attachment.id, disposition: 'long_thread_skipped' });
+          continue;
+        }
         if (previous && ['draft_verified','draft_uncertain','existing_verified'].includes(previous.status)) {
           dispositions.push({ attachmentId: attachment.id, disposition: previous.status === 'draft_uncertain' ? 'draft_uncertain_attached'
             : previous.status === 'existing_verified' ? 'xero_existing_verified' : 'xero_draft_attached' });

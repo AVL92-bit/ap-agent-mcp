@@ -7,6 +7,7 @@ export type AttachmentDisposition =
   | 'draft_uncertain_attached'
   | 'processing_failure'
   | 'unprocessed'
+  | 'long_thread_skipped'
   | 'supporting_document';
 export type DocumentDisposition = { attachmentId: string; disposition: AttachmentDisposition };
 export type ConversationDecision = {
@@ -26,6 +27,9 @@ export function decideDocumentConversation(documents: DocumentDisposition[]): Co
       return {archive:false,tag:'Human review',reason:'Missing or repeated attachment identity'};
     }
     ids.add(doc.attachmentId);
+  }
+  if (postable.some(d => d.disposition === 'long_thread_skipped')) {
+    return {archive:false,tag:'Human review',reason:'Long email thread: older documents were not processed; finance to review the thread'};
   }
   if (postable.some(d => d.disposition === 'processing_failure' || d.disposition === 'unprocessed')) {
     return {archive:false,tag:'Human review',reason:'At least one attachment is not accounted for in Xero'};

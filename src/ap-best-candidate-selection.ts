@@ -37,15 +37,29 @@ export function chooseSupplier(source_: string, contacts: ContactCandidate[]): S
   return {value:first.value, score:first.score, uncertainFields: ambiguous ? ['supplier'] : [],
     explanation: ambiguous ? 'Best available supplier contact; finance to verify' : 'Normalised supplier name match'};
 }
-const EXCLUDED = new Set(['BANK','REVENUE','EQUITY','LIABILITY','CURRENTLIAB','FIXED','CURRENT']);
+/** Accounts the agent may post to (owner decision 2026-11-19): expense accounts, plus prepayment accounts
+ * when the supplier's previous invoice used one. This is an ALLOWLIST using Xero's real account types:
+ * everything else (bank, liabilities, non-current assets, depreciation, payroll, inventory, revenue,
+ * equity and so on) needs a human. */
+export const POSTABLE_EXPENSE_TYPES = new Set(['EXPENSE', 'OVERHEADS', 'DIRECTCOSTS']);
+/** A prepayment account: Xero's PREPAYMENT type, or a current-asset account whose name says prepayment.
+ * Only followed when the supplier's previous invoice used the same account. */
+export function isPrepaymentAccount(a: AccountCandidate): boolean {
+  const type = a.type.toUpperCase();
+  return type === 'PREPAYMENT' || (type === 'CURRENT' && /prepayment/i.test(a.name));
+}
 /** Coding follows the selected supplier, never a generic fallback: the supplier's
  * latest approved/paid bill code, else that contact's own Xero default purchase
  * account (uncertain). Otherwise null: the invoice is not drafted (Human Review). */
 export function chooseAccount(accounts: AccountCandidate[], historical?: string, contactDefault?: string): Selection<AccountCandidate> | null {
-  const active = accounts.filter(a => a.code && a.status.toUpperCase() === 'ACTIVE' && !EXCLUDED.has(a.type.toUpperCase()));
+  const active = accounts.filter(a => a.code && a.status.toUpperCase() === 'ACTIVE' && POSTABLE_EXPENSE_TYPES.has(a.type.toUpperCase()));
   const byCode = (code?: string) => code ? active.find(a => a.code === code) : undefined;
   const fromHistory = byCode(historical);
   if (fromHistory) return {value:fromHistory,uncertainFields:[],explanation:'Historical supplier account selected'};
+  // Previous invoice from this supplier was posted to a prepayment account: follow it.
+  const prepaymentFromHistory = historical
+    ? accounts.find(a => a.code === historical && a.status.toUpperCase() === 'ACTIVE' && isPrepaymentAccount(a)) : undefined;
+  if (prepaymentFromHistory) return {value:prepaymentFromHistory,uncertainFields:[],explanation:'Historical supplier account selected (prepayment account)'};
   const fromContact = byCode(contactDefault);
   if (fromContact) return {value:fromContact,uncertainFields:['accountCode'],
     explanation:'No supplier bill history; Xero contact default purchase account used - finance to verify'};

@@ -300,12 +300,14 @@ async function bestCandidateContact(api: Api, supplier: string): Promise<{id:str
  */
 type SupplierCoding = {status:'latest_bill_account_selected'|'earlier_bill_account_selected'|'contact_default_account'|'no_supplier_coding';
   account_code:string|null; contact_id:string; source_bill_id?:string; selection_method:string; issues:string[]; tax_type:string};
-const EXCLUDED_ACCOUNT_TYPES=['BANK','REVENUE','EQUITY','LIABILITY','CURRENTLIAB','FIXED','CURRENT'];
+// Same allowlist as the daily run (ap-best-candidate-selection.ts): expense accounts only. Prepayment
+// posting exists only in the daily run, where it follows the supplier's previous invoice.
+const POSTABLE_ACCOUNT_TYPES=['EXPENSE','OVERHEADS','DIRECTCOSTS'];
 async function activeExpenseCodes(api:Api):Promise<Set<string>> {
   const data=await xero(api,'Accounts');
   if (!Array.isArray(data.Accounts)) throw new Error('Xero accounts validation unavailable');
   return new Set(data.Accounts.filter((a:any)=>a.Status==='ACTIVE' && a.Code &&
-    !EXCLUDED_ACCOUNT_TYPES.includes(String(a.Type).toUpperCase())).map((a:any)=>String(a.Code)));
+    POSTABLE_ACCOUNT_TYPES.includes(String(a.Type).toUpperCase())).map((a:any)=>String(a.Code)));
 }
 /** Coding follows the selected supplier contact, never a generic fallback:
  *  1. latest approved/paid bill for that contact with one active expense code

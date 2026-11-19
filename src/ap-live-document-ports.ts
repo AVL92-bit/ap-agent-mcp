@@ -38,7 +38,10 @@ export async function expandFrontEmail(_conversation: InboxConversation, attachm
   return pdfs.map((p, i) => {
     const id = `${attachment.id}~${i + 1}`;
     embeddedPdfs.set(id, {filename: /\.pdf$/i.test(p.filename) ? p.filename : `${p.filename}.pdf`, bytes: p.bytes, contentType: 'application/pdf'});
-    return {id, filename: embeddedPdfs.get(id)!.filename, messageId: attachment.messageId};
+    // sourceId: the attached email this PDF came from; receivedAt: when that (innermost) email was sent,
+    // else when the message carrying it arrived. Used to find the newest email in a long thread.
+    return {id, filename: embeddedPdfs.get(id)!.filename, messageId: attachment.messageId, sourceId: attachment.id,
+      ...((p.date ?? attachment.receivedAt) ? {receivedAt: (p.date ?? attachment.receivedAt)!} : {})};
   });
 }
 
