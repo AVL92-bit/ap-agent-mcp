@@ -43,10 +43,17 @@ export function isDirectDebitContact(name: string): boolean {
   return /\(\s*dd\s*\)|direct\s*debit/i.test(name);
 }
 
-/** The invoice number as the payment reference: if too long, the LAST characters are kept. */
+/** Characters kept in a payment reference: letters, digits, space, hyphen and slash. Everything else
+ * (for example * # & % " ' . , : ; ( ) + _ @) is removed because banks reject or garble them.
+ * Widen this only after a Revolut test batch shows more is accepted. */
+const REFERENCE_UNSAFE = /[^A-Za-z0-9 \/-]/g;
+
+/** The invoice number as the payment reference: unsafe characters removed first, then, if still too long,
+ * the LAST 18 characters are kept (owner decision 2026-11-19). A separator left at the front by the cut is dropped. */
 export function referenceFor(invoiceNumber: string): string {
-  const n = invoiceNumber.trim();
-  return n.length > REFERENCE_MAX ? n.slice(-REFERENCE_MAX) : n;
+  const cleaned = invoiceNumber.replace(REFERENCE_UNSAFE, '').replace(/\s+/g, ' ').trim();
+  const cut = cleaned.length > REFERENCE_MAX ? cleaned.slice(-REFERENCE_MAX) : cleaned;
+  return cut.replace(/^[ \/-]+/, '');
 }
 
 export type BankParse =
