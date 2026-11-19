@@ -59,7 +59,8 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
 import { describeContactFields } from "./contact-field-shape.js";
-import { buildPayRun, summarise } from "./pay-run.js";
+import { buildPayRun, summarise, renderRevolutCsv } from "./pay-run.js";
+import { payRunDownloads, handlePayRunDownload, DOWNLOAD_TTL_MS } from "./pay-run-download.js";
 import { loadPayRunInputs, type XeroGet } from "./pay-run-xero.js";
 import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull } from "./companies.js";
 /** The company named by an optional `company` key; with none given, the legacy env-configured company. */
@@ -2521,6 +2522,41 @@ server.registerTool(
   );
 
   server.registerTool(
+    "create_pay_run_download",
+    {
+      title: "Create Pay Run File Download Link",
+      description: "Builds the Revolut bulk-transfer template for a company from Xero bills awaiting payment (same rules as prepare_pay_run_preview) and returns ONLY a one-time download link plus the masked summary. The file contains supplier bank details and never passes through chat: the link opens in a browser, asks for the pay run download password (PAY_RUN_DOWNLOAD_PASSWORD, set by the owner in Railway), works once and expires after 15 minutes. The file is held in server memory only. Makes Xero read calls only; pays nothing. Refuses to run if the password is not configured. Optional company key; default is St George's.",
+      inputSchema: { company: companyKeySchema() },
+    },
+    async ({ company }) => {
+      try {
+        if (!process.env.PAY_RUN_DOWNLOAD_PASSWORD) return toolFailure("PAY_RUN_DOWNLOAD_PASSWORD is not set in Railway; no file was created");
+        const base = new URL(process.env.XERO_REDIRECT_URI ?? "").origin;
+        const target = resolveCompany(company);
+        const run = await runAsCompany(target, async () => {
+          const session = await getPilotXeroReadSession();
+          const get: XeroGet = async (path) => {
+            const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/${path}`, {
+              headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
+              signal: AbortSignal.timeout(25000),
+            });
+            if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
+            return await response.json() as Record<string, any>;
+          };
+          const { bills, contacts } = await loadPayRunInputs(get);
+          return buildPayRun(bills, contacts);
+        }, 'read');
+        if (!run.lines.length) return toolResult({ read_only: true, company: target.key, file_created: false, reason: "No invoices awaiting payment to include", ...summarise(run) });
+        const filename = `pay-run-${target.key}-${new Date().toISOString().slice(0, 10)}.csv`;
+        const id = payRunDownloads.create(renderRevolutCsv(run.lines), filename);
+        // Only the link and the masked summary leave this function: the CSV itself is never returned.
+        return toolResult({ read_only: true, company: target.key, file_created: true, link: `${base}/pay-run/${id}`, one_time: true,
+          expires_in_minutes: DOWNLOAD_TTL_MS / 60000, password: "the pay run download password you set in Railway", ...summarise(run) });
+      } catch (error) { return safeError("Pay run download could not be created", error); }
+    }
+  );
+
+  server.registerTool(
     "get_scheduled_run_history",
     {
       title: "Scheduled AP Run History",
@@ -3440,6 +3476,10 @@ const httpServer =
             url
           )
         ) {
+          return;
+        }
+        // One-time, password-protected pay run CSV download (holds bank details; never sent via chat).
+        if (handlePayRunDownload(req, res, url.pathname)) {
           return;
         }
  // Protected diagnostic: confirms which AP tools

@@ -48,6 +48,7 @@ The Xero session (`src/xero-pilot-test.ts`) verifies the live connection against
 | `ANTHROPIC_API_KEY` | Model extraction (exact name matters) |
 | `AP_EXTRACTION_MODEL` | Optional model override (default `claude-sonnet-5-5`) |
 | `AP_EXTRACTION_CACHE` | Optional; `off` disables the extraction cache |
+| `PAY_RUN_DOWNLOAD_PASSWORD` | Owner-set password for the one-time pay run CSV download link. Unset = download disabled and `create_pay_run_download` refuses to run. Never reuse the Xero setup password. |
 | `AP_SCHEDULE_LONDON_TIME` | Daily run time, UK local (`06:00`); unset = no schedule |
 | `AP_SCHEDULE_DAYS` | Optional, e.g. `Mon,Tue,Wed,Thu,Fri` (unset = every day) |
 
@@ -127,6 +128,7 @@ Each row's key (column H prefix, e.g. `inbox:cnv_…:fil_…:outcome`) prevents 
 |---|---|
 | `run_ap_inbox` | `dry_run=true` (no writes) or `execute=true`; optional `conversation_ids`; returns `job_id`, poll with `job_id` (jobs are in memory; a deploy loses them) |
 | `prepare_pay_run_preview` | Read-only pay run preview for a company (`company` key): Xero bills awaiting payment, one payment line per invoice (reference = invoice number, last 18 characters if longer), what the single Revolut template would contain with every gap left blank for the owner (listed per line under `blank`); (DD) contacts, non-GBP and zero/negative bills are skipped and only counted. Rules in `src/pay-run.ts`, Xero reads in `src/pay-run-xero.ts`. Bank details come from the Xero contact only (`BankAccountDetails`, account name in `BatchPayments.BankAccountName`) and are never shown. "(DD)" contacts are excluded. Produces no file yet; file delivery is a pending owner decision. |
+| `create_pay_run_download` | Builds the Revolut template (same rules as the preview) and returns only a one-time link plus the masked summary. The CSV holds bank details and never passes through chat: `GET /pay-run/<id>` asks for `PAY_RUN_DOWNLOAD_PASSWORD`, works once, expires after 15 minutes, is held in memory only (lost on restart or deploy), and locks after 5 wrong passwords (`src/pay-run-download.ts`). |
 | `get_scheduled_run_history` | Daily run records |
 | `get_finance_review_rows` | Read the Sheet (`incomplete_only=true` for unticked) |
 | `list_pilot_draft_attempts` | Unfinished write attempts, both routes (makes Xero calls) |
