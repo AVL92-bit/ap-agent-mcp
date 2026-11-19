@@ -38,6 +38,35 @@ test('a partial result is refused: pagination that never ends throws instead of 
   const get = async () => ({ Invoices: Array.from({ length: 100 }, (_, i) => inv(`N${i}`, 'c1', 'A', 1)) });
   await assert.rejects(() => loadPayRunInputs(get), /pagination incomplete/);
 });
+test('the count diagnostic accounts for every bill and says why each is in or out, including credit notes', async () => {
+  const { explainPayRunCounts } = await import('../dist/pay-run-xero.js');
+  const bills = [
+    inv('A1', 'c1', 'Acme', 100), inv('A2', 'c1', 'Acme', 50),
+    inv('D1', 'c2', 'Wavenet (DD)', 30), inv('D2', 'c2', 'Wavenet (DD)', 40),
+    inv('E1', 'c3', 'Euro Co', 10, { CurrencyCode: 'EUR' }),
+    inv('Z1', 'c4', 'Paid Co', 0),
+    inv('S1', 'c5', 'Awaiting Approval Ltd', 20, { Status: 'SUBMITTED' }),
+    inv('X1', 'c6', 'Approved Co', 60, { Status: 'AUTHORISED' }),
+  ].map(b => ({ Status: 'AUTHORISED', Total: b.AmountDue, ...b }));
+  const get = async (path) => {
+    if (path.startsWith('Invoices?Statuses=DRAFT')) return { Invoices: bills };
+    if (path.startsWith('Invoices?Statuses=AUTHORISED')) return { Invoices: bills.filter(b => b.Status === 'AUTHORISED') };
+    if (path.startsWith('CreditNotes?')) return { CreditNotes: [{ Contact: { Name: 'Acme' }, RemainingCredit: 25 }, { Contact: { Name: 'Spent' }, RemainingCredit: 0 }] };
+    throw new Error(`unexpected ${path}`);
+  };
+  const r = await explainPayRunCounts(get);
+  assert.equal(r.counts.returned_unpaid_purchase_bills, 8);
+  assert.equal(r.counts.in_pay_run, 3);
+  assert.equal(r.counts.skipped_direct_debit, 2);
+  assert.equal(r.counts.skipped_non_gbp, 1);
+  assert.equal(r.counts.skipped_zero_or_negative, 1);
+  assert.equal(r.counts.not_approved, 1);
+  assert.equal(r.counts.supplier_credit_notes_with_credit_left, 1);
+  assert.deepEqual(r.credit_note_suppliers, [{ supplier: 'Acme', remaining: 25 }]);
+  const total = r.counts.in_pay_run + r.counts.skipped_direct_debit + r.counts.skipped_non_gbp + r.counts.skipped_zero_or_negative + r.counts.not_approved + r.counts.no_contact;
+  assert.equal(total, r.counts.returned_unpaid_purchase_bills); // every bill is accounted for
+  assert.equal(r.bills.find(b => b.invoice === 'S1').reason, 'not_approved (SUBMITTED)');
+});
 test('the loader contains no write verbs', async () => {
   const { readFileSync } = await import('node:fs');
   const s = readFileSync(new URL('../src/pay-run-xero.ts', import.meta.url), 'utf8');

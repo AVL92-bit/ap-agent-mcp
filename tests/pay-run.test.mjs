@@ -14,6 +14,20 @@ test('(DD) and direct debit contacts are recognised', () => {
   assert.equal(isDirectDebitContact('Healthtech-1 (dd)'), true);
   assert.equal(isDirectDebitContact('Wavenet Limited'), false);
 });
+test('always-business list: a business with no Ltd in its name (JP Medassist) is BUSINESS; case and spacing are ignored', () => {
+  const jp = contact({ name: 'JP Medassist', batchPayments: { BankAccountNumber: '12345678', BankAccountName: 'JP Medassist' } });
+  assert.equal(buildPayRun([bill()], [jp]).lines[0].recipientType, 'INDIVIDUAL'); // without the list: no Ltd, so individual
+  assert.equal(buildPayRun([bill()], [jp], { alwaysBusiness: ['JP Medassist'] }).lines[0].recipientType, 'BUSINESS');
+  assert.equal(buildPayRun([bill()], [jp], { alwaysBusiness: ['  jp   MEDASSIST '] }).lines[0].recipientType, 'BUSINESS');
+  // matched on the bank account name too, and on the contact name when the account name differs
+  const other = contact({ name: 'J P Medical', batchPayments: { BankAccountNumber: '12345678', BankAccountName: 'JP Medassist' } });
+  assert.equal(buildPayRun([bill()], [other], { alwaysBusiness: ['JP Medassist'] }).lines[0].recipientType, 'BUSINESS');
+  // others are unaffected
+  assert.equal(buildPayRun([bill()], [contact({ name: 'Dr J Smith', batchPayments: { BankAccountNumber: '12345678', BankAccountName: 'Dr J Smith' } })], { alwaysBusiness: ['JP Medassist'] }).lines[0].recipientType, 'INDIVIDUAL');
+  // a listed supplier still gets its type when the account name is missing; nothing else is invented
+  const noName = buildPayRun([bill()], [jp.batchPayments && { ...jp, batchPayments: { BankAccountNumber: '12345678' } }], { alwaysBusiness: ['JP Medassist'] }).lines[0];
+  assert.deepEqual([noName.recipientType, noName.name, noName.missing], ['BUSINESS', '', ['account_name']]);
+});
 test('a long invoice number keeps its LAST 18 characters', () => {
   assert.equal(referenceFor('123456789123456789123'), '456789123456789123');
   assert.equal(referenceFor('123456789123456789123').length, REFERENCE_MAX);
