@@ -28,6 +28,22 @@ test('always-business list: a business with no Ltd in its name (JP Medassist) is
   const noName = buildPayRun([bill()], [jp.batchPayments && { ...jp, batchPayments: { BankAccountNumber: '12345678' } }], { alwaysBusiness: ['JP Medassist'] }).lines[0];
   assert.deepEqual([noName.recipientType, noName.name, noName.missing], ['BUSINESS', '', ['account_name']]);
 });
+test('unsafe characters are removed from the payment reference before it is cut to 18', () => {
+  assert.equal(referenceFor('INV-MS-1446*-July-2026'), 'MS-1446-July-2026'); // * removed, then last 18, then leading hyphen dropped
+  assert.equal(referenceFor('INV-MS-8675*-October-2026'), 'MS-8675-October-2026'.slice(-18).replace(/^[ \/-]+/, ''));
+  assert.equal(referenceFor('INV/38652'), 'INV/38652'); // slash, hyphen, space and alphanumerics are kept
+  assert.equal(referenceFor('RI 65930654'), 'RI 65930654');
+  assert.equal(referenceFor('A&B #12 (x) "q" 50%'), 'AB 12 x q 50');
+  assert.equal(referenceFor('  INV__1.2,3:4;5+6@7  '), 'INV1234567');
+  assert.equal(referenceFor('=SUM(1)'), 'SUM1'); // nothing that starts a spreadsheet formula survives
+  assert.equal(referenceFor('***'), '');
+  for (const n of ['INV-MS-1446*-July-2026', 'A&B/#C', 'X'.repeat(40) + '*', '*'.repeat(30) + 'A']) {
+    const r = referenceFor(n);
+    assert.match(r, /^[A-Za-z0-9 \/-]*$/);
+    assert.ok(r.length <= REFERENCE_MAX);
+    assert.equal(/^[ \/-]/.test(r), false);
+  }
+});
 test('a long invoice number keeps its LAST 18 characters', () => {
   assert.equal(referenceFor('123456789123456789123'), '456789123456789123');
   assert.equal(referenceFor('123456789123456789123').length, REFERENCE_MAX);
