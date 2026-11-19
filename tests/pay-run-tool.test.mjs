@@ -10,8 +10,8 @@ test('the preview tool is read-only: only GETs against Xero, in read mode, throu
   assert.match(block, /'read'\)/);
   assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(block), false);
 });
-test('the preview tool never returns bank details: it returns the masked review and totals, not fileLines', () => {
-  assert.match(block, /lines: run\.review/);
-  assert.equal(/fileLines/.test(block.replace(/run\.fileLines \(bank details\) is never returned/, '')), false);
+test('the preview tool never returns bank details: it returns the masked summary only', () => {
+  assert.match(block, /\.\.\.summarise\(run\)/);
+  assert.equal(/run\.lines|renderRevolutCsv/.test(block), false);
   assert.match(block, /file_produced: false/);
 });

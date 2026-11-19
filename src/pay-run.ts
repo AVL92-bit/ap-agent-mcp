@@ -1,16 +1,20 @@
 /**
  * Pay run file rules (pure functions: no network, no database).
  *
- * The agent PREPARES a Revolut bulk-transfer file from Xero bills awaiting payment; the owner
- * reviews, removes lines and uploads it himself. The agent never pays, approves or edits contacts.
- * Bank details come from the Xero contact record only, never from an invoice or email.
+ * The agent PREPARES the Revolut bulk-transfer template from Xero bills awaiting payment; the owner
+ * opens it, fills any gaps, removes lines and uploads it himself. The agent never pays, approves or
+ * edits contacts. Bank details come from the Xero contact record only, never from an invoice or email.
  *
- * One payment line PER INVOICE (owner decision 2026-11-19): the reference is that invoice's number,
- * removing one line removes exactly one bill, and every payment matches one bill in Xero.
+ * Owner decisions (2026-11-19):
+ *  - ONE file: the Revolut template. No separate review file.
+ *  - One payment line PER INVOICE; the reference is the invoice number (last 18 characters if longer).
+ *  - Every awaiting invoice gets a row, filled with whatever Xero reliably holds; missing details are
+ *    left BLANK for the owner to complete (which also prompts him to fix Xero).
+ *  - Skipped entirely: direct debit "(DD)" suppliers, non-GBP bills, zero or negative amounts.
+ *  - Credit notes and credit on account are not considered: the owner checks those in Xero.
  *
- * Output of `buildPayRun` is split on purpose:
- *  - `review`: safe to show anywhere. Never contains a sort code or account number.
- *  - `fileLines`: the lines for the Revolut CSV. Contains bank details; only `renderRevolutCsv` uses it.
+ * `buildPayRun` returns lines that contain bank details (for the CSV only) and a masked summary
+ * (`summarise`) that is safe to show anywhere: it never contains a sort code or account number.
  */
 
 export type XeroBill = {
@@ -39,6 +43,12 @@ export function isDirectDebitContact(name: string): boolean {
   return /\(\s*dd\s*\)|direct\s*debit/i.test(name);
 }
 
+/** The invoice number as the payment reference: if too long, the LAST characters are kept. */
+export function referenceFor(invoiceNumber: string): string {
+  const n = invoiceNumber.trim();
+  return n.length > REFERENCE_MAX ? n.slice(-REFERENCE_MAX) : n;
+}
+
 export type BankParse =
   | { ok: true; sortCode: string; accountNumber: string }
   | { ok: false; problem: 'missing' | 'unrecognised_format' | 'details_disagree' };
@@ -55,57 +65,60 @@ export function parseBankDetails(c: XeroContact): BankParse {
   return { ok: true, sortCode, accountNumber };
 }
 
-export type Flag =
-  | 'direct_debit_excluded' | 'not_gbp' | 'no_bank_details' | 'bank_details_unrecognised' | 'bank_details_disagree'
-  | 'no_account_name' | 'zero_or_negative_amount' | 'reference_too_long' | 'contact_not_found';
-/** One reviewed payment line = one bill. */
-export type ReviewLine = {
-  supplier: string; billNumber: string; dueDate: string | null; amountDue: number;
-  status: 'ready' | 'needs_attention' | 'excluded'; flags: Flag[];
-  recipientType: RecipientType | null; accountNamePresent: boolean;
+/** What is blank on a line, and why. Never contains the values themselves. */
+export type Missing = 'account_name' | 'bank_details' | 'bank_details_unrecognised' | 'bank_details_disagree' | 'contact_not_found';
+export type PayLine = {
+  /** Xero contact name: for the masked summary only, never written to the CSV. */
+  supplier: string; billNumber: string; dueDate: string | null;
+  // The eight template columns' variable values (blank string when Xero has no reliable value):
+  name: string; recipientType: RecipientType | ''; accountNumber: string; sortCode: string; amount: number; reference: string;
+  missing: Missing[];
 };
-export type FileLine = { name: string; recipientType: RecipientType; accountNumber: string; sortCode: string; amount: number; reference: string };
 
 const pennies = (n: number) => Math.round(n * 100);
-/** Invoices only. Credit notes, balances and credit on account are deliberately not considered here:
- * the owner sees those in Xero, which is a second check on each payment (owner decision 2026-11-19). */
 export function buildPayRun(bills: XeroBill[], contacts: XeroContact[]) {
   const contactById = new Map(contacts.map(c => [c.contactId, c]));
   const supplierName = (b: XeroBill) => contactById.get(b.contactId)?.name ?? b.contactName;
-  const ordered = [...bills].sort((a, b) => supplierName(a).localeCompare(supplierName(b)) || (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.number.localeCompare(b.number));
-  const review: ReviewLine[] = [], fileLines: FileLine[] = [];
+  const skipped = { direct_debit: 0, non_gbp: 0, zero_or_negative: 0 };
+  const lines: PayLine[] = [];
   const bankCache = new Map<string, BankParse>();
-  for (const b of ordered) {
-    const contact = contactById.get(b.contactId);
+  for (const b of bills) {
     const supplier = supplierName(b);
-    const accountName = (contact?.batchPayments?.BankAccountName ?? '').trim();
-    const flags: Flag[] = [];
-    let excluded = false;
-    if (isDirectDebitContact(supplier)) { flags.push('direct_debit_excluded'); excluded = true; }
-    else if (b.currency !== 'GBP') { flags.push('not_gbp'); excluded = true; }
-    let bank: BankParse | null = null;
-    if (!excluded) {
-      if (!contact) flags.push('contact_not_found');
-      else {
-        bank = bankCache.get(b.contactId) ?? bankCache.set(b.contactId, parseBankDetails(contact)).get(b.contactId)!;
-        if (!bank.ok) flags.push(bank.problem === 'missing' ? 'no_bank_details' : bank.problem === 'unrecognised_format' ? 'bank_details_unrecognised' : 'bank_details_disagree');
-        if (!accountName) flags.push('no_account_name');
-      }
-      if (b.amountDue <= 0) flags.push('zero_or_negative_amount');
-      if (b.number.length > REFERENCE_MAX) flags.push('reference_too_long');
+    if (isDirectDebitContact(supplier)) { skipped.direct_debit++; continue; }
+    if (b.currency !== 'GBP') { skipped.non_gbp++; continue; }
+    if (!(b.amountDue > 0)) { skipped.zero_or_negative++; continue; }
+    const contact = contactById.get(b.contactId);
+    const missing: Missing[] = [];
+    let name = '', accountNumber = '', sortCode = '';
+    if (!contact) missing.push('contact_not_found');
+    else {
+      name = (contact.batchPayments?.BankAccountName ?? '').trim();
+      if (!name) missing.push('account_name');
+      const bank = bankCache.get(b.contactId) ?? bankCache.set(b.contactId, parseBankDetails(contact)).get(b.contactId)!;
+      if (bank.ok) { accountNumber = bank.accountNumber; sortCode = bank.sortCode; }
+      // Numbers that cannot be trusted are left blank, never guessed.
+      else missing.push(bank.problem === 'missing' ? 'bank_details' : bank.problem === 'unrecognised_format' ? 'bank_details_unrecognised' : 'bank_details_disagree');
     }
-    const status = excluded ? 'excluded' : flags.length ? 'needs_attention' : 'ready';
-    const type = accountName ? recipientTypeFor(accountName) : null;
-    review.push({ supplier, billNumber: b.number, dueDate: b.dueDate, amountDue: b.amountDue, status, flags,
-      recipientType: type, accountNamePresent: !!accountName });
-    if (status === 'ready' && bank?.ok && type) {
-      fileLines.push({ name: accountName, recipientType: type, accountNumber: bank.accountNumber, sortCode: bank.sortCode, amount: b.amountDue, reference: b.number });
-    }
+    lines.push({ supplier, billNumber: b.number, dueDate: b.dueDate, name, recipientType: name ? recipientTypeFor(name) : '',
+      accountNumber, sortCode, amount: b.amountDue, reference: referenceFor(b.number), missing });
   }
-  const sum = (s: ReviewLine['status']) => review.filter(r => r.status === s).reduce((n, r) => n + pennies(r.amountDue), 0) / 100;
-  return { review, fileLines, totals: { ready: sum('ready'), needs_attention: sum('needs_attention'), excluded: sum('excluded'),
-    ready_lines: fileLines.length, needs_attention_lines: review.filter(r => r.status === 'needs_attention').length,
-    excluded_lines: review.filter(r => r.status === 'excluded').length } };
+  // Incomplete lines first so they are noticed; then by supplier, due date, invoice number.
+  lines.sort((a, b) => Number(b.missing.length > 0) - Number(a.missing.length > 0) || a.supplier.localeCompare(b.supplier)
+    || (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.billNumber.localeCompare(b.billNumber));
+  const incomplete = lines.filter(l => l.missing.length > 0);
+  return { lines, skipped, totals: {
+    lines: lines.length, complete_lines: lines.length - incomplete.length, incomplete_lines: incomplete.length,
+    amount: lines.reduce((n, l) => n + pennies(l.amount), 0) / 100 } };
+}
+
+/** Masked summary for chat: what is blank and why. Never any sort code, account number or account name. */
+export function summarise(run: ReturnType<typeof buildPayRun>) {
+  return {
+    totals: run.totals,
+    skipped: run.skipped,
+    lines: run.lines.map(l => ({ supplier: l.supplier, invoice: l.billNumber, due: l.dueDate, amount: l.amount,
+      reference: l.reference, recipient_type: l.recipientType || null, blank: l.missing })),
+  };
 }
 
 const csvCell = (v: string | number) => {
@@ -114,8 +127,8 @@ const csvCell = (v: string | number) => {
   if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
-/** The Revolut bulk-transfer CSV: exactly the template's eight columns, GBP to GB only. */
-export function renderRevolutCsv(lines: FileLine[]): string {
+/** The Revolut bulk-transfer template: exactly its eight columns, GBP to GB only. Gaps are left blank. */
+export function renderRevolutCsv(lines: PayLine[]): string {
   const header = ['Name', 'Recipient type', 'Account number', 'Sort code', 'Recipient bank country', 'Currency', 'Amount', 'Payment reference'];
   const rows = lines.map(l => [l.name, l.recipientType, l.accountNumber, l.sortCode, 'GB', 'GBP', l.amount.toFixed(2), l.reference]);
   return [header, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';

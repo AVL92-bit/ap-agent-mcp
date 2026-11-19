@@ -21,7 +21,7 @@ test('loads awaiting-payment invoices and their contacts only; never reads credi
   assert.equal(calls.some(c => /CreditNotes/.test(c)), false);
   assert.equal(calls.some(c => /Statuses=AUTHORISED/.test(c)), true);
   const run = buildPayRun(bills, contacts);
-  assert.deepEqual(run.fileLines.map(l => [l.reference, l.amount]), [['A1', 100], ['A2', 50.5]]);
+  assert.deepEqual(run.lines.map(l => [l.reference, l.amount]), [['A1', 100], ['A2', 50.5]]);
 });
 test('contacts are requested in chunks of 40 ids', async () => {
   const many = Array.from({ length: 85 }, (_, i) => inv(`N${i}`, `c${i}`, `S${i}`, 1));
