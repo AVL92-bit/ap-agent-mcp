@@ -58,6 +58,7 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 }
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
+import { describeContactFields } from "./contact-field-shape.js";
 import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull } from "./companies.js";
 /** The company named by an optional `company` key; with none given, the legacy env-configured company. */
 function resolveCompany(key?:string):Company {
@@ -2461,6 +2462,31 @@ server.registerTool(
           matches_company: companies.find(x => x.xeroTenantId === c.tenant_id)?.key ?? null })) });
       } catch (error) { return safeError("Xero connection listing failed", error); }
       finally { await pool.end(); }
+    }
+  );
+
+  server.registerTool(
+    "inspect_contact_bank_fields",
+    {
+      title: "Inspect Xero Contact Fields (masked)",
+      description: "Read-only. Searches the company's Xero organisation for contacts matching a name and reports which fields Xero returns for each one, for example whether a bank account name exists. Digits are always masked and only a few fields show any value, so no sort code or account number is returned. Makes Xero read calls only; never writes. Optional company key; default is St George's.",
+      inputSchema: { name: z.string().min(2).max(100), company: companyKeySchema() },
+    },
+    async ({ name, company }) => {
+      try {
+        const result = await runAsCompany(resolveCompany(company), async () => {
+          const session = await getPilotXeroReadSession();
+          const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/Contacts?searchTerm=${encodeURIComponent(name)}`, {
+            headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
+            signal: AbortSignal.timeout(25000),
+          });
+          if (!response.ok) throw new Error(`Xero contact read HTTP ${response.status}`);
+          const body = await response.json() as { Contacts?: Array<Record<string, unknown>> };
+          if (!Array.isArray(body.Contacts)) throw new Error("Malformed Xero contacts response");
+          return body.Contacts.slice(0, 5).map(c => ({ contact_id: c.ContactID, fields: describeContactFields(c) }));
+        }, 'read');
+        return toolResult({ read_only: true, matches: result.length, contacts: result });
+      } catch (error) { return safeError("Xero contact field check failed", error); }
     }
   );
 
