@@ -59,6 +59,8 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
 import { describeContactFields } from "./contact-field-shape.js";
+import { buildPayRun } from "./pay-run.js";
+import { loadPayRunInputs, type XeroGet } from "./pay-run-xero.js";
 import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull } from "./companies.js";
 /** The company named by an optional `company` key; with none given, the legacy env-configured company. */
 function resolveCompany(key?:string):Company {
@@ -2487,6 +2489,34 @@ server.registerTool(
         }, 'read');
         return toolResult({ read_only: true, matches: result.length, contacts: result });
       } catch (error) { return safeError("Xero contact field check failed", error); }
+    }
+  );
+
+  server.registerTool(
+    "prepare_pay_run_preview",
+    {
+      title: "Pay Run Preview (read only, no bank details shown)",
+      description: "Read-only. Lists the company's Xero bills awaiting payment (approved, still due) grouped by supplier and shows what the Revolut bulk-transfer file WOULD contain: per supplier the bills, total, payment reference (invoice numbers), inferred recipient type, and flags (direct debit contact excluded, no bank details, no account name, bank details disagree, unapplied credit, reference too long, not GBP). Bank details are read from the Xero contact record only and are never shown here: no sort code or account number is returned. Makes Xero read calls only. Produces no file and pays nothing. Optional company key; default is St George's.",
+      inputSchema: { company: companyKeySchema() },
+    },
+    async ({ company }) => {
+      try {
+        const run = await runAsCompany(resolveCompany(company), async () => {
+          const session = await getPilotXeroReadSession();
+          const get: XeroGet = async (path) => {
+            const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/${path}`, {
+              headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
+              signal: AbortSignal.timeout(25000),
+            });
+            if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
+            return await response.json() as Record<string, any>;
+          };
+          const { bills, contacts, credits } = await loadPayRunInputs(get);
+          return buildPayRun(bills, contacts, credits);
+        }, 'read');
+        // Only the masked review leaves this function: run.fileLines (bank details) is never returned.
+        return toolResult({ read_only: true, company: company ?? currentCompany().key, file_produced: false, totals: run.totals, lines: run.review });
+      } catch (error) { return safeError("Pay run preview failed", error); }
     }
   );
 
