@@ -21,8 +21,8 @@ test('loads awaiting-payment bills, their contacts in chunks, and unapplied cred
   assert.deepEqual(credits, [{ contactId: 'c1', remaining: 25 }]);
   assert.equal(calls.some(c => /Statuses=AUTHORISED/.test(c)), true);
   const run = buildPayRun(bills, contacts, credits);
-  assert.equal(run.fileLines[0].amount, 150.5);
-  assert.equal(run.review[0].unappliedCredit, 25);
+  assert.deepEqual(run.fileLines.map(l => [l.reference, l.amount]), [['A1', 100], ['A2', 50.5]]);
+  assert.equal(run.review[0].supplierUnappliedCredit, 25);
 });
 test('contacts are requested in chunks of 40 ids', async () => {
   const many = Array.from({ length: 85 }, (_, i) => inv(`N${i}`, `c${i}`, `S${i}`, 1));

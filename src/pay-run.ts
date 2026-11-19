@@ -5,6 +5,9 @@
  * reviews, removes lines and uploads it himself. The agent never pays, approves or edits contacts.
  * Bank details come from the Xero contact record only, never from an invoice or email.
  *
+ * One payment line PER INVOICE (owner decision 2026-11-19): the reference is that invoice's number,
+ * removing one line removes exactly one bill, and every payment matches one bill in Xero.
+ *
  * Output of `buildPayRun` is split on purpose:
  *  - `review`: safe to show anywhere. Never contains a sort code or account number.
  *  - `fileLines`: the lines for the Revolut CSV. Contains bank details; only `renderRevolutCsv` uses it.
@@ -55,51 +58,56 @@ export function parseBankDetails(c: XeroContact): BankParse {
 
 export type Flag =
   | 'direct_debit_excluded' | 'not_gbp' | 'no_bank_details' | 'bank_details_unrecognised' | 'bank_details_disagree'
-  | 'no_account_name' | 'zero_or_negative_total' | 'unapplied_credit' | 'reference_truncated' | 'contact_not_found';
+  | 'no_account_name' | 'zero_or_negative_amount' | 'unapplied_credit' | 'reference_too_long' | 'contact_not_found';
+/** One reviewed payment line = one bill. */
 export type ReviewLine = {
-  supplier: string; status: 'ready' | 'needs_attention' | 'excluded'; flags: Flag[];
+  supplier: string; billNumber: string; dueDate: string | null; amountDue: number;
+  status: 'ready' | 'needs_attention' | 'excluded'; flags: Flag[];
   recipientType: RecipientType | null; accountNamePresent: boolean;
-  bills: Array<{ number: string; dueDate: string | null; amountDue: number }>;
-  total: number; reference: string; unappliedCredit: number;
+  /** Supplier-level: credit notes with credit left. Not netted off; the owner decides. */
+  supplierUnappliedCredit: number;
 };
 export type FileLine = { name: string; recipientType: RecipientType; accountNumber: string; sortCode: string; amount: number; reference: string };
 
 const pennies = (n: number) => Math.round(n * 100);
+const NON_BLOCKING: Flag[] = ['unapplied_credit'];
 export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], credits: XeroCredit[] = []) {
-  const byContact = new Map<string, XeroBill[]>();
-  for (const b of bills) (byContact.get(b.contactId) ?? byContact.set(b.contactId, []).get(b.contactId)!).push(b);
   const contactById = new Map(contacts.map(c => [c.contactId, c]));
+  const supplierName = (b: XeroBill) => contactById.get(b.contactId)?.name ?? b.contactName;
+  const ordered = [...bills].sort((a, b) => supplierName(a).localeCompare(supplierName(b)) || (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.number.localeCompare(b.number));
   const review: ReviewLine[] = [], fileLines: FileLine[] = [];
-  for (const [contactId, group] of [...byContact].sort((a, b) => a[1][0]!.contactName.localeCompare(b[1][0]!.contactName))) {
-    const contact = contactById.get(contactId);
-    const supplier = contact?.name ?? group[0]!.contactName;
-    const sorted = [...group].sort((a, b) => (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.number.localeCompare(b.number));
-    const total = sorted.reduce((n, b) => n + pennies(b.amountDue), 0) / 100;
-    const joined = sorted.map(b => b.number).join(', ');
-    const reference = joined.slice(0, REFERENCE_MAX);
-    const credit = credits.filter(x => x.contactId === contactId).reduce((n, x) => n + pennies(x.remaining), 0) / 100;
-    const flags: Flag[] = [];
+  const bankCache = new Map<string, BankParse>();
+  for (const b of ordered) {
+    const contact = contactById.get(b.contactId);
+    const supplier = supplierName(b);
+    const credit = credits.filter(x => x.contactId === b.contactId).reduce((n, x) => n + pennies(x.remaining), 0) / 100;
     const accountName = (contact?.batchPayments?.BankAccountName ?? '').trim();
+    const flags: Flag[] = [];
     let excluded = false;
     if (isDirectDebitContact(supplier)) { flags.push('direct_debit_excluded'); excluded = true; }
-    if (!excluded && sorted.some(b => b.currency !== 'GBP')) { flags.push('not_gbp'); excluded = true; }
-    if (!excluded && !contact) flags.push('contact_not_found');
-    if (!excluded && total <= 0) flags.push('zero_or_negative_total');
-    const bank = !excluded && contact ? parseBankDetails(contact) : null;
-    if (bank && !bank.ok) flags.push(bank.problem === 'missing' ? 'no_bank_details' : bank.problem === 'unrecognised_format' ? 'bank_details_unrecognised' : 'bank_details_disagree');
-    if (!excluded && contact && !accountName) flags.push('no_account_name');
-    if (!excluded && credit > 0) flags.push('unapplied_credit');
-    if (!excluded && joined.length > REFERENCE_MAX) flags.push('reference_truncated');
-    const blocking = flags.some(f => f !== 'unapplied_credit' && f !== 'reference_truncated');
+    else if (b.currency !== 'GBP') { flags.push('not_gbp'); excluded = true; }
+    let bank: BankParse | null = null;
+    if (!excluded) {
+      if (!contact) flags.push('contact_not_found');
+      else {
+        bank = bankCache.get(b.contactId) ?? bankCache.set(b.contactId, parseBankDetails(contact)).get(b.contactId)!;
+        if (!bank.ok) flags.push(bank.problem === 'missing' ? 'no_bank_details' : bank.problem === 'unrecognised_format' ? 'bank_details_unrecognised' : 'bank_details_disagree');
+        if (!accountName) flags.push('no_account_name');
+      }
+      if (b.amountDue <= 0) flags.push('zero_or_negative_amount');
+      if (b.number.length > REFERENCE_MAX) flags.push('reference_too_long');
+      if (credit > 0) flags.push('unapplied_credit');
+    }
+    const blocking = flags.some(f => !NON_BLOCKING.includes(f));
     const status = excluded ? 'excluded' : blocking ? 'needs_attention' : 'ready';
     const type = accountName ? recipientTypeFor(accountName) : null;
-    review.push({ supplier, status, flags, recipientType: type, accountNamePresent: !!accountName,
-      bills: sorted.map(b => ({ number: b.number, dueDate: b.dueDate, amountDue: b.amountDue })), total, reference, unappliedCredit: credit });
+    review.push({ supplier, billNumber: b.number, dueDate: b.dueDate, amountDue: b.amountDue, status, flags,
+      recipientType: type, accountNamePresent: !!accountName, supplierUnappliedCredit: credit });
     if (status === 'ready' && bank?.ok && type) {
-      fileLines.push({ name: accountName, recipientType: type, accountNumber: bank.accountNumber, sortCode: bank.sortCode, amount: total, reference });
+      fileLines.push({ name: accountName, recipientType: type, accountNumber: bank.accountNumber, sortCode: bank.sortCode, amount: b.amountDue, reference: b.number });
     }
   }
-  const sum = (s: ReviewLine['status']) => review.filter(r => r.status === s).reduce((n, r) => n + pennies(r.total), 0) / 100;
+  const sum = (s: ReviewLine['status']) => review.filter(r => r.status === s).reduce((n, r) => n + pennies(r.amountDue), 0) / 100;
   return { review, fileLines, totals: { ready: sum('ready'), needs_attention: sum('needs_attention'), excluded: sum('excluded'),
     ready_lines: fileLines.length, needs_attention_lines: review.filter(r => r.status === 'needs_attention').length,
     excluded_lines: review.filter(r => r.status === 'excluded').length } };

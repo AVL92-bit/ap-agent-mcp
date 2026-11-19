@@ -2496,7 +2496,7 @@ server.registerTool(
     "prepare_pay_run_preview",
     {
       title: "Pay Run Preview (read only, no bank details shown)",
-      description: "Read-only. Lists the company's Xero bills awaiting payment (approved, still due) grouped by supplier and shows what the Revolut bulk-transfer file WOULD contain: per supplier the bills, total, payment reference (invoice numbers), inferred recipient type, and flags (direct debit contact excluded, no bank details, no account name, bank details disagree, unapplied credit, reference too long, not GBP). Bank details are read from the Xero contact record only and are never shown here: no sort code or account number is returned. Makes Xero read calls only. Produces no file and pays nothing. Optional company key; default is St George's.",
+      description: "Read-only. Lists the company's Xero bills awaiting payment (approved, still due) and shows what the Revolut bulk-transfer file WOULD contain: one payment line per invoice (reference = that invoice's number), ordered by supplier then due date, with inferred recipient type and flags (direct debit contact excluded, no bank details, no account name, bank details disagree, unapplied credit on the supplier, invoice number too long for the reference, not GBP). Bank details are read from the Xero contact record only and are never shown here: no sort code or account number is returned. Makes Xero read calls only. Produces no file and pays nothing. Optional company key; default is St George's.",
       inputSchema: { company: companyKeySchema() },
     },
     async ({ company }) => {

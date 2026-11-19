@@ -126,7 +126,7 @@ Each row's key (column H prefix, e.g. `inbox:cnv_…:fil_…:outcome`) prevents 
 | Tool | Use |
 |---|---|
 | `run_ap_inbox` | `dry_run=true` (no writes) or `execute=true`; optional `conversation_ids`; returns `job_id`, poll with `job_id` (jobs are in memory; a deploy loses them) |
-| `prepare_pay_run_preview` | Read-only pay run preview for a company (`company` key): Xero bills awaiting payment grouped by supplier, what the Revolut file would contain, and flags. Rules in `src/pay-run.ts`, Xero reads in `src/pay-run-xero.ts`. Bank details come from the Xero contact only (`BankAccountDetails`, account name in `BatchPayments.BankAccountName`) and are never shown. "(DD)" contacts are excluded. Produces no file yet; file delivery is a pending owner decision. |
+| `prepare_pay_run_preview` | Read-only pay run preview for a company (`company` key): Xero bills awaiting payment, one payment line per invoice (reference = invoice number), what the Revolut file would contain, and flags. Rules in `src/pay-run.ts`, Xero reads in `src/pay-run-xero.ts`. Bank details come from the Xero contact only (`BankAccountDetails`, account name in `BatchPayments.BankAccountName`) and are never shown. "(DD)" contacts are excluded. Produces no file yet; file delivery is a pending owner decision. |
 | `get_scheduled_run_history` | Daily run records |
 | `get_finance_review_rows` | Read the Sheet (`incomplete_only=true` for unticked) |
 | `list_pilot_draft_attempts` | Unfinished write attempts, both routes (makes Xero calls) |

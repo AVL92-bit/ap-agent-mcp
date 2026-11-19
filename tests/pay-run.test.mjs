@@ -21,20 +21,28 @@ test('bank details: sort code and account number from the 14 digits; the batch n
   assert.equal(parseBankDetails(contact({ bankAccountDetails: '' , batchPayments: null })).problem, 'missing');
   assert.equal(parseBankDetails(contact({ bankAccountDetails: '1234' })).problem, 'unrecognised_format');
 });
-test('a normal supplier is ready: one line, amounts summed per supplier, reference is the invoice numbers', () => {
-  const r = buildPayRun([bill(), bill({ number: 'INV-2', amountDue: 50.5, dueDate: '2026-12-05' })], [contact()]);
-  assert.equal(r.review[0].status, 'ready');
-  assert.equal(r.review[0].total, 150.5);
-  assert.equal(r.review[0].reference, 'INV-1, INV-2');
-  assert.equal(r.fileLines.length, 1);
-  assert.deepEqual(r.fileLines[0], { name: 'Acme Supplies Ltd', recipientType: 'BUSINESS', accountNumber: '12345678', sortCode: '123456', amount: 150.5, reference: 'INV-1, INV-2' });
+test('one payment per invoice: each bill is its own line, its own amount, its own invoice number as the reference', () => {
+  const r = buildPayRun([bill({ number: 'INV-2', amountDue: 50.5, dueDate: '2026-12-05' }), bill()], [contact()]);
+  assert.equal(r.review.length, 2);
+  assert.deepEqual(r.review.map(l => [l.billNumber, l.amountDue, l.status]), [['INV-1', 100, 'ready'], ['INV-2', 50.5, 'ready']]); // due-date order
+  assert.equal(r.fileLines.length, 2);
+  assert.deepEqual(r.fileLines[0], { name: 'Acme Supplies Ltd', recipientType: 'BUSINESS', accountNumber: '12345678', sortCode: '123456', amount: 100, reference: 'INV-1' });
+  assert.deepEqual(r.fileLines[1], { name: 'Acme Supplies Ltd', recipientType: 'BUSINESS', accountNumber: '12345678', sortCode: '123456', amount: 50.5, reference: 'INV-2' });
+  assert.equal(r.totals.ready, 150.5);
+  assert.equal(r.totals.ready_lines, 2);
 });
-test('direct debit suppliers are excluded from the file but shown as excluded', () => {
-  const r = buildPayRun([bill({ contactName: 'Wavenet (DD)' })], [contact({ name: 'Wavenet (DD)' })]);
-  assert.equal(r.review[0].status, 'excluded');
+test('removing one invoice\'s line removes exactly that bill; nothing else changes', () => {
+  const all = buildPayRun([bill(), bill({ number: 'INV-2', amountDue: 50.5 }), bill({ number: 'INV-3', amountDue: 10 })], [contact()]);
+  const without = all.fileLines.filter(l => l.reference !== 'INV-2');
+  assert.deepEqual(without.map(l => l.reference), ['INV-1', 'INV-3']);
+  assert.equal(without.reduce((n, l) => n + l.amount, 0), 110);
+});
+test('direct debit suppliers are excluded from the file but shown as excluded, every invoice', () => {
+  const r = buildPayRun([bill({ contactName: 'Wavenet (DD)' }), bill({ number: 'INV-2', contactName: 'Wavenet (DD)' })], [contact({ name: 'Wavenet (DD)' })]);
+  assert.deepEqual(r.review.map(l => l.status), ['excluded', 'excluded']);
   assert.deepEqual(r.review[0].flags, ['direct_debit_excluded']);
   assert.equal(r.fileLines.length, 0);
-  assert.equal(r.totals.excluded, 100);
+  assert.equal(r.totals.excluded, 200);
 });
 test('missing bank details, missing account name, disagreeing numbers: flagged, no file line, never guessed', () => {
   assert.deepEqual(buildPayRun([bill()], [contact({ bankAccountDetails: '', batchPayments: { BankAccountName: 'X Ltd' } })]).review[0].flags, ['no_bank_details']);
@@ -45,20 +53,25 @@ test('missing bank details, missing account name, disagreeing numbers: flagged, 
   assert.equal(buildPayRun([bill()], [contact({ batchPayments: { BankAccountNumber: '99999999', BankAccountName: 'X Ltd' } })]).review[0].flags.includes('bank_details_disagree'), true);
   assert.equal(buildPayRun([bill()], []).review[0].flags.includes('contact_not_found'), true);
 });
-test('non-GBP and zero/negative totals are not written', () => {
+test('non-GBP and zero/negative amounts are not written', () => {
   assert.equal(buildPayRun([bill({ currency: 'EUR' })], [contact()]).review[0].flags[0], 'not_gbp');
   const zero = buildPayRun([bill({ amountDue: 0 })], [contact()]);
-  assert.equal(zero.review[0].flags.includes('zero_or_negative_total'), true);
+  assert.equal(zero.review[0].flags.includes('zero_or_negative_amount'), true);
   assert.equal(zero.fileLines.length, 0);
 });
-test('unapplied credit and a long reference are flagged but do not block the line', () => {
-  const many = Array.from({ length: 6 }, (_, i) => bill({ number: `LONGNUMBER-${i}` }));
-  const r = buildPayRun(many, [contact()], [{ contactId: 'c1', remaining: 20 }]);
-  assert.equal(r.review[0].status, 'ready');
-  assert.equal(r.review[0].flags.includes('unapplied_credit'), true);
-  assert.equal(r.review[0].flags.includes('reference_truncated'), true);
-  assert.equal(r.review[0].reference.length, REFERENCE_MAX);
-  assert.equal(r.fileLines.length, 1);
+test('unapplied credit is flagged on the supplier\'s lines but does not block them; it is never netted off', () => {
+  const r = buildPayRun([bill(), bill({ number: 'INV-2', amountDue: 50 })], [contact()], [{ contactId: 'c1', remaining: 20 }]);
+  assert.deepEqual(r.review.map(l => l.status), ['ready', 'ready']);
+  assert.equal(r.review.every(l => l.flags.includes('unapplied_credit') && l.supplierUnappliedCredit === 20), true);
+  assert.deepEqual(r.fileLines.map(l => l.amount), [100, 50]);
+});
+test('an invoice number longer than the reference limit is held for attention, never silently cut', () => {
+  const longNumber = 'X'.repeat(REFERENCE_MAX + 1);
+  const r = buildPayRun([bill({ number: longNumber })], [contact()]);
+  assert.equal(r.review[0].status, 'needs_attention');
+  assert.deepEqual(r.review[0].flags, ['reference_too_long']);
+  assert.equal(r.fileLines.length, 0);
+  assert.equal(buildPayRun([bill({ number: 'X'.repeat(REFERENCE_MAX) })], [contact()]).fileLines.length, 1);
 });
 test('the review never contains a sort code or an account number', () => {
   const json = JSON.stringify(buildPayRun([bill()], [contact()]).review);
