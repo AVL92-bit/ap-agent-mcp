@@ -907,6 +907,84 @@ const SESSION_REUSE_MS = 10 * 60 * 1000;
 /** Verified sessions are kept per Xero organisation so one company's session is never reused for another. */
 const verifiedSessions = new Map<string, { tenantId: string; accessToken: string; verifiedAt: number; tokenExpiresAt: number }>();
 
+/**
+ * Organisations authorised in one Xero login share ONE token chain: every refresh replaces the
+ * refresh token, and the old one stops working after a short grace period. So when one connection
+ * refreshes, the others in the same login hold a dead token unless they are updated too.
+ * Order in which stored tokens are tried: this organisation's own connection first, then the other
+ * connections, newest tokens first. A sibling from another login simply fails the tenant check that
+ * always follows, so trying it is safe.
+ */
+export function orderTokenSources<T extends { tenant_id: string }>(
+  entries: Array<{ row: T; obtainedAt: number }>,
+  tenantId: string
+): T[] {
+  const own = entries.filter((e) => e.row.tenant_id === tenantId);
+  const others = entries
+    .filter((e) => e.row.tenant_id !== tenantId)
+    .sort((a, b) => b.obtainedAt - a.obtainedAt);
+  return [...own, ...others].map((e) => e.row);
+}
+
+/** Valid tokens for one stored connection: reused if still fresh, otherwise refreshed and saved to that row. */
+async function usableTokensFor(
+  client: PoolClient,
+  row: ConnectionRow
+): Promise<StoredTokens> {
+  let tokens = decrypt(row.encrypted_tokens);
+  const expiresAt =
+    tokens.obtained_at +
+    (typeof tokens.expires_in === "number" ? tokens.expires_in : 0) * 1000;
+  if (Date.now() < expiresAt - 5 * 60 * 1000) return tokens;
+
+  const credentials = Buffer.from(
+    `${process.env.XERO_CLIENT_ID}:${process.env.XERO_CLIENT_SECRET}`
+  ).toString("base64");
+  const response = await xeroFetch("https://identity.xero.com/connect/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: tokens.refresh_token,
+    }),
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!response.ok) {
+    throw new Error(`Xero token refresh failed (HTTP ${response.status})`);
+  }
+  const refreshed = (await response.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+  };
+  if (
+    !refreshed.access_token ||
+    !refreshed.refresh_token ||
+    typeof refreshed.expires_in !== "number" ||
+    refreshed.expires_in <= 0
+  ) {
+    throw new Error("Xero token refresh was incomplete");
+  }
+  tokens = {
+    ...tokens,
+    ...refreshed,
+    access_token: refreshed.access_token,
+    refresh_token: refreshed.refresh_token,
+    expires_in: refreshed.expires_in,
+    obtained_at: Date.now(),
+  };
+  // The old refresh token is now spent: save the new one to this row before anything else.
+  await client.query(
+    `UPDATE xero_oauth_connections SET encrypted_tokens = $1 WHERE connection_id = $2`,
+    [encrypt(tokens), row.connection_id]
+  );
+  return tokens;
+}
+
 async function getPilotXeroSession(
   readOnly: boolean
 ): Promise<PilotXeroWriteSession> {
@@ -946,16 +1024,20 @@ async function getPilotXeroSession(
   try {
     await client.query("BEGIN");
 
-    const result = await client.query<ConnectionRow>(
+    // Every connection is locked, in a fixed order, because the connections from one Xero login
+    // share a token chain and may need to be read or updated together.
+    const allConnections = await client.query<ConnectionRow>(
       `
         SELECT connection_id, tenant_id, tenant_name,
                tenant_type, encrypted_tokens, enabled
         FROM xero_oauth_connections
-        WHERE tenant_id = $1
+        ORDER BY connection_id
         FOR UPDATE
-      `,
-      [expectedTenantId]
+      `
     );
+    const result = {
+      rows: allConnections.rows.filter((r) => r.tenant_id === expectedTenantId),
+    };
 
     const connection = result.rows[0];
 
@@ -970,75 +1052,33 @@ async function getPilotXeroSession(
       throw new Error("Xero write connection is not authorised");
     }
 
-    let tokens = decrypt(connection.encrypted_tokens);
-
-    const expiresAt =
-      tokens.obtained_at +
-      (typeof tokens.expires_in === "number"
-        ? tokens.expires_in
-        : 0) * 1000;
-
-    if (Date.now() >= expiresAt - 5 * 60 * 1000) {
-      const credentials = Buffer.from(
-        `${process.env.XERO_CLIENT_ID}:${process.env.XERO_CLIENT_SECRET}`
-      ).toString("base64");
-
-      const response = await xeroFetch(
-        "https://identity.xero.com/connect/token",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Basic ${credentials}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-            Accept: "application/json",
-          },
-          body: new URLSearchParams({
-            grant_type: "refresh_token",
-            refresh_token: tokens.refresh_token,
-          }),
-          signal: AbortSignal.timeout(20000),
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `Xero token refresh failed (HTTP ${response.status})`
-        );
+    // Try this organisation's own tokens first. If they are dead because another connection in the
+    // same Xero login has refreshed the shared chain, fall back to the newest sibling tokens: the
+    // tenant checks below make sure they are only used if they really cover this organisation.
+    const sourceEntries: Array<{ row: ConnectionRow; obtainedAt: number }> = [];
+    for (const row of allConnections.rows) {
+      try {
+        sourceEntries.push({ row, obtainedAt: decrypt(row.encrypted_tokens).obtained_at });
+      } catch {
+        // An unreadable row is never a token source.
       }
-
-      const refreshed = await response.json() as {
-        access_token?: string;
-        refresh_token?: string;
-        expires_in?: number;
-      };
-
-      if (
-        !refreshed.access_token ||
-        !refreshed.refresh_token ||
-        typeof refreshed.expires_in !== "number" ||
-        refreshed.expires_in <= 0
-      ) {
-        throw new Error("Xero token refresh was incomplete");
-      }
-
-      tokens = {
-        ...tokens,
-        ...refreshed,
-        access_token: refreshed.access_token,
-        refresh_token: refreshed.refresh_token,
-        expires_in: refreshed.expires_in,
-        obtained_at: Date.now(),
-      };
-
-      await client.query(
-        `
-          UPDATE xero_oauth_connections
-          SET encrypted_tokens = $1
-          WHERE connection_id = $2
-        `,
-        [encrypt(tokens), connection.connection_id]
-      );
     }
+    let tokens: StoredTokens | undefined;
+    let tokenSource: ConnectionRow | undefined;
+    let firstFailure: unknown;
+    for (const source of orderTokenSources(sourceEntries, expectedTenantId)) {
+      try {
+        tokens = await usableTokensFor(client, source);
+        tokenSource = source;
+        break;
+      } catch (error) {
+        firstFailure ??= error;
+      }
+    }
+    if (!tokens || !tokenSource) {
+      throw firstFailure ?? new Error("Xero write connection is not authorised");
+    }
+    const tokensFromSibling = tokenSource.connection_id !== connection.connection_id;
 
     await client.query("COMMIT");
 
@@ -1105,6 +1145,30 @@ async function getPilotXeroSession(
       organisation.Organisations[0].Name !== expectedTenantName
     ) {
       throw new Error("Xero organisation verification failed");
+    }
+
+    // The tokens are now verified for this organisation. If they were refreshed here (or borrowed
+    // from a sibling), give them to every other connection in the same Xero login, so none is left
+    // holding a refresh token that has already been replaced. Best effort: a failure here never
+    // fails the session, and the next call's sibling fallback repairs it.
+    const storedObtainedAt = sourceEntries.find((e) => e.row === tokenSource)?.obtainedAt;
+    if (tokensFromSibling || tokens.obtained_at !== storedObtainedAt) {
+      try {
+        const sameLoginIds = connections
+          .map((item) => item.id)
+          .filter((id): id is string => typeof id === "string" && id !== tokenSource.connection_id);
+        if (sameLoginIds.length) {
+          await client.query("BEGIN");
+          await client.query(
+            `UPDATE xero_oauth_connections SET encrypted_tokens = $1 WHERE connection_id = ANY($2::text[])`,
+            [encrypt(tokens), sameLoginIds]
+          );
+          await client.query("COMMIT");
+        }
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        console.warn("Could not share refreshed Xero tokens with the other connections in this login", String(error).slice(0, 200));
+      }
     }
 
     verifiedSessions.set(expectedTenantId, {
