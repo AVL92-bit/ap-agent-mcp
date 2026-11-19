@@ -2496,7 +2496,7 @@ server.registerTool(
     "prepare_pay_run_preview",
     {
       title: "Pay Run Preview (read only, no bank details shown)",
-      description: "Read-only. Lists the company's Xero bills awaiting payment (approved, still due) and shows what the Revolut bulk-transfer file WOULD contain: one payment line per invoice (reference = that invoice's number), ordered by supplier then due date, with inferred recipient type and flags (direct debit contact excluded, no bank details, no account name, bank details disagree, unapplied credit on the supplier, invoice number too long for the reference, not GBP). Bank details are read from the Xero contact record only and are never shown here: no sort code or account number is returned. Makes Xero read calls only. Produces no file and pays nothing. Optional company key; default is St George's.",
+      description: "Read-only. Lists the company's Xero bills awaiting payment (approved, still due) and shows what the Revolut bulk-transfer file WOULD contain: one payment line per invoice (reference = that invoice's number), ordered by supplier then due date, with inferred recipient type and flags (direct debit contact excluded, no bank details, no account name, bank details disagree, invoice number too long for the reference, not GBP). Invoices only: credit notes and credit on account are deliberately not shown or netted off; the owner checks those in Xero. Bank details are read from the Xero contact record only and are never shown here: no sort code or account number is returned. Makes Xero read calls only. Produces no file and pays nothing. Optional company key; default is St George's.",
       inputSchema: { company: companyKeySchema() },
     },
     async ({ company }) => {
@@ -2511,8 +2511,8 @@ server.registerTool(
             if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
             return await response.json() as Record<string, any>;
           };
-          const { bills, contacts, credits } = await loadPayRunInputs(get);
-          return buildPayRun(bills, contacts, credits);
+          const { bills, contacts } = await loadPayRunInputs(get);
+          return buildPayRun(bills, contacts);
         }, 'read');
         // Only the masked review leaves this function: run.fileLines (bank details) is never returned.
         return toolResult({ read_only: true, company: company ?? currentCompany().key, file_produced: false, totals: run.totals, lines: run.review });

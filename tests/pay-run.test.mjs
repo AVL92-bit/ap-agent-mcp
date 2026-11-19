@@ -59,11 +59,13 @@ test('non-GBP and zero/negative amounts are not written', () => {
   assert.equal(zero.review[0].flags.includes('zero_or_negative_amount'), true);
   assert.equal(zero.fileLines.length, 0);
 });
-test('unapplied credit is flagged on the supplier\'s lines but does not block them; it is never netted off', () => {
+test('invoices only: credit on account is not considered, flagged or netted off (the owner checks it in Xero)', () => {
+  // A third argument (credits) is ignored: the function takes bills and contacts only.
   const r = buildPayRun([bill(), bill({ number: 'INV-2', amountDue: 50 })], [contact()], [{ contactId: 'c1', remaining: 20 }]);
   assert.deepEqual(r.review.map(l => l.status), ['ready', 'ready']);
-  assert.equal(r.review.every(l => l.flags.includes('unapplied_credit') && l.supplierUnappliedCredit === 20), true);
+  assert.deepEqual(r.review.map(l => l.flags), [[], []]);
   assert.deepEqual(r.fileLines.map(l => l.amount), [100, 50]);
+  assert.equal(JSON.stringify(r.review).toLowerCase().includes('credit'), false);
 });
 test('an invoice number longer than the reference limit is held for attention, never silently cut', () => {
   const longNumber = 'X'.repeat(REFERENCE_MAX + 1);

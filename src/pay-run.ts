@@ -22,7 +22,6 @@ export type XeroContact = {
   bankAccountDetails?: string | null;
   batchPayments?: { BankAccountNumber?: string; BankAccountName?: string } | null;
 };
-export type XeroCredit = { contactId: string; remaining: number };
 
 /** Words in a bank account name that make it a business account. Extend as edge cases appear. */
 export const BUSINESS_NAME_WORDS = ['limited', 'ltd', 'llp', 'plc', 'lp', 'cic', 'llc', 'inc', 'trust', 'partnership', 'foundation'];
@@ -58,20 +57,19 @@ export function parseBankDetails(c: XeroContact): BankParse {
 
 export type Flag =
   | 'direct_debit_excluded' | 'not_gbp' | 'no_bank_details' | 'bank_details_unrecognised' | 'bank_details_disagree'
-  | 'no_account_name' | 'zero_or_negative_amount' | 'unapplied_credit' | 'reference_too_long' | 'contact_not_found';
+  | 'no_account_name' | 'zero_or_negative_amount' | 'reference_too_long' | 'contact_not_found';
 /** One reviewed payment line = one bill. */
 export type ReviewLine = {
   supplier: string; billNumber: string; dueDate: string | null; amountDue: number;
   status: 'ready' | 'needs_attention' | 'excluded'; flags: Flag[];
   recipientType: RecipientType | null; accountNamePresent: boolean;
-  /** Supplier-level: credit notes with credit left. Not netted off; the owner decides. */
-  supplierUnappliedCredit: number;
 };
 export type FileLine = { name: string; recipientType: RecipientType; accountNumber: string; sortCode: string; amount: number; reference: string };
 
 const pennies = (n: number) => Math.round(n * 100);
-const NON_BLOCKING: Flag[] = ['unapplied_credit'];
-export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], credits: XeroCredit[] = []) {
+/** Invoices only. Credit notes, balances and credit on account are deliberately not considered here:
+ * the owner sees those in Xero, which is a second check on each payment (owner decision 2026-11-19). */
+export function buildPayRun(bills: XeroBill[], contacts: XeroContact[]) {
   const contactById = new Map(contacts.map(c => [c.contactId, c]));
   const supplierName = (b: XeroBill) => contactById.get(b.contactId)?.name ?? b.contactName;
   const ordered = [...bills].sort((a, b) => supplierName(a).localeCompare(supplierName(b)) || (a.dueDate ?? '').localeCompare(b.dueDate ?? '') || a.number.localeCompare(b.number));
@@ -80,7 +78,6 @@ export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], credits:
   for (const b of ordered) {
     const contact = contactById.get(b.contactId);
     const supplier = supplierName(b);
-    const credit = credits.filter(x => x.contactId === b.contactId).reduce((n, x) => n + pennies(x.remaining), 0) / 100;
     const accountName = (contact?.batchPayments?.BankAccountName ?? '').trim();
     const flags: Flag[] = [];
     let excluded = false;
@@ -96,13 +93,11 @@ export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], credits:
       }
       if (b.amountDue <= 0) flags.push('zero_or_negative_amount');
       if (b.number.length > REFERENCE_MAX) flags.push('reference_too_long');
-      if (credit > 0) flags.push('unapplied_credit');
     }
-    const blocking = flags.some(f => !NON_BLOCKING.includes(f));
-    const status = excluded ? 'excluded' : blocking ? 'needs_attention' : 'ready';
+    const status = excluded ? 'excluded' : flags.length ? 'needs_attention' : 'ready';
     const type = accountName ? recipientTypeFor(accountName) : null;
     review.push({ supplier, billNumber: b.number, dueDate: b.dueDate, amountDue: b.amountDue, status, flags,
-      recipientType: type, accountNamePresent: !!accountName, supplierUnappliedCredit: credit });
+      recipientType: type, accountNamePresent: !!accountName });
     if (status === 'ready' && bank?.ok && type) {
       fileLines.push({ name: accountName, recipientType: type, accountNumber: bank.accountNumber, sortCode: bank.sortCode, amount: b.amountDue, reference: b.number });
     }

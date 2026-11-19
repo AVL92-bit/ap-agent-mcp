@@ -2,7 +2,7 @@
  * Read-only Xero loading for the pay run. `get` is injected (path relative to the Xero API root,
  * returns parsed JSON), so this is testable without Xero and cannot write: it only ever GETs.
  */
-import type { XeroBill, XeroContact, XeroCredit } from './pay-run.js';
+import type { XeroBill, XeroContact } from './pay-run.js';
 
 export type XeroGet = (path: string) => Promise<Record<string, any>>;
 const MAX_PAGES = 50;
@@ -20,8 +20,9 @@ async function paged(get: XeroGet, base: string, key: string): Promise<any[]> {
   throw new Error(`Xero ${key} pagination incomplete; refusing to build a partial pay run`);
 }
 
-/** Bills awaiting payment = approved (AUTHORISED) purchase bills with something still due. */
-export async function loadPayRunInputs(get: XeroGet): Promise<{ bills: XeroBill[]; contacts: XeroContact[]; credits: XeroCredit[] }> {
+/** Bills awaiting payment = approved (AUTHORISED) purchase bills with something still due.
+ * Invoices only: credit notes are deliberately not read (the owner checks credit in Xero). */
+export async function loadPayRunInputs(get: XeroGet): Promise<{ bills: XeroBill[]; contacts: XeroContact[] }> {
   const where = encodeURIComponent('Type=="ACCPAY"');
   const invoices = await paged(get, `Invoices?Statuses=AUTHORISED&where=${where}&summaryOnly=true`, 'Invoices');
   const bills: XeroBill[] = invoices
@@ -36,10 +37,5 @@ export async function loadPayRunInputs(get: XeroGet): Promise<{ bills: XeroBill[
     for (const c of body.Contacts) contacts.push({ contactId: c.ContactID, name: String(c.Name ?? ''),
       bankAccountDetails: c.BankAccountDetails ?? null, batchPayments: c.BatchPayments ?? null });
   }
-  const creditWhere = encodeURIComponent('Type=="ACCPAYCREDIT"');
-  const creditNotes = await paged(get, `CreditNotes?Statuses=AUTHORISED&where=${creditWhere}`, 'CreditNotes');
-  const credits: XeroCredit[] = creditNotes
-    .filter(c => typeof c.RemainingCredit === 'number' && c.RemainingCredit > 0 && c.Contact?.ContactID)
-    .map(c => ({ contactId: c.Contact.ContactID, remaining: c.RemainingCredit }));
-  return { bills, contacts, credits };
+  return { bills, contacts };
 }
