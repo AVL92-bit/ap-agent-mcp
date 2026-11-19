@@ -6,8 +6,7 @@ import { attachAndVerifyOriginal } from './xero-draft-bills.js';
 import { grossExpenseLine, vatPolicyForInbox } from './inbox-vat-policy.js';
 import type { DraftCommand, XeroDraftPort } from './ap-xero-document-coordinator.js';
 
-const INBOX = 'inb_bys7q';
-const TENANT = '45a1074b-b172-4f49-a192-f0a8e293b54d';
+import { currentCompany } from './companies.js';
 const API = 'https://api.xero.com/api.xro/2.0/';
 type Session = { tenantId: string; accessToken: string };
 
@@ -19,12 +18,12 @@ export function makeLiveXeroDraftPort(
   getSession: () => Promise<Session> = getPilotXeroWriteSession,
 ): XeroDraftPort {
   async function session(): Promise<Session> {
-    if (process.env.FRONT_ENABLED_INBOX_ID !== INBOX || process.env.XERO_PILOT_TENANT_ID !== TENANT ||
-      process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
-      throw new Error('Xero draft writes are not enabled for the configured surgery inbox and tenant');
+    if (process.env.XERO_DRAFT_WRITES_ENABLED?.toLowerCase() !== 'true') {
+      throw new Error('Xero draft writes are not enabled');
     }
+    const company = currentCompany();
     const s = await getSession();
-    if (s.tenantId !== TENANT) throw new Error('Unexpected Xero tenant');
+    if (s.tenantId !== company.xeroTenantId) throw new Error('Unexpected Xero tenant');
     return s;
   }
   return {
@@ -43,14 +42,14 @@ export function makeLiveXeroDraftPort(
         CurrencyCode: 'GBP',
         LineAmountTypes: 'Exclusive',
         LineItems: [grossExpenseLine({
-          inboxId: INBOX, description: command.description?.trim() || `${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`,
+          inboxId: currentCompany().frontInboxId, description: command.description?.trim() || `${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`,
           gross: command.gross, accountCode: command.accountCode,
         })],
       };
       const document = kind === 'Invoices'
         ? { ...base, InvoiceNumber: command.number, DueDate: command.dueDate }
         : { ...base, CreditNoteNumber: command.number };
-      if (vatPolicyForInbox(INBOX).purchaseTaxType !== 'NONE') throw new Error('Unexpected VAT policy');
+      if (vatPolicyForInbox(currentCompany().frontInboxId).purchaseTaxType !== 'NONE') throw new Error('Unexpected VAT policy');
       const response = await xeroFetch(`${API}${kind}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${s.accessToken}`, 'xero-tenant-id': s.tenantId,

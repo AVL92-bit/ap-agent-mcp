@@ -23,15 +23,14 @@ approves, submits, pays or changes documents created by anyone else.
 | Public URL | `https://ap-agent-mcp-production.up.railway.app` (`/health`, `/mcp`, `/xero/connect`, `/xero/callback`, `/xero/status`, `/diagnostics/tools`) |
 | Deploys | Railway auto-deploys every push to `main` (about 2-3 min). A deploy restarts the server. |
 | CI | GitHub Actions: `npm run build` then `node --experimental-strip-types --test tests/*.test.mjs` |
-| Front inbox | `inb_bys7q` (AP inbox) |
-| Xero organisation | St George's Road Surgery, tenant `45a1074b-b172-4f49-a192-f0a8e293b54d` |
-| Finance review Sheet | spreadsheet `1Z33UUJFeUpws0DvqihlqKm01rgTBfIhrnZOqrvABzjo`, tab `Finance review` |
+| Companies (Front inbox + Xero organisation) | `config/companies.json` is the registry: one entry per company/practice pairing ONE Front inbox with ONE Xero organisation, with a `status` of `off`, `dry_run` (scan + dry run only) or `live` (daily schedule and execute runs). St George's Road Surgery = `inb_bys7q` + tenant `45a1074b-b172-4f49-a192-f0a8e293b54d`. Lamberhurst = `inb_bys46`. Everything on the live-run path asks `currentCompany()` (`src/companies.ts`), so a document from one inbox can only be written to that company's Xero organisation. |
+| Finance review Sheet | spreadsheet `1Z33UUJFeUpws0DvqihlqKm01rgTBfIhrnZOqrvABzjo`, tab `Finance review`: one console for every company; column L says which |
 | Model | Anthropic API, Claude Sonnet 5.5 (`claude-sonnet-5-5`), key in Railway |
 | Claude access | MCP server added in the Claude desktop app (tools appear as `ap-agent__*`). New tools appear only after the app is closed and reopened. |
 
-The ids for inbox, tenant and spreadsheet are also hard-coded as safety checks in
-`src/ap-live-document-ports.ts`, `src/ap-xero-live-port.ts` and `src/google-sheets-review.ts`;
-a mismatch with the environment refuses all writes.
+The Xero session (`src/xero-pilot-test.ts`) verifies the live connection against the current company's tenant ID **and exact organisation name** on every new session, and sessions and Xero reference-data caches are kept per tenant. The spreadsheet id is still hard-coded as a safety check in `src/google-sheets-review.ts`. The older supervised "pilot" tools remain pinned to the company named by `FRONT_ENABLED_INBOX_ID` + `XERO_PILOT_TENANT_ID` (St George's); outside a run an environment that does not match an enabled registry entry is refused.
+
+**Adding a company:** (1) authorise its Xero organisation at `/xero/connect`; (2) tool `list_xero_connections` shows its tenant ID and exact name; (3) add it to `config/companies.json` as `dry_run` and add its inbox to `inbox_vat_policies` in `config/coding-policies.json` (processing is blocked without it); (4) PR, merge, deploy; (5) `run_ap_inbox` with `company` and `dry_run=true`, review; (6) set `status` to `live` in a second PR.
 
 ## 2. Railway variables (names only; never paste values into chats or code)
 
@@ -63,6 +62,7 @@ Railway restarts; nothing is written until set back to `true`.
 - Finance's job: work through **unticked rows** in the Sheet and Front conversations tagged
   **Human Review** / **No attachment - Human review**, then tick column J and archive the email.
   Open conversations are re-checked each run (cheap: no model cost, a few Xero calls).
+- Each daily run loops every `live` company in turn; one company failing never stops the others. The run record keeps totals plus `by_company` (conversations, documents, failures, left open) so the failure/query rate can be read per inbox. Status `completed_with_errors` means at least one company failed.
 - Check a run: tool `get_scheduled_run_history`, or Railway logs (`Scheduled AP run finished {...}`).
 
 ## 4. What a run does (`run_ap_inbox` / schedule → `src/ap-inbox-runner.ts`)
@@ -107,7 +107,9 @@ Columns **A-I are checked exactly** before any write (a renamed/inserted column 
 queue in the outbox and retry):
 `Logged at | Outcome | Xero draft URL | Supplier selected | Invoice / credit note ref | Gross amount | Field / failure | Question or error detail | Front conversation URL`
 Column **J `Human review complete`** (checkbox): the agent writes FALSE on new rows; finance ticks it.
-Add any new column **after J**, never in between.
+Column **K `MV Comment`**: the management accountant's own column. The agent never writes it (it leaves it blank) and never reads anything into it.
+Column **L `Practice / company`**: the company name from `config/companies.json`, written on every row. The J and L headers must exist: without them the agent refuses to write the row (it stays in the outbox and retries), so a row is never unattributed. Rows from before multi-company support carry the first company's name.
+Add any new column **after L**, never in between.
 
 Outcome labels: `Draft with uncertainty`, `Not posted - check Xero`, `Not an invoice`, `Unclear document`, `Technical failure`.
 Each row's key (column H prefix, e.g. `inbox:cnv_…:fil_…:outcome`) prevents duplicates.
@@ -174,6 +176,6 @@ Postgres tables: `ap_document_journal`, `ap_model_extraction_cache`, `ap_schedul
 ## 11. Open items / next steps
 
 - Word and Excel invoices: read them (currently a Technical failure row + Human Review).
-- Multi-company (owner plans 8 more companies/inboxes): per-company config (Xero tenant, Front inbox, Sheet, coding rules) in one service; schedule loops companies; Xero Core tier needed (>5 connections).
+- Multi-company (owner plans 8 more companies/inboxes): registry, per-company run, schedule loop and Sheet column L are built (Lamberhurst is the second). Still open: per-company coding rules beyond VAT, an AVL entry with its own VAT policy, and the Xero Core tier (>5 connections).
 - Optional: Anthropic Batch API for the 6am run (half price, slower).
 - Minor: meter-reading emails classified inconsistently (one archived, one human review).
