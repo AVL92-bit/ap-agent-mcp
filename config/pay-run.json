@@ -1,0 +1,6 @@
+{
+  "_comment": "Pay run settings. always_business: suppliers that are businesses even though their bank account name has no Limited/Ltd/LLP/PLC etc. Matched (ignoring case and extra spaces) against the Xero contact name or the bank account name. Everything else follows the account-name rule; blank account names stay blank.",
+  "always_business": [
+    "JP Medassist"
+  ]
+}

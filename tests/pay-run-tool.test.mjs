@@ -4,7 +4,15 @@ import { readFileSync } from 'node:fs';
 
 const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const preview = src.slice(src.indexOf('"prepare_pay_run_preview"'), src.indexOf('"create_pay_run_download"'));
-const download = src.slice(src.indexOf('"create_pay_run_download"'), src.indexOf('"get_scheduled_run_history"'));
+const download = src.slice(src.indexOf('"create_pay_run_download"'), src.indexOf('"explain_pay_run_counts"'));
+const explain = src.slice(src.indexOf('"explain_pay_run_counts"'), src.indexOf('"get_scheduled_run_history"'));
+
+test('the count diagnostic is read-only, company-guarded, and shows no bank details', () => {
+  assert.match(explain, /runAsCompany\(resolveCompany\(company\)/);
+  assert.match(explain, /'read'\)/);
+  assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(explain), false);
+  assert.equal(/BankAccount|BatchPayments|renderRevolutCsv|payRunDownloads/.test(explain), false);
+});
 
 test('the preview tool is read-only: only GETs against Xero, in read mode, through the company guard', () => {
   assert.match(preview, /runAsCompany\(resolveCompany\(company\)/);

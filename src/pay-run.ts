@@ -76,7 +76,13 @@ export type PayLine = {
 };
 
 const pennies = (n: number) => Math.round(n * 100);
-export function buildPayRun(bills: XeroBill[], contacts: XeroContact[]) {
+const normName = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+export type PayRunOptions = {
+  /** Suppliers that are businesses although the bank account name has no Ltd/Limited etc. (config/pay-run.json). */
+  alwaysBusiness?: string[];
+};
+export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], options: PayRunOptions = {}) {
+  const forcedBusiness = new Set((options.alwaysBusiness ?? []).map(normName));
   const contactById = new Map(contacts.map(c => [c.contactId, c]));
   const supplierName = (b: XeroBill) => contactById.get(b.contactId)?.name ?? b.contactName;
   const skipped = { direct_debit: 0, non_gbp: 0, zero_or_negative: 0 };
@@ -99,7 +105,9 @@ export function buildPayRun(bills: XeroBill[], contacts: XeroContact[]) {
       // Numbers that cannot be trusted are left blank, never guessed.
       else missing.push(bank.problem === 'missing' ? 'bank_details' : bank.problem === 'unrecognised_format' ? 'bank_details_unrecognised' : 'bank_details_disagree');
     }
-    lines.push({ supplier, billNumber: b.number, dueDate: b.dueDate, name, recipientType: name ? recipientTypeFor(name) : '',
+    const isForcedBusiness = forcedBusiness.has(normName(supplier)) || (name !== '' && forcedBusiness.has(normName(name)));
+    lines.push({ supplier, billNumber: b.number, dueDate: b.dueDate, name,
+      recipientType: isForcedBusiness ? 'BUSINESS' : name ? recipientTypeFor(name) : '',
       accountNumber, sortCode, amount: b.amountDue, reference: referenceFor(b.number), missing });
   }
   // Incomplete lines first so they are noticed; then by supplier, due date, invoice number.

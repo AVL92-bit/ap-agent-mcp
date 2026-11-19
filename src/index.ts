@@ -60,8 +60,9 @@ import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
 import { describeContactFields } from "./contact-field-shape.js";
 import { buildPayRun, summarise, renderRevolutCsv } from "./pay-run.js";
+import { loadPayRunConfig } from "./pay-run-config.js";
 import { payRunDownloads, handlePayRunDownload, DOWNLOAD_TTL_MS } from "./pay-run-download.js";
-import { loadPayRunInputs, type XeroGet } from "./pay-run-xero.js";
+import { loadPayRunInputs, explainPayRunCounts, type XeroGet } from "./pay-run-xero.js";
 import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull } from "./companies.js";
 /** The company named by an optional `company` key; with none given, the legacy env-configured company. */
 function resolveCompany(key?:string):Company {
@@ -2513,7 +2514,7 @@ server.registerTool(
             return await response.json() as Record<string, any>;
           };
           const { bills, contacts } = await loadPayRunInputs(get);
-          return buildPayRun(bills, contacts);
+          return buildPayRun(bills, contacts, loadPayRunConfig());
         }, 'read');
         // Only the masked summary leaves this function: the lines with bank details are never returned.
         return toolResult({ read_only: true, company: company ?? currentCompany().key, file_produced: false, ...summarise(run) });
@@ -2544,7 +2545,7 @@ server.registerTool(
             return await response.json() as Record<string, any>;
           };
           const { bills, contacts } = await loadPayRunInputs(get);
-          return buildPayRun(bills, contacts);
+          return buildPayRun(bills, contacts, loadPayRunConfig());
         }, 'read');
         if (!run.lines.length) return toolResult({ read_only: true, company: target.key, file_created: false, reason: "No invoices awaiting payment to include", ...summarise(run) });
         const filename = `pay-run-${target.key}-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -2553,6 +2554,32 @@ server.registerTool(
         return toolResult({ read_only: true, company: target.key, file_created: true, link: `${base}/pay-run/${id}`, one_time: true,
           expires_in_minutes: DOWNLOAD_TTL_MS / 60000, password: "the pay run download password you set in Railway", ...summarise(run) });
       } catch (error) { return safeError("Pay run download could not be created", error); }
+    }
+  );
+
+  server.registerTool(
+    "explain_pay_run_counts",
+    {
+      title: "Explain Pay Run Counts (read only)",
+      description: "Read-only diagnostic. Lists every unpaid purchase bill Xero returns for the company (draft, awaiting approval, approved) with supplier, invoice number, due date, amounts and the reason the pay run includes or skips it, plus counts and the number of supplier credit notes with credit left. Use it to compare the pay run line by line with Xero's own Awaiting payment list. Shows no bank details. Makes Xero read calls only. Optional company key; default is St George's.",
+      inputSchema: { company: companyKeySchema() },
+    },
+    async ({ company }) => {
+      try {
+        const result = await runAsCompany(resolveCompany(company), async () => {
+          const session = await getPilotXeroReadSession();
+          const get: XeroGet = async (path) => {
+            const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/${path}`, {
+              headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
+              signal: AbortSignal.timeout(25000),
+            });
+            if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
+            return await response.json() as Record<string, any>;
+          };
+          return await explainPayRunCounts(get);
+        }, 'read');
+        return toolResult({ read_only: true, ...result });
+      } catch (error) { return safeError("Pay run count check failed", error); }
     }
   );
 
