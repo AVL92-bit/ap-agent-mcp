@@ -211,3 +211,18 @@ export function renderMetroCsv(groups: MetroGroup[]): string {
   }
   return rows.map(r => r.map(csvCell).join(',')).join('\r\n') + (rows.length ? '\r\n' : '');
 }
+
+/**
+ * Name of the downloaded file. Metro's upload accepts ONLY letters, digits, space and ( ) + , . _ in a file name
+ * (hyphens are rejected: "The file name can only contain alphanumeric characters, space and ()+,._"), and its guide
+ * says the file name and contents must be unique, so the London date AND time are in the name. Underscores are
+ * used everywhere, for every bank, so a name that Metro accepts is never produced by accident.
+ */
+export const METRO_FILE_NAME = /^[A-Za-z0-9 ()+,._]+$/;
+export function payRunFileName(input: { consolidated: boolean; bank: 'metro' | 'revolut'; companyKey?: string; londonDate: string; londonTime: string }): string {
+  const stamp = `${input.londonDate.replace(/-/g, '_')}_${input.londonTime.replace(':', '')}`;
+  const company = (input.companyKey ?? '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  const name = input.consolidated ? `pay_run_metro_group_${stamp}.csv` : `pay_run_${company}_${input.bank}_${stamp}.csv`;
+  if (!METRO_FILE_NAME.test(name) || !/_\d{4}_\d{2}_\d{2}_\d{4}\.csv$/.test(name)) throw new Error('Could not build a valid pay run file name');
+  return name;
+}

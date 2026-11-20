@@ -145,3 +145,21 @@ test('the shipped registry puts both live practices on Metro', () => {
   _setCompaniesForTest(null);
   assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['lamberhurst', 'st-georges']);
 });
+
+// ---- file names: Metro's upload rejects anything but letters, digits, space and ( ) + , . _ ----
+import { payRunFileName, METRO_FILE_NAME } from '../dist/pay-run.js';
+test('the file name that Metro rejected used hyphens; the new names never do', () => {
+  assert.equal(METRO_FILE_NAME.test('pay-run-metro-group-2026-11-20 (1).csv'), false); // what failed on 2026-11-20
+  assert.equal(METRO_FILE_NAME.test('pay_run_metro_group_2026_11_20_1235 (1).csv'), true); // fine even with the browser's (1) suffix
+});
+test('consolidated Metro file: underscores only, London date and time so each file name is unique', () => {
+  const n = payRunFileName({ consolidated: true, bank: 'metro', londonDate: '2026-11-20', londonTime: '14:31' });
+  assert.equal(n, 'pay_run_metro_group_2026_11_20_1431.csv');
+  assert.match(n, METRO_FILE_NAME);
+  assert.notEqual(n, payRunFileName({ consolidated: true, bank: 'metro', londonDate: '2026-11-20', londonTime: '14:32' }));
+});
+test('a single company file turns its key into underscores too; both banks get safe names', () => {
+  assert.equal(payRunFileName({ consolidated: false, bank: 'metro', companyKey: 'st-georges', londonDate: '2026-12-07', londonTime: '09:05' }), 'pay_run_st_georges_metro_2026_12_07_0905.csv');
+  assert.equal(payRunFileName({ consolidated: false, bank: 'revolut', companyKey: 'avl', londonDate: '2026-12-07', londonTime: '09:05' }), 'pay_run_avl_revolut_2026_12_07_0905.csv');
+  for (const key of ['st-georges', 'lamberhurst', 'avl', 'a-b-c']) assert.match(payRunFileName({ consolidated: false, bank: 'metro', companyKey: key, londonDate: '2026-01-02', londonTime: '00:00' }), METRO_FILE_NAME);
+});
