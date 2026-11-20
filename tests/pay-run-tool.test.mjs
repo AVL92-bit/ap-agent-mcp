@@ -3,44 +3,68 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-const preview = src.slice(src.indexOf('"prepare_pay_run_preview"'), src.indexOf('"create_pay_run_download"'));
-const download = src.slice(src.indexOf('"create_pay_run_download"'), src.indexOf('"explain_pay_run_counts"'));
-const explain = src.slice(src.indexOf('"explain_pay_run_counts"'), src.indexOf('"get_scheduled_run_history"'));
+const between = (from, to) => src.slice(src.indexOf(from), src.indexOf(to));
+const helpers = between('async function payRunForCompany', 'const EXCEPTIONS_GUIDANCE=');
+const reader = between('async function payRunForCompany', 'async function assemblePayRun');
+const assembler = between('async function assemblePayRun', 'function payRunSummary');
+const summaryFn = between('function payRunSummary', 'const EXCEPTIONS_GUIDANCE=');
+const preview = between('"prepare_pay_run_preview"', '"create_pay_run_download"');
+const download = between('"create_pay_run_download"', '"explain_pay_run_counts"');
+const explain = between('"explain_pay_run_counts"', '"get_scheduled_run_history"');
 
+test('the Xero reader is read-only: GETs only, in read mode, through the company guard', () => {
+  assert.match(reader, /runAsCompany\(company,/);
+  assert.match(reader, /'read'\)/);
+  assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(reader), false);
+});
+test('a partial pay run is never created: any company that cannot be read fails the whole assembly', () => {
+  assert.match(assembler, /a partial pay run is never created/);
+  assert.match(assembler, /throw new Error\(`The pay run for \$\{c\.key\} could not be read/);
+});
+test('with no company key it is the ONE consolidated Metro file; with a key it is that company in its own bank\'s format', () => {
+  assert.match(assembler, /companies = metroPayRunCompanies\(\); bank = 'metro'; consolidated = true/);
+  assert.match(assembler, /companies = \[c\]; bank = c\.payBank/);
+  assert.match(assembler, /has no pay run bank set/);
+});
+test('the masked summary carries no bank details: only a boolean about the debit account, never its value', () => {
+  assert.equal(/sortCode|accountNumber|\.name\b(?!\s*:)/.test(summaryFn.replace(/p\.company\.name/g, '')), false);
+  const uses = summaryFn.match(/debitAccounts/g) ?? [];
+  assert.equal(uses.length, 1);
+  assert.match(summaryFn, /debit_account_configured: a\.debitAccounts\[p\.company\.key\] !== null/);
+  assert.match(summaryFn, /summarise\(p\.run, a\.bank\)/);
+  assert.match(summaryFn, /findDuplicates\(/);
+});
+test('the preview tool never returns bank details: only the masked summary, and no file', () => {
+  assert.match(preview, /\.\.\.payRunSummary\(a\)/);
+  assert.match(preview, /file_produced: false/);
+  assert.equal(/renderMetroCsv|renderRevolutCsv|\.lines/.test(preview.replace(/prepare_pay_run_preview[\s\S]*?inputSchema/, '')), false);
+});
+test('the download tool fails closed: password first, then every Metro debit account, all before any Xero call', () => {
+  const pw = download.indexOf('PAY_RUN_DOWNLOAD_PASSWORD) return toolFailure');
+  const debit = download.indexOf('PAY_RUN_DEBIT_ACCOUNTS has no entry for');
+  const xero = download.indexOf('assemblePayRun(company)');
+  assert.ok(pw > 0 && debit > pw && xero > debit, 'password, then debit accounts, then Xero');
+});
+test('the download tool returns the link and the masked summary, never the CSV', () => {
+  assert.equal((download.match(/renderMetroCsv\(/g) ?? []).length, 1);
+  assert.equal((download.match(/renderRevolutCsv\(/g) ?? []).length, 1);
+  assert.match(download, /payRunDownloads\.create\(csv, filename\)/);
+  const resultCalls = download.match(/toolResult\(\{[\s\S]*?\}\)/g) ?? [];
+  assert.ok(resultCalls.length >= 2);
+  for (const call of resultCalls) {
+    assert.equal(/\bcsv\b|\.lines\b|accountNumber|sortCode|debitAccount\b/.test(call), false, call);
+    assert.match(call, /payRunSummary\(a\)/);
+  }
+});
+test('file names: the consolidated Metro file and each separate company file', () => {
+  assert.match(download, /pay-run-metro-group-\$\{date\}\.csv/);
+  assert.match(download, /pay-run-\$\{a\.parts\[0\]!\.company\.key\}-\$\{a\.bank\}-\$\{date\}\.csv/);
+});
 test('the count diagnostic is read-only, company-guarded, and shows no bank details', () => {
   assert.match(explain, /runAsCompany\(resolveCompany\(company\)/);
   assert.match(explain, /'read'\)/);
   assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(explain), false);
-  assert.equal(/BankAccount|BatchPayments|renderRevolutCsv|payRunDownloads/.test(explain), false);
-});
-
-test('the preview tool is read-only: only GETs against Xero, in read mode, through the company guard', () => {
-  assert.match(preview, /runAsCompany\(resolveCompany\(company\)/);
-  assert.match(preview, /'read'\)/);
-  assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(preview), false);
-});
-test('the preview tool never returns bank details: it returns the masked summary only', () => {
-  assert.match(preview, /\.\.\.summarise\(run\)/);
-  assert.equal(/run\.lines|renderRevolutCsv/.test(preview), false);
-  assert.match(preview, /file_produced: false/);
-});
-test('the download tool is read-only against Xero, company-guarded, and fails closed without the password', () => {
-  assert.match(download, /runAsCompany\(target/);
-  assert.match(download, /'read'\)/);
-  assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(download), false);
-  assert.ok(download.indexOf('PAY_RUN_DOWNLOAD_PASSWORD) return toolFailure') > 0);
-  assert.ok(download.indexOf('PAY_RUN_DOWNLOAD_PASSWORD) return toolFailure') < download.indexOf('getPilotXeroReadSession'), 'password checked before any Xero call');
-});
-test('the download tool returns the link and the masked summary, never the CSV or any line with bank details', () => {
-  // the only use of the rendered CSV is handing it to the one-time store
-  assert.equal((download.match(/renderRevolutCsv\(/g) ?? []).length, 1);
-  assert.match(download, /payRunDownloads\.create\(renderRevolutCsv\(run\.lines\), filename\)/);
-  const resultCalls = download.match(/toolResult\(\{[\s\S]*?\}\)/g) ?? [];
-  assert.ok(resultCalls.length >= 2);
-  for (const call of resultCalls) {
-    assert.equal(/\bcsv\b|run\.lines|accountNumber|sortCode|\.name\b/.test(call), false, call);
-    assert.match(call, /summarise\(run\)/);
-  }
+  assert.equal(/BankAccount|BatchPayments|renderMetroCsv|renderRevolutCsv|payRunDownloads/.test(explain), false);
 });
 test('the download route is mounted before the other routes', () => {
   assert.ok(src.indexOf('handlePayRunDownload(req, res, url.pathname)') > 0);
