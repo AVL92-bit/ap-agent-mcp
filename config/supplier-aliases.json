@@ -1,0 +1,6 @@
+{
+  "_comment": "Supplier aliases (owner decision). When a bill's supplier name equals a key here (ignoring case, punctuation and Ltd/Limited/PLC/LLP), the agent uses the existing Xero contact named in the value, treating it as a certain match. The Xero contact must already exist in that organisation (matched on its exact name, ignoring case and punctuation); if it does not, normal matching applies. Use this when a supplier's bill carries a different legal name from the contact in Xero. The agent never creates contacts.",
+  "aliases": {
+    "Focus 4 U Ltd": "Focus House (DD)"
+  }
+}
