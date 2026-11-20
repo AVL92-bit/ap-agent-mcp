@@ -1,35 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseSupplier, characterScore, CHARACTER_MATCH_THRESHOLD } from '../dist/ap-best-candidate-selection.js';
+import { chooseSupplier, characterScore, SUPPLIER_MATCH_THRESHOLD } from '../dist/ap-best-candidate-selection.js';
 import { buildDraftFromAvailableCandidates } from '../dist/ap-draft-candidate-command.js';
 import { extractInvoiceCandidates } from '../dist/invoice-candidates.js';
 
 const c = (id, name) => ({ id, name });
 
 test('the threshold is 50%, strictly over, on characters', () => {
-  assert.equal(CHARACTER_MATCH_THRESHOLD, 0.5);
+  assert.equal(SUPPLIER_MATCH_THRESHOLD, 0.5);
 });
 test('"Focus 4 U Ltd" now matches "Focus House (DD)": over 50% on characters, and marked uncertain for finance', () => {
   const r = chooseSupplier('Focus 4 U Ltd', [c('1', 'Focus House (DD)'), c('2', 'Wavenet (DD)')]);
   assert.equal(r.value.id, '1');
   assert.ok(r.score > 0.5 && r.score < 1);
   assert.deepEqual(r.uncertainFields, ['supplier']);
-  assert.match(r.explanation, /Character-similarity/);
+  assert.match(r.explanation, /over 50% similar on characters/);
 });
 test('a name that shares nothing meaningful still finds no supplier (Clark & Hanson is genuinely missing)', () => {
   const contacts = [c('1', 'Focus House (DD)'), c('2', 'Wavenet (DD)'), c('3', 'Henry Schein'), c('4', 'British Gas (DD)')];
   assert.equal(chooseSupplier('Clark & Hanson Construction Services Ltd', contacts), null);
 });
-test('the word rule is unchanged and takes priority: same matches, same scores, same certainty as before', () => {
+test('ONE rule: every real supplier pair that matched before (including the Henry Schein cases that needed 40% on words) clears 50% on characters', () => {
+  const pairs = [['Henry Schein Medical','Henry Schein'],['Henry Schein UK Limited','Henry Schein'],['Henry Schein UK Holdings Ltd','Henry Schein'],['Henry Schein Medical Services UK Ltd','Henry Schein'],
+    ['Modulr Finance Limited','Modulr (DD)'],['Aventis Pharma trading as Sanofi','Aventis Pharma/ Sanofi (DD)'],['Water Plus Group Limited','Water Plus'],['Wavenet Limited','Wavenet (DD)'],
+    ['Healthtech 1','Healthtech-1 (DD)'],['Lantum Ltd','Lantum (DD)'],['British Gas Trading Limited','British Gas (DD)'],['Tom White Waste Ltd','Tom White (DD)'],
+    ['AMS Accountants Limited','AMS Accountants (DD)'],['Aquacool Limited','Aquacool Limited (DD)'],['Siemens Financial Services Limited','Siemens Financial'],['Focus 4 U Ltd','Focus House (DD)']];
+  for (const [bill, contact] of pairs) assert.ok(chooseSupplier(bill, [c('1', contact)]), bill + ' should match ' + contact);
+});
+test('certainty is unchanged: a contact whose every word is in the bill name is certain; anything else is flagged', () => {
   const contacts = [c('1', 'Henry Schein'), c('2', 'Focus House (DD)')];
-  const r = chooseSupplier('Henry Schein Medical', contacts);
-  assert.equal(r.value.id, '1');
-  assert.equal(r.score, 2 / 3);
-  assert.deepEqual(r.uncertainFields, []);                                  // unique containment: still certain
+  assert.deepEqual(chooseSupplier('Henry Schein Medical', contacts).uncertainFields, []);
   assert.deepEqual(chooseSupplier('Wavenet Limited', [c('9', 'Wavenet (DD)')]).uncertainFields, []);
   assert.equal(chooseSupplier('Wavenet Limited', [c('9', 'Wavenet (DD)')]).score, 1);
+  assert.deepEqual(chooseSupplier('Henry Schein UK Holdings Ltd', contacts).uncertainFields, ['supplier']); // extra entity word
+  assert.deepEqual(chooseSupplier('Water Plus Group Limited', [c('1', 'Water Plus')]).uncertainFields, ['supplier']);
 });
-test('a word match beats a better-looking character match (the word rule is tried first)', () => {
+test('the closest contact wins', () => {
   const r = chooseSupplier('Focus Business Services', [c('1', 'Focus Business Group'), c('2', 'Focus Business Services Ltd')]);
   assert.equal(r.value.id, '2');
 });
