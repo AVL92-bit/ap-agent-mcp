@@ -25,7 +25,8 @@
       "frontInboxId": "inb_d42c6",
       "xeroTenantId": "88b6f7af-6193-4d95-98a8-34bd85a1b5b6",
       "xeroTenantName": "Castletown Medical",
-      "status": "dry_run"
+      "status": "live",
+      "payBank": "metro"
     }
   ]
 }
