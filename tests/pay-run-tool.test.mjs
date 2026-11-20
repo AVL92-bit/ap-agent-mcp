@@ -56,9 +56,9 @@ test('the download tool returns the link and the masked summary, never the CSV',
     assert.match(call, /payRunSummary\(a\)/);
   }
 });
-test('file names: the consolidated Metro file and each separate company file', () => {
-  assert.match(download, /pay-run-metro-group-\$\{date\}\.csv/);
-  assert.match(download, /pay-run-\$\{a\.parts\[0\]!\.company\.key\}-\$\{a\.bank\}-\$\{date\}\.csv/);
+test('file names come from payRunFileName (Metro-safe, London date and time), never an inline hyphenated name', () => {
+  assert.match(download, /payRunFileName\(\{ consolidated: a\.consolidated, bank: a\.bank, companyKey: a\.parts\[0\]!\.company\.key, londonDate: now\.date, londonTime: now\.time \}\)/);
+  assert.equal(/pay-run-/.test(download.replace(/pay run/gi, '')), false);
 });
 test('the count diagnostic is read-only, company-guarded, and shows no bank details', () => {
   assert.match(explain, /runAsCompany\(resolveCompany\(company\)/);

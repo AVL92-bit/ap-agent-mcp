@@ -59,7 +59,7 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
 import { describeContactFields } from "./contact-field-shape.js";
-import { buildPayRun, summarise, renderRevolutCsv, renderMetroCsv, findDuplicates, MAX_LINES } from "./pay-run.js";
+import { buildPayRun, summarise, renderRevolutCsv, renderMetroCsv, findDuplicates, payRunFileName, MAX_LINES } from "./pay-run.js";
 import { loadPayRunConfig, debitAccountFor } from "./pay-run-config.js";
 import { payRunDownloads, handlePayRunDownload, DOWNLOAD_TTL_MS } from "./pay-run-download.js";
 import { loadPayRunInputs, explainPayRunCounts, type XeroGet } from "./pay-run-xero.js";
@@ -129,7 +129,7 @@ async function runAllLiveCompanies(progress:(m:string)=>void):Promise<Record<str
   }
   return {companies};
 }
-import { startDailySchedule, recentScheduledRuns } from "./ap-schedule.js";
+import { startDailySchedule, recentScheduledRuns, londonNow } from "./ap-schedule.js";
 /** One company's pay run, read live from Xero (reads only). The returned lines hold bank details: they are only
  * ever rendered into the one-time download, never returned to chat. */
 async function payRunForCompany(company: Company): Promise<ReturnType<typeof buildPayRun>> {
@@ -2588,8 +2588,9 @@ server.registerTool(
         let csv: string;
         if (a.bank === 'metro') csv = renderMetroCsv(withLines.map(p => ({ debitAccount: a.debitAccounts[p.company.key]!, lines: p.run.lines })));
         else csv = renderRevolutCsv(withLines[0]!.run.lines);
-        const date = new Date().toISOString().slice(0, 10);
-        const filename = a.consolidated ? `pay-run-metro-group-${date}.csv` : `pay-run-${a.parts[0]!.company.key}-${a.bank}-${date}.csv`;
+        // Metro rejects hyphens in file names, and wants file names unique: underscores, London date and time.
+        const now = londonNow();
+        const filename = payRunFileName({ consolidated: a.consolidated, bank: a.bank, companyKey: a.parts[0]!.company.key, londonDate: now.date, londonTime: now.time });
         const id = payRunDownloads.create(csv, filename);
         // Only the link and the masked summary leave this function: the CSV itself is never returned.
         return toolResult({ read_only: true, file_created: true, link: `${base}/pay-run/${id}`, one_time: true,
