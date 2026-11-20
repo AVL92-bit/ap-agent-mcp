@@ -103,7 +103,7 @@ export async function dryRunApInbox(input: {
       return p;
     }, begin: async () => {}, complete: async () => {},
     // A long thread's older documents are only reported here, never recorded.
-    skip: async (c, a) => { item(c).documents.push({ attachmentId: a, filename: '', outcome: 'not_drafted', reason: 'Would be skipped: older document in a long email thread' }); } } : undefined,
+    skip: async (c, a, filename) => { item(c).documents.push({ attachmentId: a, filename: filename ?? '', outcome: 'not_drafted', reason: 'Would be skipped: older document in a long email thread' }); } } : undefined,
   };
   // Drafts "created" earlier in this dry run are visible to later documents, as they would be live.
   const simulated = new Map<string, { id: string; kind: string; total: number; date: string }>();
