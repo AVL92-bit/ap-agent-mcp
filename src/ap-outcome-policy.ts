@@ -16,6 +16,8 @@ export function classifyNoAttachment(text:string):ApOutcome {
   if (/\bdirect\s+debit\b/i.test(subject) && !/\binvoice\b/i.test(subject) &&
     /\b(?:upcoming|advance\s+notice|will\s+be\s+(?:collected|taken|debited)|due\s+to\s+be\s+(?:collected|taken)|collection\s+date|payment\s+(?:collection|will\s+be)|payment\s+to)\b/i.test(subject))
     return 'non_finance_no_attachment';
-  return /\b(invoice|statement|reminder|overdue|credit note|payment due|bill|accounts payable)\b/i.test(text)
+  // "remittance" / "payment advice" (owner decision 2026-11-20): a supplier asking about or sending a remittance
+  // needs a person, even with nothing attached.
+  return /\b(invoice|statement|reminder|overdue|credit note|payment due|bill|accounts payable|remittance|payment advice)\b/i.test(text)
     ? 'finance_no_attachment' : 'non_finance_no_attachment';
 }
