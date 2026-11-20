@@ -1,6 +1,5 @@
 import { DocumentNeedsHumanReview } from './ap-document-verification.js';
 import { chooseAccount, chooseSupplier, type ContactCandidate, type AccountCandidate } from './ap-best-candidate-selection.js';
-import { aliasContact } from './supplier-aliases.js';
 import type { InvoiceCandidates } from './invoice-candidates.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 function normaliseInvoiceDate(value?: string | null): string | null {
@@ -79,12 +78,7 @@ export async function buildDraftFromAvailableCandidates(input: {
   reviewNotes?: string[];
 }): Promise<DraftCommand> {
   const name = input.candidates.supplier?.value?.trim() || input.pdf.filename.replace(/\.pdf$/i, '').slice(0, 100);
-  // An owner-configured alias (config/supplier-aliases.json) names the existing Xero contact for this bill
-  // supplier: a certain match. With no alias, or when that contact does not exist here, normal matching applies.
-  const alias = aliasContact(name, input.contacts);
-  const matched = alias
-    ? { value: alias, score: 1, uncertainFields: [] as string[], explanation: 'Owner-configured supplier alias' }
-    : chooseSupplier(name, input.contacts);
+  const matched = chooseSupplier(name, input.contacts);
   // Supplier uncertainty is recorded, not a draft veto. No new contacts are created.
   if (!matched) {
     const ref = input.candidates.reference?.value, gross = input.candidates.grossAmount?.value;

@@ -13,6 +13,30 @@ export function supplierScore(source: string, candidate: string): number {
   const intersection = [...x].filter(t => y.has(t)).length;
   return intersection / Math.max(x.size, y.size);
 }
+/** Character similarity of two normalised names (Sorensen-Dice on character pairs): 1 = identical, 0 = nothing
+ * in common. Catches names that share characters but few whole words, e.g. "Focus 4 U" and "Focus House". */
+export function characterScore(source: string, candidate: string): number {
+  const a = norm(source), b = norm(candidate);
+  if (a.length < 3 || b.length < 3) return a === b && a.length > 0 ? 1 : 0;
+  if (a === b) return 1;
+  const pairs = (s: string) => { const m = new Map<string, number>(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) ?? 0) + 1); } return m; };
+  const x = pairs(a), y = pairs(b);
+  let shared = 0, total = 0;
+  for (const [g, n] of x) { shared += Math.min(n, y.get(g) ?? 0); total += n; }
+  for (const n of y.values()) total += n;
+  return total ? (2 * shared) / total : 0;
+}
+/** Owner decision 2026-11-20: when no contact shares enough WORDS (over 40%), fall back to similarity on
+ * CHARACTERS, strictly over 50%. A character-only match is always uncertain (supplier flagged for finance). */
+export const CHARACTER_MATCH_THRESHOLD = 0.5;
+function chooseSupplierByCharacters(source: string, valid: ContactCandidate[]): Selection<ContactCandidate> | null {
+  const ranked = valid.map(value => ({value, score: characterScore(source, value.name)}))
+    .sort((a,b) => b.score - a.score || a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
+  const first = ranked[0];
+  if (!first || first.score <= CHARACTER_MATCH_THRESHOLD) return null;
+  return {value:first.value, score:first.score, uncertainFields:['supplier'],
+    explanation:'Character-similarity match (over 50%); finance to verify'};
+}
 export function chooseSupplier(source_: string, contacts: ContactCandidate[]): Selection<ContactCandidate> | null {
   const source = source_;
   const valid = contacts.filter(c => c.id && c.name);
@@ -20,8 +44,9 @@ export function chooseSupplier(source_: string, contacts: ContactCandidate[]): S
   const ranked = valid.map(value => ({value, score: supplierScore(source, value.name)}))
     .sort((a,b) => b.score - a.score || a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
   const first = ranked[0];
-  // Only existing Xero contacts with strictly greater than 40% similarity qualify.
-  if (first.score <= 0.40) return null;
+  // Only existing Xero contacts with strictly greater than 40% word similarity qualify first; otherwise
+  // the character-similarity fallback (over 50%) is tried.
+  if (first.score <= 0.40) return chooseSupplierByCharacters(source, valid);
   // Every word of the contact's name appears in the document's supplier name (e.g. "Henry Schein"
   // in "Henry Schein Medical", "Modulr" in "Modulr Finance") and no other contact qualifies that way:
   // the same supplier, not an uncertain match.
