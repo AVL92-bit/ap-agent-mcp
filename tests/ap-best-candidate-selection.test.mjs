@@ -9,19 +9,17 @@ test('contact default purchase account is used only without supplier history, an
 test('no generic fallback: without supplier history or contact default there is no account',()=>{assert.equal(chooseAccount([{code:'001',name:'Bank',type:'BANK',status:'ACTIVE'},{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}]),null)});
 test('bank and liability accounts are never selected, even from history',()=>{assert.equal(chooseAccount([{code:'001',name:'Bank',type:'BANK',status:'ACTIVE'}],'001'),null)});
 
-test('strictly greater than 40 percent supplier score qualifies',()=>{
+test('a name strictly over 50 percent similar on characters qualifies, as an uncertain best candidate',()=>{
  const match=chooseSupplier('Alpha Beta Gamma',[{id:'a',name:'Alpha Delta Gamma'}]);
  assert.equal(match?.value.id,'a');
+ assert.ok(match.score>0.5 && match.score<1);
  assert.deepEqual(match?.uncertainFields,['supplier']);
 });
-test('50 percent supplier score qualifies as an uncertain best candidate',()=>{
- const match=chooseSupplier('Alpha Beta',[{id:'a',name:'Alpha Delta'}]);
- assert.equal(match?.value.id,'a');
- assert.equal(match?.score,0.5);
- assert.deepEqual(match?.uncertainFields,['supplier']);
+test('exactly 50 percent character similarity does not qualify',()=>{
+ assert.equal(chooseSupplier('abcde',[{id:'a',name:'abcxy'}]),null);
 });
-test('exactly 40 percent supplier score does not qualify',()=>{
- assert.equal(chooseSupplier('Alpha Beta Gamma Delta Epsilon',[{id:'a',name:'Alpha Beta'}]),null);
+test('a long name that merely starts with the contact name is not enough on its own',()=>{
+ assert.equal(chooseSupplier('Alpha Beta Gamma Delta Epsilon Zeta Eta Theta',[{id:'a',name:'Alpha Beta'}]),null);
 });
 test('highest scoring existing contact wins and never creates a contact',()=>{
  const match=chooseSupplier('Water Plus Group Limited',[{id:'approved',name:'Water Plus Limited'},{id:'other',name:'Water Services Ltd'}]);

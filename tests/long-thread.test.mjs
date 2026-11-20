@@ -50,6 +50,21 @@ test('documents already handled do not count and are never skipped again; they s
   // a document that failed technically last time is still unprocessed
   assert.equal(planLongThread(docs, new Map([['fil_a~1', 'technical_failure']])).isLong, true);
 });
+test('a spreadsheet or Word file, even a newer one, never counts as a source or decides the newest email', () => {
+  const xlsx = { id: 'fil_x', filename: 'Customer transactions.xlsx', messageId: 'msg_9', receivedAt: T(28) }; // newest of all
+  const docx = { id: 'fil_d', filename: 'note.docx', messageId: 'msg_8', receivedAt: T(27) };
+  const bareEml = { id: 'fil_e', filename: 'forward.eml', messageId: 'msg_7', receivedAt: T(26) };
+  const pdfs = [inEml('fil_a', 1, 1), inEml('fil_b', 1, 5), inEml('fil_c', 1, 3)];
+  const p = planLongThread([...pdfs, xlsx, docx, bareEml], new Map());
+  assert.equal(p.isLong, true);
+  assert.equal(p.sources, 3);                                            // only the three PDF emails
+  assert.deepEqual(p.keptDocuments.map(d => d.id), ['fil_b~1']);         // newest PDF, not the newer spreadsheet
+  assert.deepEqual(p.skipped.map(d => d.id).sort(), ['fil_a~1', 'fil_c~1']);
+  // the non-PDF documents are untouched: kept, so they are handled exactly as before
+  for (const d of [xlsx, docx, bareEml]) assert.ok(p.keep.includes(d));
+  // and with only two PDF emails plus lots of other files it is still not a long thread
+  assert.equal(planLongThread([inEml('fil_a', 1, 1), inEml('fil_b', 1, 5), xlsx, docx, bareEml], new Map()).isLong, false);
+});
 test('without dates, the email that appears last in the thread is the newest', () => {
   const docs = ['a', 'b', 'c'].map(s => ({ id: `fil_${s}`, filename: `${s}.pdf`, messageId: `msg_${s}` }));
   const p = planLongThread(docs, new Map());

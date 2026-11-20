@@ -27,7 +27,10 @@ export type LongThreadPlan<T extends ThreadAttachment> =
 
 /** `previous` maps attachment id -> earlier journal status. Pure: no I/O. */
 export function planLongThread<T extends ThreadAttachment>(attachments: T[], previous: Map<string, string>): LongThreadPlan<T> {
-  const unprocessed = attachments.filter(a => a.id && !HANDLED_STATUSES.has(previous.get(a.id) ?? ''));
+  // Only PDFs take part: they are the only documents that can be drafted, so only they can be "the most recent
+  // invoice". Excel, Word and attached emails without a PDF are neither counted nor skipped here: they are
+  // handled exactly as before (a Human review row) and never decide which email is the newest.
+  const unprocessed = attachments.filter(a => a.id && /\.pdf$/i.test(a.filename) && !HANDLED_STATUSES.has(previous.get(a.id) ?? ''));
   const bySource = new Map<string, T[]>();
   for (const a of unprocessed) {
     const key = sourceOf(a);

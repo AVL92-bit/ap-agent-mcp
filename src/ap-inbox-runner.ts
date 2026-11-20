@@ -22,7 +22,7 @@ export type InboxPort = {
   expandEmail?(conversation: InboxConversation, attachment: InboxAttachment): Promise<InboxAttachment[]>;
   journal?: { previous?(conversationId:string, attachmentId:string):Promise<{status:string; xeroId?:string|null; writeIntent?:boolean}|null>; begin(conversationId:string, attachmentId:string, sha256:string):Promise<void>; claimCreate?(conversationId:string, attachmentId:string):Promise<boolean>; releaseCreate?(conversationId:string, attachmentId:string):Promise<void>; complete(conversationId:string, attachmentId:string, status:string, xeroId?:string):Promise<void>;
     /** Record an older document of a long thread as skipped, so it is never re-read or re-reported. */
-    skip?(conversationId:string, attachmentId:string):Promise<void> };
+    skip?(conversationId:string, attachmentId:string, filename?:string):Promise<void> };
 };
 export type InboxRunItem = { conversationId: string; tag?: string; archived: boolean; documents: number; failures: string[]; skippedOlder?: number };
 export type InboxRunReport = { conversations: number; documents: number; archived: number; items: InboxRunItem[]; stoppedEarly?: string };
@@ -87,7 +87,7 @@ export async function runApInbox(port: InboxPort, xero: XeroDraftPort): Promise<
     const plan = planLongThread(conversation.attachments, new Map([...previousRows].flatMap(([id, p]) => p ? [[id, p.status] as [string, string]] : [])));
     if (plan.isLong) {
       for (const old of plan.skipped) {
-        try { await port.journal?.skip?.(conversation.id, old.id); }
+        try { await port.journal?.skip?.(conversation.id, old.id, old.filename); }
         catch (e) { item.failures.push(`Journal skip failed for ${old.id}: ${String(e)}`); }
       }
       item.skippedOlder = plan.skipped.length;

@@ -5,23 +5,35 @@ export type Selection<T> = { value: T; uncertainFields: string[]; explanation: s
 // Legal forms and bookkeeping tags such as "(DD)" / "Direct Debit" are not part of a supplier's name.
 const norm = (s: string): string => s.toLowerCase().replace(/\(\s*dd\s*\)|\bdirect\s+debit\b/g, ' ')
   .replace(/\b(ltd|limited|plc|llp|the)\b/g, ' ').replace(/[^a-z0-9]+/g, ' ').replace(/(?:\s+dd)+$/, '').trim();
-export function supplierScore(source: string, candidate: string): number {
+/** Character similarity of two normalised supplier names (Sorensen-Dice on character pairs): 1 = identical,
+ * 0 = nothing in common. Legal forms and "(DD)" tags are ignored first (see `norm`). */
+export function characterScore(source: string, candidate: string): number {
   const a = norm(source), b = norm(candidate);
-  if (!a || !b) return 0;
+  if (a.length < 3 || b.length < 3) return a === b && a.length > 0 ? 1 : 0;
   if (a === b) return 1;
-  const x = new Set(a.split(' ')), y = new Set(b.split(' '));
-  const intersection = [...x].filter(t => y.has(t)).length;
-  return intersection / Math.max(x.size, y.size);
+  const pairs = (s: string) => { const m = new Map<string, number>(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); m.set(g, (m.get(g) ?? 0) + 1); } return m; };
+  const x = pairs(a), y = pairs(b);
+  let shared = 0, total = 0;
+  for (const [g, n] of x) { shared += Math.min(n, y.get(g) ?? 0); total += n; }
+  for (const n of y.values()) total += n;
+  return total ? (2 * shared) / total : 0;
 }
+/** The one supplier matching rule (owner decision 2026-11-20): a Xero contact qualifies when its name is
+ * strictly MORE than 50% similar to the bill's supplier name, measured on characters. This replaces the earlier
+ * word-based rule (over 40% of words): every real pair that rule matched also clears 50% on characters, and
+ * names that share characters but few words (Focus 4 U / Focus House) now match too. */
+export const SUPPLIER_MATCH_THRESHOLD = 0.5;
+/** Kept under its original name; it is the character score. */
+export const supplierScore = characterScore;
 export function chooseSupplier(source_: string, contacts: ContactCandidate[]): Selection<ContactCandidate> | null {
   const source = source_;
   const valid = contacts.filter(c => c.id && c.name);
   if (!valid.length) return null;
-  const ranked = valid.map(value => ({value, score: supplierScore(source, value.name)}))
+  const ranked = valid.map(value => ({value, score: characterScore(source, value.name)}))
     .sort((a,b) => b.score - a.score || a.value.name.localeCompare(b.value.name) || a.value.id.localeCompare(b.value.id));
   const first = ranked[0];
-  // Only existing Xero contacts with strictly greater than 40% similarity qualify.
-  if (first.score <= 0.40) return null;
+  // Only existing Xero contacts with strictly greater than 50% character similarity qualify.
+  if (first.score <= SUPPLIER_MATCH_THRESHOLD) return null;
   // Every word of the contact's name appears in the document's supplier name (e.g. "Henry Schein"
   // in "Henry Schein Medical", "Modulr" in "Modulr Finance") and no other contact qualifies that way:
   // the same supplier, not an uncertain match.
@@ -35,7 +47,7 @@ export function chooseSupplier(source_: string, contacts: ContactCandidate[]): S
     && !extraWords.some(w => ENTITY_WORDS.has(w));
   const ambiguous = (first.score < 1 && !uniqueContainment) || (ranked[1] && ranked[1].score === first.score);
   return {value:first.value, score:first.score, uncertainFields: ambiguous ? ['supplier'] : [],
-    explanation: ambiguous ? 'Best available supplier contact; finance to verify' : 'Normalised supplier name match'};
+    explanation: ambiguous ? 'Best available supplier contact (over 50% similar on characters); finance to verify' : 'Normalised supplier name match'};
 }
 /** Accounts the agent may post to (owner decision 2026-11-19): expense accounts, plus prepayment accounts
  * when the supplier's previous invoice used one. This is an ALLOWLIST using Xero's real account types:
