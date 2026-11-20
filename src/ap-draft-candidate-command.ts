@@ -83,7 +83,7 @@ export async function buildDraftFromAvailableCandidates(input: {
   if (!matched) {
     const ref = input.candidates.reference?.value, gross = input.candidates.grossAmount?.value;
     throw new DocumentNeedsHumanReview('supplier_missing',
-      `Supplier "${name}" is not in Xero (no contact over 40% similar). Please create it as a supplier contact. Once the supplier exists in Xero, the invoice${ref ? ` ${ref}` : ''}${gross !== undefined ? ` for ${gross}` : ''} will be drafted automatically on the next run: no further action is needed after creating the contact. The agent creates no contacts.`);
+      `Supplier "${name}" is not in Xero (no contact over 50% similar). Please create it as a supplier contact. Once the supplier exists in Xero, the invoice${ref ? ` ${ref}` : ''}${gross !== undefined ? ` for ${gross}` : ''} will be drafted automatically on the next run: no further action is needed after creating the contact. The agent creates no contacts.`);
   }
   const supplier = matched;
   const historicalCode = input.recentAccountCodeForContact ? await input.recentAccountCodeForContact(supplier.value.id) : undefined;
