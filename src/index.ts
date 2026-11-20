@@ -59,11 +59,11 @@ async function extractionResponse(input:{text:string;pdf?:Uint8Array;filename:st
 import { startRunJob, getRunJob } from "./ap-run-jobs.js";
 import { readFinanceReviewRows } from "./google-sheets-review.js";
 import { describeContactFields } from "./contact-field-shape.js";
-import { buildPayRun, summarise, renderRevolutCsv } from "./pay-run.js";
-import { loadPayRunConfig } from "./pay-run-config.js";
+import { buildPayRun, summarise, renderRevolutCsv, renderMetroCsv, findDuplicates, MAX_LINES } from "./pay-run.js";
+import { loadPayRunConfig, debitAccountFor } from "./pay-run-config.js";
 import { payRunDownloads, handlePayRunDownload, DOWNLOAD_TTL_MS } from "./pay-run-download.js";
 import { loadPayRunInputs, explainPayRunCounts, type XeroGet } from "./pay-run-xero.js";
-import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull } from "./companies.js";
+import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull, metroPayRunCompanies } from "./companies.js";
 /** The company named by an optional `company` key; with none given, the legacy env-configured company. */
 function resolveCompany(key?:string):Company {
   const c=key?companyByKey(key):currentCompany();
@@ -130,6 +130,60 @@ async function runAllLiveCompanies(progress:(m:string)=>void):Promise<Record<str
   return {companies};
 }
 import { startDailySchedule, recentScheduledRuns } from "./ap-schedule.js";
+/** One company's pay run, read live from Xero (reads only). The returned lines hold bank details: they are only
+ * ever rendered into the one-time download, never returned to chat. */
+async function payRunForCompany(company: Company): Promise<ReturnType<typeof buildPayRun>> {
+  return runAsCompany(company, async () => {
+    const session = await getPilotXeroReadSession();
+    const get: XeroGet = async (path) => {
+      const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/${path}`, {
+        headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
+        signal: AbortSignal.timeout(25000),
+      });
+      if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
+      return await response.json() as Record<string, any>;
+    };
+    const { bills, contacts } = await loadPayRunInputs(get);
+    return buildPayRun(bills, contacts, loadPayRunConfig());
+  }, 'read');
+}
+/** Which companies a pay run covers and each one's live Xero data. With a company key: that company, in its own
+ * bank's format (a Metro company: a Metro file of just its lines; a Revolut company such as AVL: its own Revolut
+ * file). With no key: ONE consolidated Metro file for every Metro company. If any company cannot be read, nothing
+ * is produced: a partial pay run is never created. */
+async function assemblePayRun(companyKey: string | undefined) {
+  let companies: Company[], bank: 'metro' | 'revolut', consolidated: boolean;
+  if (companyKey) {
+    const c = resolveCompany(companyKey);
+    if (!c.payBank) throw new Error(`${c.key} has no pay run bank set (payBank in config/companies.json)`);
+    companies = [c]; bank = c.payBank; consolidated = false;
+  } else {
+    companies = metroPayRunCompanies(); bank = 'metro'; consolidated = true;
+    if (!companies.length) throw new Error('No company is set up for the Metro pay run (payBank "metro" in config/companies.json)');
+  }
+  const debitAccounts: Record<string, string | null> = {};
+  if (bank === 'metro') for (const c of companies) debitAccounts[c.key] = debitAccountFor(c.key);
+  const parts: Array<{ company: Company; run: ReturnType<typeof buildPayRun> }> = [];
+  for (const c of companies) {
+    try { parts.push({ company: c, run: await payRunForCompany(c) }); }
+    catch (error) { throw new Error(`The pay run for ${c.key} could not be read, so no file was produced (a partial pay run is never created): ${String(error).slice(0, 200)}`); }
+  }
+  return { bank, consolidated, parts, debitAccounts };
+}
+/** Masked view of an assembled pay run: no sort codes, account numbers or account names. */
+function payRunSummary(a: Awaited<ReturnType<typeof assemblePayRun>>) {
+  const combinedLines = a.parts.flatMap(p => p.run.lines);
+  const combined = { lines: combinedLines.length, complete_lines: combinedLines.filter(l => !l.missing.length).length,
+    incomplete_lines: combinedLines.filter(l => l.missing.length).length,
+    amount: combinedLines.reduce((n, l) => n + Math.round(l.amount * 100), 0) / 100, over_metro_limit: a.bank === 'metro' && combinedLines.length > MAX_LINES };
+  return {
+    bank: a.bank, consolidated_file: a.consolidated, companies_included: a.parts.map(p => p.company.key), combined,
+    ...(a.bank === 'metro' ? { duplicates: findDuplicates(a.parts.flatMap(p => p.run.lines.map(line => ({ company: p.company.key, line })))) } : {}),
+    companies: a.parts.map(p => ({ company: p.company.key, name: p.company.name,
+      ...(a.bank === 'metro' ? { debit_account_configured: a.debitAccounts[p.company.key] !== null } : {}), ...summarise(p.run, a.bank) })),
+  };
+}
+
 const EXCEPTIONS_GUIDANCE='Exceptions are invoice extraction and coding uncertainties only. Never record payment status, payment-platform notices (e.g. Modulr), duplicate-payment or overdue warnings: payment is handled at human review. Record a credit, brought-forward or account balance only as an amount-uncertainty note. Exceptions are noted in the finance review Sheet and never block a Xero draft.';
 // Only the configured pilot Front inbox is accessible.
 // Xero pilot restrictions are independently enforced
@@ -2498,26 +2552,14 @@ server.registerTool(
     "prepare_pay_run_preview",
     {
       title: "Pay Run Preview (read only, no bank details shown)",
-      description: "Read-only. Lists the company's Xero bills awaiting payment (approved, still due) and shows what the Revolut bulk-transfer template WOULD contain: one payment line per invoice (reference = the invoice number, last 18 characters if longer), with every gap left blank for the owner to fill (account name, bank details, or both) and listed per line under `blank`. Incomplete lines come first. Skipped entirely and only counted: direct debit (DD) contacts, non-GBP bills, zero or negative amounts. Invoices only: credit notes and credit on account are deliberately not shown; the owner checks those in Xero. Bank details are read from the Xero contact record only and are never shown here: no sort code or account number is returned. Makes Xero read calls only. Produces no file and pays nothing. Optional company key; default is St George's.",
+      description: "Read-only. Shows what the pay run file WOULD contain, per company, from Xero bills awaiting payment (approved, still due): one payment line per invoice (reference = the invoice number with special characters removed, last 18 characters if longer), every gap left blank for the owner to fill (account name, bank details, or both) and listed per line under `blank`, incomplete lines first. Skipped entirely and only counted: direct debit (DD) contacts, non-GBP bills, zero or negative amounts. Invoices only: credit notes and credit on account are deliberately not shown. With NO company key: the ONE consolidated Metro Bank file for every practice set up with payBank metro (each line is paid from that practice's own Metro account; names are cut to their first 18 characters and `name_shortened` says which; duplicates within the file are listed). With a company key: that company's file in its own bank's format (AVL pays through Revolut, in its own separate file). If any company cannot be read, nothing is reported as a pay run. Bank details are read from the Xero contact record only and are never shown here. Makes Xero read calls only. Produces no file and pays nothing.",
       inputSchema: { company: companyKeySchema() },
     },
     async ({ company }) => {
       try {
-        const run = await runAsCompany(resolveCompany(company), async () => {
-          const session = await getPilotXeroReadSession();
-          const get: XeroGet = async (path) => {
-            const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/${path}`, {
-              headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
-              signal: AbortSignal.timeout(25000),
-            });
-            if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
-            return await response.json() as Record<string, any>;
-          };
-          const { bills, contacts } = await loadPayRunInputs(get);
-          return buildPayRun(bills, contacts, loadPayRunConfig());
-        }, 'read');
+        const a = await assemblePayRun(company);
         // Only the masked summary leaves this function: the lines with bank details are never returned.
-        return toolResult({ read_only: true, company: company ?? currentCompany().key, file_produced: false, ...summarise(run) });
+        return toolResult({ read_only: true, file_produced: false, ...payRunSummary(a) });
       } catch (error) { return safeError("Pay run preview failed", error); }
     }
   );
@@ -2526,33 +2568,32 @@ server.registerTool(
     "create_pay_run_download",
     {
       title: "Create Pay Run File Download Link",
-      description: "Builds the Revolut bulk-transfer template for a company from Xero bills awaiting payment (same rules as prepare_pay_run_preview) and returns ONLY a one-time download link plus the masked summary. The file contains supplier bank details and never passes through chat: the link opens in a browser, asks for the pay run download password (PAY_RUN_DOWNLOAD_PASSWORD, set by the owner in Railway), works once and expires after 15 minutes. The file is held in server memory only. Makes Xero read calls only; pays nothing. Refuses to run if the password is not configured. Optional company key; default is St George's.",
+      description: "Builds the pay run file and returns ONLY a one-time download link plus the masked summary. With NO company key: the ONE consolidated Metro Bank CSV for all practices set up with payBank metro (seven fields, no header row; each line paid from its own practice's Metro account, set in PAY_RUN_DEBIT_ACCOUNTS; names cut to their first 18 characters). With a company key: that company alone in its own bank's format (AVL: a separate Revolut template). The file contains supplier bank details and never passes through chat: the link opens in a browser, asks for the pay run download password (PAY_RUN_DOWNLOAD_PASSWORD, set by the owner in Railway), works once and expires after 15 minutes. Held in server memory only. Makes Xero read calls only; pays nothing. Refuses if the password, or a Metro practice's debit account, is not configured; if any company cannot be read, no file is produced.",
       inputSchema: { company: companyKeySchema() },
     },
     async ({ company }) => {
       try {
         if (!process.env.PAY_RUN_DOWNLOAD_PASSWORD) return toolFailure("PAY_RUN_DOWNLOAD_PASSWORD is not set in Railway; no file was created");
         const base = new URL(process.env.XERO_REDIRECT_URI ?? "").origin;
-        const target = resolveCompany(company);
-        const run = await runAsCompany(target, async () => {
-          const session = await getPilotXeroReadSession();
-          const get: XeroGet = async (path) => {
-            const response = await xeroFetch(`https://api.xero.com/api.xro/2.0/${path}`, {
-              headers: { Authorization: `Bearer ${session.accessToken}`, "xero-tenant-id": session.tenantId, Accept: "application/json" },
-              signal: AbortSignal.timeout(25000),
-            });
-            if (!response.ok) throw new Error(`Xero read HTTP ${response.status}`);
-            return await response.json() as Record<string, any>;
-          };
-          const { bills, contacts } = await loadPayRunInputs(get);
-          return buildPayRun(bills, contacts, loadPayRunConfig());
-        }, 'read');
-        if (!run.lines.length) return toolResult({ read_only: true, company: target.key, file_created: false, reason: "No invoices awaiting payment to include", ...summarise(run) });
-        const filename = `pay-run-${target.key}-${new Date().toISOString().slice(0, 10)}.csv`;
-        const id = payRunDownloads.create(renderRevolutCsv(run.lines), filename);
+        // Check the Metro debit accounts BEFORE any Xero call, so a missing setting is found at once.
+        const plannedBank = company ? resolveCompany(company).payBank : 'metro';
+        if (plannedBank === 'metro') {
+          const needed = company ? [resolveCompany(company)] : metroPayRunCompanies();
+          const missing = needed.filter(c => debitAccountFor(c.key) === null).map(c => c.key);
+          if (missing.length) return toolFailure(`PAY_RUN_DEBIT_ACCOUNTS has no entry for: ${missing.join(', ')}; no file was created`);
+        }
+        const a = await assemblePayRun(company);
+        const withLines = a.parts.filter(p => p.run.lines.length);
+        if (!withLines.length) return toolResult({ read_only: true, file_created: false, reason: "No invoices awaiting payment to include", ...payRunSummary(a) });
+        let csv: string;
+        if (a.bank === 'metro') csv = renderMetroCsv(withLines.map(p => ({ debitAccount: a.debitAccounts[p.company.key]!, lines: p.run.lines })));
+        else csv = renderRevolutCsv(withLines[0]!.run.lines);
+        const date = new Date().toISOString().slice(0, 10);
+        const filename = a.consolidated ? `pay-run-metro-group-${date}.csv` : `pay-run-${a.parts[0]!.company.key}-${a.bank}-${date}.csv`;
+        const id = payRunDownloads.create(csv, filename);
         // Only the link and the masked summary leave this function: the CSV itself is never returned.
-        return toolResult({ read_only: true, company: target.key, file_created: true, link: `${base}/pay-run/${id}`, one_time: true,
-          expires_in_minutes: DOWNLOAD_TTL_MS / 60000, password: "the pay run download password you set in Railway", ...summarise(run) });
+        return toolResult({ read_only: true, file_created: true, link: `${base}/pay-run/${id}`, one_time: true,
+          expires_in_minutes: DOWNLOAD_TTL_MS / 60000, password: "the pay run download password you set in Railway", ...payRunSummary(a) });
       } catch (error) { return safeError("Pay run download could not be created", error); }
     }
   );

@@ -31,6 +31,11 @@ export type XeroContact = {
 export const BUSINESS_NAME_WORDS = ['limited', 'ltd', 'llp', 'plc', 'lp', 'cic', 'llc', 'inc', 'trust', 'partnership', 'foundation'];
 /** UK Faster Payments references are short; confirm Revolut's real limit in the test batch. */
 export const REFERENCE_MAX = 18;
+/** Metro Bank's limits (Bulk & Batch Payments user guide): name and reference 18 characters each, 1,000 lines
+ * per file, payment code 99. */
+export const NAME_MAX = 18;
+export const MAX_LINES = 1000;
+export const PAYMENT_CODE = '99';
 
 export type RecipientType = 'BUSINESS' | 'INDIVIDUAL';
 export function recipientTypeFor(accountName: string): RecipientType {
@@ -126,14 +131,47 @@ export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], options:
     amount: lines.reduce((n, l) => n + pennies(l.amount), 0) / 100 } };
 }
 
-/** Masked summary for chat: what is blank and why. Never any sort code, account number or account name. */
-export function summarise(run: ReturnType<typeof buildPayRun>) {
+/** Beneficiary name for a Metro file (Metro Bank guide: max 18 characters, banned characters not allowed).
+ * Accents are removed; every character other than letters, digits, space, full stop, slash and hyphen (so every
+ * character Metro bans: @ _ & % = * # $ £ ! ^ ~ , ' ?) becomes a space; spaces collapse. Owner decision
+ * 2026-11-20: Metro's materials give no rule for shortening a longer name, so the FIRST 18 characters are kept
+ * (the start of a name identifies it). Revolut files keep the full account name. */
+export function cleanName(accountName: string): string {
+  return accountName.normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^A-Za-z0-9 .\/-]/g, ' ').replace(/\s+/g, ' ').replace(/^[ .\/-]+/, '').trim();
+}
+export function beneficiaryNameFor(accountName: string): string {
+  return cleanName(accountName).slice(0, NAME_MAX).trim();
+}
+
+/** Masked summary for chat: what is blank and why. Never any sort code, account number or account name.
+ * `bank` shapes the per-line detail: Revolut shows the inferred recipient type; Metro (which has no such field)
+ * shows whether the name had to be cut to 18 characters. */
+export function summarise(run: ReturnType<typeof buildPayRun>, bank: 'metro' | 'revolut' = 'revolut') {
   return {
     totals: run.totals,
     skipped: run.skipped,
-    lines: run.lines.map(l => ({ supplier: l.supplier, invoice: l.billNumber, due: l.dueDate, amount: l.amount,
-      reference: l.reference, recipient_type: l.recipientType || null, blank: l.missing })),
+    lines: run.lines.map(l => bank === 'metro'
+      ? { supplier: l.supplier, invoice: l.billNumber, due: l.dueDate, amount: l.amount, reference: l.reference,
+          name_shortened: cleanName(l.name).length > NAME_MAX, blank: l.missing }
+      : { supplier: l.supplier, invoice: l.billNumber, due: l.dueDate, amount: l.amount,
+          reference: l.reference, recipient_type: l.recipientType || null, blank: l.missing }),
   };
+}
+
+/** Metro rejects duplicate payments in one file (same amount and reference to the same beneficiary), and a
+ * reference cut to 18 characters can make two different invoices look identical. Reported, never removed.
+ * Works across companies, since the consolidated file is one upload. */
+export type DuplicateGroup = { supplier: string; amount: number; reference: string; invoices: string[]; companies: string[] };
+export function findDuplicates(entries: Array<{ company: string; line: PayLine }>): DuplicateGroup[] {
+  const seen = new Map<string, Array<{ company: string; line: PayLine }>>();
+  for (const e of entries) {
+    if (!e.line.sortCode || !e.line.accountNumber) continue; // cannot compare a beneficiary we do not know
+    const key = [e.line.sortCode, e.line.accountNumber, e.line.amount.toFixed(2), e.line.reference].join('|');
+    seen.set(key, [...(seen.get(key) ?? []), e]);
+  }
+  return [...seen.values()].filter(g => g.length > 1).map(g => ({ supplier: g[0]!.line.supplier, amount: g[0]!.line.amount,
+    reference: g[0]!.line.reference, invoices: g.map(e => e.line.billNumber), companies: [...new Set(g.map(e => e.company))] }));
 }
 
 const csvCell = (v: string | number) => {
@@ -147,4 +185,29 @@ export function renderRevolutCsv(lines: PayLine[]): string {
   const header = ['Name', 'Recipient type', 'Account number', 'Sort code', 'Recipient bank country', 'Currency', 'Amount', 'Payment reference'];
   const rows = lines.map(l => [l.name, l.recipientType, l.accountNumber, l.sortCode, 'GB', 'GBP', l.amount.toFixed(2), l.reference]);
   return [header, ...rows].map(r => r.map(csvCell).join(',')).join('\r\n') + '\r\n';
+}
+
+/** One company's lines in a Metro file, each paid from that company's own Metro account (8 digits). */
+export type MetroGroup = { debitAccount: string; lines: PayLine[] };
+/**
+ * The Metro Bank "multiple debit accounts" CSV (Bulk & Batch Payments user guide, pp. 3-4): seven fields, NO
+ * header row: debit account number, beneficiary sort code (6), beneficiary name (max 18), beneficiary account
+ * number (8), amount (two decimals), reference (max 18), payment code (always 99). Each line carries its own
+ * company's debit account, so one file can pay from several accounts: the consolidated file for the practices.
+ * Sort codes and account numbers stay text, so leading zeros are never lost. Gaps stay blank. The file ends with
+ * a line break after the last record and holds at most 1,000 lines.
+ */
+export function renderMetroCsv(groups: MetroGroup[]): string {
+  const total = groups.reduce((n, g) => n + g.lines.length, 0);
+  if (total > MAX_LINES) throw new Error(`Metro accepts at most ${MAX_LINES} payment lines per file (this one has ${total})`);
+  const rows: string[][] = [];
+  for (const g of groups) {
+    if (!/^\d{8}$/.test(g.debitAccount)) throw new Error('A debit account number must be exactly 8 digits');
+    for (const l of g.lines) {
+      const amount = l.amount.toFixed(2);
+      if (amount.replace('.', '').length > 10) throw new Error('An amount is too large for Metro (maximum 10 digits)');
+      rows.push([g.debitAccount, l.sortCode, beneficiaryNameFor(l.name), l.accountNumber, amount, l.reference, PAYMENT_CODE]);
+    }
+  }
+  return rows.map(r => r.map(csvCell).join(',')).join('\r\n') + (rows.length ? '\r\n' : '');
 }

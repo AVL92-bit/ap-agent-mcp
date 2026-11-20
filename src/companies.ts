@@ -14,9 +14,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 /** off: never touched. dry_run: may be scanned and dry-run (reads only), never written to or scheduled.
  * live: the daily schedule and execute runs may create Xero drafts, tag/archive Front and write the Sheet. */
 export type CompanyStatus = 'off' | 'dry_run' | 'live';
+/** The bank a company's pay run file is for: the eight practices pay through Metro (one consolidated file,
+ * each line paid from that practice's own account); AVL pays through Revolut (its own separate file). */
+export type PayBank = 'metro' | 'revolut';
 export type Company = Readonly<{
   key: string; name: string; frontInboxId: string;
   xeroTenantId: string | null; xeroTenantName: string | null; status: CompanyStatus;
+  /** null = no pay run file for this company. */
+  payBank: PayBank | null;
 }>;
 /** A company that is switched on and fully configured. */
 export type ReadyCompany = Company & Readonly<{ xeroTenantId: string; xeroTenantName: string; status: 'dry_run' | 'live' }>;
@@ -39,8 +44,10 @@ export function parseCompanies(raw: unknown): Company[] {
     if (tenantName !== null && (typeof tenantName !== 'string' || !tenantName.trim())) throw new Error(`Company registry: ${key} has an invalid Xero tenant name`);
     if (e.status !== 'off' && e.status !== 'dry_run' && e.status !== 'live') throw new Error(`Company registry: ${key} status must be off, dry_run or live`);
     if (e.status !== 'off' && (tenant === null || tenantName === null)) throw new Error(`Company registry: ${key} is switched on without a Xero tenant ID and name`);
+    const payBank = e.payBank ?? null;
+    if (payBank !== null && payBank !== 'metro' && payBank !== 'revolut') throw new Error(`Company registry: ${key} payBank must be metro, revolut or omitted`);
     out.push(Object.freeze({ key, name: e.name.trim(), frontInboxId: e.frontInboxId, xeroTenantId: tenant as string | null,
-      xeroTenantName: tenantName as string | null, status: e.status as CompanyStatus }));
+      xeroTenantName: tenantName as string | null, status: e.status as CompanyStatus, payBank: payBank as PayBank | null }));
   }
   for (const field of ['key', 'name', 'frontInboxId', 'xeroTenantId'] as const) {
     const values = out.map(c => c[field]).filter((v): v is string => v !== null);
@@ -60,6 +67,10 @@ export function loadCompanies(): Company[] {
 /** Test hook only. */
 export function _setCompaniesForTest(list: Company[] | null): void { cached = list; }
 
+/** Companies that go into the consolidated Metro pay run file: switched on, fully configured, paying through Metro. */
+export function metroPayRunCompanies(): ReadyCompany[] {
+  return loadCompanies().filter((c): c is ReadyCompany => isReady(c) && c.payBank === 'metro');
+}
 export function isReady(c: Company): c is ReadyCompany { return c.status !== 'off' && !!c.xeroTenantId && !!c.xeroTenantName; }
 /** Companies the daily schedule runs and execute runs may write for. */
 export function liveCompanies(): ReadyCompany[] { return loadCompanies().filter((c): c is ReadyCompany => isReady(c) && c.status === 'live'); }
