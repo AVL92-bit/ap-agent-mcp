@@ -98,8 +98,12 @@ export async function dryRunApInbox(input: {
       const p = await input.previous!(c, a);
       if (p && ['draft_verified', 'draft_uncertain', 'existing_verified'].includes(p.status))
         item(c).documents.push({ attachmentId: a, filename: '', outcome: 'already_in_xero', reason: `Handled on an earlier run (${p.status})`, xeroId: p.xeroId ?? undefined });
+      else if (p?.status === 'skipped_long_thread')
+        item(c).documents.push({ attachmentId: a, filename: '', outcome: 'not_drafted', reason: 'Skipped on an earlier run: older document in a long email thread' });
       return p;
-    }, begin: async () => {}, complete: async () => {} } : undefined,
+    }, begin: async () => {}, complete: async () => {},
+    // A long thread's older documents are only reported here, never recorded.
+    skip: async (c, a) => { item(c).documents.push({ attachmentId: a, filename: '', outcome: 'not_drafted', reason: 'Would be skipped: older document in a long email thread' }); } } : undefined,
   };
   // Drafts "created" earlier in this dry run are visible to later documents, as they would be live.
   const simulated = new Map<string, { id: string; kind: string; total: number; date: string }>();

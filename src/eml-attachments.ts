@@ -1,7 +1,8 @@
 /** Extract PDF attachments from an attached email (.eml, RFC 822 / MIME), including
  * emails forwarded inside it. Only PDFs are returned; Word/Excel inside an attached
  * email follow the same "later" rule as top-level Word/Excel attachments. */
-export type EmbeddedPdf = { filename: string; bytes: Uint8Array };
+/** date: when the (innermost) email carrying the PDF was sent, epoch ms, or null if no usable Date header. */
+export type EmbeddedPdf = { filename: string; bytes: Uint8Array; date?: number | null };
 
 const MAX_DEPTH = 5;
 const MAX_PDFS = 20;
@@ -30,9 +31,12 @@ function decodeBody(body: string, encoding: string): Uint8Array {
   return new Uint8Array(Buffer.from(body, 'latin1'));
 }
 
-export function extractPdfsFromEml(raw: string, depth = 0, out: EmbeddedPdf[] = []): EmbeddedPdf[] {
+export function extractPdfsFromEml(raw: string, depth = 0, out: EmbeddedPdf[] = [], inheritedDate: number | null = null): EmbeddedPdf[] {
   if (depth > MAX_DEPTH || out.length >= MAX_PDFS) return out;
   const { headers, body } = splitHeadersBody(raw);
+  // A message's own Date header applies to everything inside it; parts inherit the enclosing message's date.
+  const parsed = Date.parse(header(headers, 'Date'));
+  const date = Number.isFinite(parsed) ? parsed : inheritedDate;
   const type = header(headers, 'Content-Type') || 'text/plain';
   const disposition = header(headers, 'Content-Disposition');
   const encoding = header(headers, 'Content-Transfer-Encoding');
@@ -41,20 +45,20 @@ export function extractPdfsFromEml(raw: string, depth = 0, out: EmbeddedPdf[] = 
     const boundary = param(type, 'boundary');
     if (!boundary) return out;
     const parts = body.split(new RegExp(`\\r?\\n?--${boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:--)?[ \\t]*\\r?\\n?`));
-    for (const part of parts) if (part.trim()) extractPdfsFromEml(part, depth + 1, out);
+    for (const part of parts) if (part.trim()) extractPdfsFromEml(part, depth + 1, out, date);
     return out;
   }
   if (/^message\/rfc822/i.test(type)) {
     // A forwarded email inside the attached email.
     const inner = /base64/i.test(encoding) ? Buffer.from(decodeBody(body, encoding)).toString('latin1') : body;
-    return extractPdfsFromEml(inner, depth + 1, out);
+    return extractPdfsFromEml(inner, depth + 1, out, date);
   }
   const isPdf = /^application\/pdf/i.test(type) || /\.pdf$/i.test(filename) ||
     (/^application\/octet-stream/i.test(type) && /\.pdf$/i.test(filename));
   if (isPdf) {
     const bytes = decodeBody(body, encoding);
     if (bytes.length >= 5 && String.fromCharCode(...bytes.slice(0, 5)) === '%PDF-')
-      out.push({ filename: filename || `attached-email-document-${out.length + 1}.pdf`, bytes });
+      out.push({ filename: filename || `attached-email-document-${out.length + 1}.pdf`, bytes, date });
   }
   return out;
 }

@@ -2,7 +2,7 @@ import { collectFrontMessagePages } from './front-message-pages.js';
 import type { InboxConversation, InboxAttachment } from './ap-inbox-runner.js';
 
 type FrontConversation = {id?:string;subject?:string;status?:string;assignee?:unknown;tags?:Array<{name?:string}>};
-type FrontMessage = {id?:string;subject?:string;body?:string;text?:string;blurb?:string;attachments?:Array<{filename?:string;url?:string;id?:string}>};
+type FrontMessage = {id?:string;subject?:string;body?:string;text?:string;blurb?:string;created_at?:number;attachments?:Array<{filename?:string;url?:string;id?:string}>};
 type Page<T> = {_results?:T[];_pagination?:{next?:string|null}};
 const ROOT = 'https://api2.frontapp.com';
 const HOSTS = new Set(['api2.frontapp.com','medicspot-limited.api.frontapp.com']);
@@ -52,6 +52,8 @@ export async function scanApFrontInbox(input:{inboxId:string;fetchPage:(url:stri
     const attachments:InboxAttachment[]=[];
     const seenAttachmentIds=new Set<string>();
     for(const m of messages.messages) {
+      // Front's created_at is epoch seconds; keep epoch milliseconds so the newest email in a long thread can be found.
+      const receivedAt=typeof m.created_at==='number'&&Number.isFinite(m.created_at)?{receivedAt:Math.round(m.created_at*1000)}:{};
       for(const a of m.attachments??[]) {
         const id=a.id || a.url?.match(/\/download\/(fil_[A-Za-z0-9_-]+)/)?.[1];
         // Do not drop unidentified attachments: the runner must fail them explicitly.
@@ -59,11 +61,11 @@ export async function scanApFrontInbox(input:{inboxId:string;fetchPage:(url:stri
         // Duplicate IDs across different messages are not silently discarded:
         // the runner must see and reject ambiguous attachment accounting.
         if(id && seenAttachmentIds.has(id)) {
-          attachments.push({id,filename:a.filename??'',messageId:m.id??''});
+          attachments.push({id,filename:a.filename??'',messageId:m.id??'',...receivedAt});
           continue;
         }
         if(id) seenAttachmentIds.add(id);
-        attachments.push({id:id??'',filename:a.filename??'',messageId:m.id??''});
+        attachments.push({id:id??'',filename:a.filename??'',messageId:m.id??'',...receivedAt});
       }
     }
     result.push({id:c.id!,subject:c.subject??'',body:messages.messages.map(m=>[m.subject,m.body,m.text,m.blurb].filter(Boolean).join('\n')).join('\n'),attachments,

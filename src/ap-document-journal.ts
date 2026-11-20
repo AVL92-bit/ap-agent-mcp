@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { PoolClient } from 'pg';
 
 /** Persistent, per-source attachment record. Never treats a prior record as proof
@@ -30,6 +31,13 @@ export function makeApDocumentJournal(client: PoolClient) {
     async releaseCreate(conversationId:string,attachmentId:string):Promise<void> {
       await client.query(`UPDATE ap_document_journal SET write_intent=false,updated_at=now()
         WHERE conversation_id=$1 AND attachment_id=$2 AND xero_id IS NULL`,[conversationId,attachmentId]);
+    },
+    /** Mark an older document of a long email thread as skipped: it is never re-read or re-reported.
+     * No source file was read, so the digest is derived from the id. Never overwrites a real record. */
+    async skip(conversationId: string, attachmentId: string): Promise<void> {
+      const digest = createHash('sha256').update(`long-thread-skip:${conversationId}:${attachmentId}`).digest('hex');
+      await client.query(`INSERT INTO ap_document_journal (conversation_id,attachment_id,source_sha256,status,updated_at)
+        VALUES ($1,$2,$3,'skipped_long_thread',now()) ON CONFLICT (conversation_id,attachment_id) DO NOTHING`,[conversationId,attachmentId,digest]);
     },
     async complete(conversationId:string,attachmentId:string,status:string,xeroId?:string):Promise<void> {
       if (!['existing_verified','draft_verified','draft_uncertain','technical_failure'].includes(status)) throw new Error('Invalid journal outcome');

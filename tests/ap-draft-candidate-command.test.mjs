@@ -31,7 +31,7 @@ test('unmatched supplier cannot create provisional Xero contact',async()=>{
    accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],
    preferredAccountCode:'449',pdf,
    createProvisionalContact:async()=>{created++;throw Error('MUST NOT CREATE');}
- }),/No existing Xero supplier contact exceeded 40%/);
+ }),/Supplier "Unknown Vendor" is not in Xero.*Please create it as a supplier contact.*12345/);
  assert.equal(created,0);
 });
 test('no supplier history and no contact default: not drafted, no generic fallback',async()=>{

@@ -1,6 +1,7 @@
 /** Fail-closed document-body evidence gate before any Xero/PG write. */
 /** supporting_document: payment evidence such as a receipt. Never drafted, never a failure. */
-export type DocumentReviewKind = 'not_invoice' | 'unclear' | 'supporting_document';
+/** supplier_missing: a genuine invoice whose supplier has no Xero contact; finance creates the contact, the next run drafts it. */
+export type DocumentReviewKind = 'not_invoice' | 'unclear' | 'supporting_document' | 'supplier_missing';
 export class DocumentNeedsHumanReview extends Error {
   constructor(public readonly kind: DocumentReviewKind, reason: string) {
     super(reason); this.name = 'DocumentNeedsHumanReview';
