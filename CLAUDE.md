@@ -101,7 +101,7 @@ contact above **40%** match; no supplier-specific coding; already in Xero. Every
 - **Credit / brought-forward balances** → amount flagged for finance; never blocks. Payments are human-only; the agent ignores payment status.
 - **Front tags** (matched ignoring case/dash style): `AP Agent reviewed` (archived), `Human Review` (left open), `No attachment - Human review` (left open).
 - **Human Review is sticky**: a conversation tagged Human Review is never re-tagged or archived by the agent; finance archives it.
-- **No attachment**: Direct Debit notices (judged on subject, not when it says "invoice") and marketing → reviewed + archived; "your bill/statement is ready" etc. → No attachment - Human review.
+- **No attachment**: Direct Debit notices (judged on subject, not when it says "invoice") and marketing → reviewed + archived; "your bill/statement is ready" etc. → No attachment - Human review. The finance words are: invoice, statement, reminder, overdue, credit note, payment due, bill, accounts payable, **remittance** and **payment advice** (a supplier asking about or sending a remittance needs a person even with nothing attached; owner decision 2026-11-20; `classifyNoAttachment` in `src/ap-outcome-policy.ts`).
 - **Existing draft with no flag** → archive.
 - The agent finishes **its own** interrupted draft (journal write intent, DRAFT, same total, no PDF) by attaching the PDF. Others' drafts are untouched.
 
