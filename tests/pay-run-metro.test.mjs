@@ -141,9 +141,9 @@ test('payBank: metro companies go into the consolidated file; a revolut company 
   assert.throws(() => parseCompanies({ companies: [co('xx', 'inb_a', '45a1074b-b172-4f49-a192-f0a8e293b54d', { payBank: 'paypal' })] }), /payBank/);
   _setCompaniesForTest(null);
 });
-test('the shipped registry puts both live practices on Metro', () => {
+test('the shipped registry puts all the live practices on Metro', () => {
   _setCompaniesForTest(null);
-  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['lamberhurst', 'st-georges']);
+  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['castletown', 'lamberhurst', 'st-georges']);
 });
 
 // ---- file names: Metro's upload rejects anything but letters, digits, space and ( ) + , . _ ----
@@ -165,12 +165,12 @@ test('a single company file turns its key into underscores too; both banks get s
 });
 
 // ---- Castletown joins as a dry run, with no pay run bank until its debit account exists ----
-test('Castletown is registered live with no payBank yet, so it cannot break the consolidated Metro file', () => {
+test('Castletown is registered live and pays through Metro: it is in the consolidated file with the other two practices', () => {
   _setCompaniesForTest(null);
   const castletown = loadCompanies().find(c => c.key === 'castletown');
   assert.equal(castletown.frontInboxId, 'inb_d42c6');
   assert.equal(castletown.xeroTenantName, 'Castletown Medical');
   assert.equal(castletown.status, 'live');
-  assert.equal(castletown.payBank, null);
-  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['lamberhurst', 'st-georges']);
+  assert.equal(castletown.payBank, 'metro');
+  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['castletown', 'lamberhurst', 'st-georges']);
 });
