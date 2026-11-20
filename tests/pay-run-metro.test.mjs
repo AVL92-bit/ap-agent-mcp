@@ -163,3 +163,14 @@ test('a single company file turns its key into underscores too; both banks get s
   assert.equal(payRunFileName({ consolidated: false, bank: 'revolut', companyKey: 'avl', londonDate: '2026-12-07', londonTime: '09:05' }), 'pay_run_avl_revolut_2026_12_07_0905.csv');
   for (const key of ['st-georges', 'lamberhurst', 'avl', 'a-b-c']) assert.match(payRunFileName({ consolidated: false, bank: 'metro', companyKey: key, londonDate: '2026-01-02', londonTime: '00:00' }), METRO_FILE_NAME);
 });
+
+// ---- Castletown joins as a dry run, with no pay run bank until its debit account exists ----
+test('Castletown is registered as a dry run with no payBank, so it cannot break the consolidated Metro file', () => {
+  _setCompaniesForTest(null);
+  const castletown = loadCompanies().find(c => c.key === 'castletown');
+  assert.equal(castletown.frontInboxId, 'inb_d42c6');
+  assert.equal(castletown.xeroTenantName, 'Castletown Medical');
+  assert.equal(castletown.status, 'dry_run');
+  assert.equal(castletown.payBank, null);
+  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['lamberhurst', 'st-georges']);
+});
