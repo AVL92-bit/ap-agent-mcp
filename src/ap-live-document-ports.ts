@@ -13,6 +13,8 @@ import { confirmContactByHistoricalPdf, accountNumberOnPreviousBills, getXeroLoc
 import type { InboxAttachment, InboxConversation } from './ap-inbox-runner.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 import type { ContactCandidate, AccountCandidate } from './ap-best-candidate-selection.js';
+import { vatPolicyForInbox } from './inbox-vat-policy.js';
+import { VatReviewError, planVatPosting, vatRowsFromExtraction, latestHistoryTaxTypes, taxRatesFromXero, type TaxRateInfo } from './vat-posting.js';
 
 import { currentCompany } from './companies.js';
 const MAX_BYTES = 15 * 1024 * 1024;
@@ -113,7 +115,7 @@ export async function extractPdfCandidates(pdf: OriginalPdf) {
 
 const CACHE_MS = 10 * 60 * 1000;
 type XeroCache = {at:number; contacts:Array<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>;
-  accounts:Array<{Code?:string;Name?:string;Type?:string;Status?:string}>; bills:unknown[]|null};
+  accounts:Array<{Code?:string;Name?:string;Type?:string;Status?:string}>; bills:unknown[]|null; taxRates:TaxRateInfo[]|null};
 /** Reference data is cached per Xero organisation: one company's contacts must never be offered to another. */
 const xeroCaches = new Map<string, XeroCache>();
 
@@ -154,7 +156,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     if(!Array.isArray(accountsBody.Accounts)) throw new Error('Malformed Xero Accounts response');
     xeroCache={at:Date.now(),
       contacts:await readPaged<{ContactID?:string;Name?:string;PurchasesDefaultAccountCode?:string}>('Contacts','Contacts'),
-      accounts:accountsBody.Accounts,bills:null};
+      accounts:accountsBody.Accounts,bills:null,taxRates:null};
     xeroCaches.set(session.tenantId, xeroCache);
   }
   const cache=xeroCache;
@@ -217,6 +219,29 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
     }
   }
   if (extraction.lineDescription) command.description = extraction.lineDescription;
+  // VAT-recovering companies (AVL): net lines at the invoice's own VAT rate. The supplier's previous
+  // approved bill only breaks ties and allows reverse charge; with no history the draft is still posted
+  // from the invoice and the sheet is told the VAT is uncertain.
+  if (vatPolicyForInbox(company.frontInboxId).recoverInputVat) {
+    try {
+      if (!extraction.vat) throw new VatReviewError('The invoice VAT split could not be read (model extraction unavailable)');
+      if (!cache.taxRates) {
+        const r=await xeroFetch(`${API}/TaxRates`,{headers,signal:AbortSignal.timeout(25000)});
+        if(!r.ok) throw new Error(`Xero TaxRates read HTTP ${r.status}`);
+        const body=await r.json() as {TaxRates?:Parameters<typeof taxRatesFromXero>[0]};
+        if(!Array.isArray(body.TaxRates)) throw new Error('Malformed Xero TaxRates response');
+        cache.taxRates=taxRatesFromXero(body.TaxRates);
+      }
+      const plan = planVatPosting({gross:command.gross,
+        rows:vatRowsFromExtraction({breakdown:extraction.vat.breakdown,netTotal:extraction.vat.netTotal,vatTotal:extraction.vat.vatTotal}),
+        taxRates:cache.taxRates, historyTaxTypes:latestHistoryTaxTypes(cache.bills as Parameters<typeof latestHistoryTaxTypes>[0], command.supplierContactId)});
+      command.vatPlan = plan;
+      command.reviewNotes = [...(command.reviewNotes ?? []), ...plan.notes];
+    } catch (e) {
+      if (e instanceof VatReviewError) throw new DocumentNeedsHumanReview('unclear', `VAT not posted: ${e.message}`);
+      throw e;
+    }
+  }
   if (extraction.statementAsInvoice) command.infoNotes = [...(command.infoNotes ?? []), `${extraction.statementAsInvoice} statement drafted as the invoice (statements are this supplier's invoices)`];
   // Xero refuses any document (even a draft) dated in a locked period: draft it on the first
   // open day instead and flag the original date for finance.

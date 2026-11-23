@@ -4,6 +4,7 @@ import { lookupXeroPurchaseNumber } from './xero-duplicate-lookup.js';
 import { getPilotXeroWriteSession } from './xero-pilot-test.js';
 import { attachAndVerifyOriginal } from './xero-draft-bills.js';
 import { grossExpenseLine, vatPolicyForInbox } from './inbox-vat-policy.js';
+import { vatLineItems } from './vat-posting.js';
 import type { DraftCommand, XeroDraftPort } from './ap-xero-document-coordinator.js';
 
 import { currentCompany } from './companies.js';
@@ -34,6 +35,17 @@ export function makeLiveXeroDraftPort(
     async createDraft(command: DraftCommand) {
       const s = await session();
       const kind = command.kind;
+      const policy = vatPolicyForInbox(currentCompany().frontInboxId);
+      const description = command.description?.trim() || `${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`;
+      // VAT-recovering inboxes post the planned net lines; every other inbox posts the gross with TaxType NONE.
+      let lineItems: Array<Record<string, unknown>>;
+      if (policy.recoverInputVat) {
+        if (!command.vatPlan) throw new Error('VAT-recovering inbox: no VAT plan on the draft; nothing created');
+        lineItems = vatLineItems(command.vatPlan, { description, accountCode: command.accountCode });
+      } else {
+        if (command.vatPlan) throw new Error('Unexpected VAT plan for a non-recovering inbox; nothing created');
+        lineItems = [grossExpenseLine({ inboxId: currentCompany().frontInboxId, description, gross: command.gross, accountCode: command.accountCode })];
+      }
       const base = {
         Status: 'DRAFT',
         Type: kind === 'Invoices' ? 'ACCPAY' : 'ACCPAYCREDIT',
@@ -41,15 +53,12 @@ export function makeLiveXeroDraftPort(
         Date: command.invoiceDate,
         CurrencyCode: 'GBP',
         LineAmountTypes: 'Exclusive',
-        LineItems: [grossExpenseLine({
-          inboxId: currentCompany().frontInboxId, description: command.description?.trim() || `${kind === 'Invoices' ? 'Supplier invoice' : 'Supplier credit note'} ${command.number}`,
-          gross: command.gross, accountCode: command.accountCode,
-        })],
+        LineItems: lineItems,
       };
       const document = kind === 'Invoices'
         ? { ...base, InvoiceNumber: command.number, DueDate: command.dueDate }
         : { ...base, CreditNoteNumber: command.number };
-      if (vatPolicyForInbox(currentCompany().frontInboxId).purchaseTaxType !== 'NONE') throw new Error('Unexpected VAT policy');
+      if (!policy.recoverInputVat && policy.purchaseTaxType !== 'NONE') throw new Error('Unexpected VAT policy');
       const response = await xeroFetch(`${API}${kind}`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${s.accessToken}`, 'xero-tenant-id': s.tenantId,
@@ -90,6 +99,10 @@ export function makeLiveXeroDraftPort(
       const id = created?.[kind === 'Invoices' ? 'InvoiceID' : 'CreditNoteID'];
       if (!id || created.Status !== 'DRAFT' || created.HasErrors || created.ValidationErrors?.length) {
         throw new Error('Xero DRAFT response indeterminate; reconcile before retry');
+      }
+      // VAT-recovering drafts: Xero's own total must equal the invoice total, or finance reconciles it.
+      if (command.vatPlan && (typeof created.Total !== 'number' || Math.abs(Math.abs(created.Total) - command.vatPlan.xeroTotal) > 0.011)) {
+        throw new Error(`Xero DRAFT total ${created.Total ?? 'missing'} differs from the invoice total ${command.vatPlan.xeroTotal.toFixed(2)}; reconcile before retry`);
       }
       // Agent notes go to the draft's History & Notes, keeping the line description about the
       // invoice itself. Best effort: a failure here never affects the draft.

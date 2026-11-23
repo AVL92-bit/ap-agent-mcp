@@ -21,6 +21,7 @@ export type ModelFields = {
   invoice_date: string | null; due_date: string | null;
   gross_total: number | null; gross_evidence: string | null;
   net_total: number | null; vat_total: number | null;
+  vat_breakdown: Array<{ label: 'standard' | 'reduced' | 'zero' | 'exempt' | 'reverse_charge' | 'outside_scope' | 'unknown'; rate: number | null; net: number; vat: number }> | null;
   currency: string | null;
   account_balance: number | null;
   billed_to: string | null;
@@ -42,6 +43,10 @@ const FIELD_SCHEMA = {
     invoice_date: nullable({ type: 'string' }), due_date: nullable({ type: 'string' }),
     gross_total: nullable({ type: 'number' }), gross_evidence: nullable({ type: 'string' }),
     net_total: nullable({ type: 'number' }), vat_total: nullable({ type: 'number' }),
+    vat_breakdown: nullable({ type: 'array', items: { type: 'object', additionalProperties: false,
+      properties: { label: { type: 'string', enum: ['standard', 'reduced', 'zero', 'exempt', 'reverse_charge', 'outside_scope', 'unknown'] },
+        rate: nullable({ type: 'number' }), net: { type: 'number' }, vat: { type: 'number' } },
+      required: ['label', 'rate', 'net', 'vat'] } }),
     currency: nullable({ type: 'string' }),
     account_balance: nullable({ type: 'number' }),
     billed_to: nullable({ type: 'string' }),
@@ -51,7 +56,7 @@ const FIELD_SCHEMA = {
     notes: nullable({ type: 'string' }),
   },
   required: ['document_type', 'supplier_name', 'supplier_evidence', 'invoice_number', 'invoice_number_evidence', 'invoice_date', 'due_date',
-    'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'currency', 'account_balance', 'billed_to', 'customer_account_number', 'line_description', 'low_confidence_fields', 'notes'],
+    'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'vat_breakdown', 'currency', 'account_balance', 'billed_to', 'customer_account_number', 'line_description', 'low_confidence_fields', 'notes'],
 } as const;
 
 const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Surgery (a GP practice in Coventry, UK). Read the attached supplier document and return its fields as JSON matching the schema. Dates are ISO YYYY-MM-DD. Rules:
@@ -62,6 +67,7 @@ const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Sur
 - gross_total: the total payable for THIS document's charges including VAT, as a positive number. Never use a brought-forward, carried-forward or account balance as the gross. If the account is in credit, still give this period's charges as gross_total and put the account balance (negative if in credit) in account_balance.
 - For a statement, still fill invoice_number with the statement number and gross_total with the total of the charges on THIS statement (not a brought-forward balance), so the document can be checked.
 - net_total and vat_total when printed; otherwise null.
+- vat_breakdown: one entry per VAT rate or treatment printed on the document, with the net amount and VAT amount for it (vat 0 when none is charged). label: "standard" (20%), "reduced" (5%), "zero" (zero rated / 0%), "exempt", "reverse_charge" (the document says reverse charge applies or the customer accounts for the VAT), "outside_scope" (outside the scope of VAT / no VAT), or "unknown" when the document charges no VAT and does not say why. rate is the printed percentage, or null. Use null for the whole field if the document shows no net/VAT split.
 - line_description: what the supplier is charging for, taken from the document's line items, as a short accounting description (max 100 characters): goods or services, plus the period or site when printed. Examples: "GP Voice users and Sogea 80/20 line rental, October 2026"; "Boiler service, 102 St Georges Road"; "Payroll bureau services, October 2026". Never describe the email, the payment method or the document type. null if no charges are listed.
 - customer_account_number: the account/customer number the supplier uses for the practice (e.g. "Account No", "Customer Ref", "Account number"), exactly as printed. Not the invoice number. null if none is printed.
 - List in low_confidence_fields any field you are not sure of. Quote evidence exactly as printed. Do not guess values that are not on the document: use null.`;
@@ -179,7 +185,8 @@ export function cleanLineDescription(v: unknown): string | null {
   if (t.length < 3) return null;
   return t.length > 120 ? `${t.slice(0, 117).trimEnd()}...` : t;
 }
-export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[]; source: 'model+text' | 'text'; model?: string; customerAccountNumber?: string | null; lineDescription?: string | null };
+export type MergedExtraction = { candidates: InvoiceCandidates; notes: string[]; source: 'model+text' | 'text'; model?: string; customerAccountNumber?: string | null; lineDescription?: string | null;
+  vat?: { netTotal: number | null; vatTotal: number | null; breakdown: ModelFields['vat_breakdown'] } };
 
 /** Model value wins; agreement with the text rules makes it confident; disagreement or
  * model low confidence makes it uncertain with a note. Without the model, text rules stand. */
@@ -232,7 +239,8 @@ export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult, 
   return { candidates: { documentType, supplier, reference, invoiceDate, dueDate, grossAmount, currency, accountBalance,
     amountPaid: text.amountPaid, linkedInvoiceReference: text.linkedInvoiceReference, uncertainFields }, notes, source: 'model+text', model: result.model,
     customerAccountNumber: typeof f.customer_account_number === 'string' && f.customer_account_number.trim() ? f.customer_account_number.trim() : null,
-    lineDescription: cleanLineDescription(f.line_description) };
+    lineDescription: cleanLineDescription(f.line_description),
+    vat: { netTotal: f.net_total ?? null, vatTotal: f.vat_total ?? null, breakdown: Array.isArray(f.vat_breakdown) ? f.vat_breakdown : null } };
 }
 
 /** One extraction for every route: text rules always, model when available, merged. */
