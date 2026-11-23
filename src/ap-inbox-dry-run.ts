@@ -12,7 +12,9 @@ export type DryRunDocument = {
   reason?: string;
   draft?: { number: string; supplierContactId: string; supplierName?: string; extractedSupplierName?: string;
     supplierMatchScore?: number; accountCode: string; invoiceDate: string; dueDate: string; gross: number;
-    kind: string; uncertainFields: string[]; reviewNotes?: string[]; infoNotes?: string[] };
+    kind: string; uncertainFields: string[]; reviewNotes?: string[]; infoNotes?: string[];
+    /** VAT-recovering companies only: the net lines and tax types the draft would be posted with. */
+    vatLines?: Array<{ net: number; vat: number; taxType: string; reverseCharge: boolean }> };
   xeroId?: string;
 };
 export type DryRunConversation = {
@@ -72,7 +74,8 @@ export async function dryRunApInbox(input: {
           accountCode: command.accountCode, invoiceDate: command.invoiceDate, dueDate: command.dueDate,
           gross: command.gross, kind: command.kind, uncertainFields: command.uncertainFields,
           ...(command.reviewNotes?.length ? { reviewNotes: command.reviewNotes } : {}),
-          ...(command.infoNotes?.length ? { infoNotes: command.infoNotes } : {}) };
+          ...(command.infoNotes?.length ? { infoNotes: command.infoNotes } : {}),
+          ...(command.vatPlan ? { vatLines: command.vatPlan.lines.map(l => ({ net: l.net, vat: l.vat, taxType: l.taxType, reverseCharge: l.reverseCharge })) } : {}) };
         return command;
       } catch (error) {
         const e = error as { kind?: string; message?: string };

@@ -60,6 +60,14 @@ export function isPrepaymentAccount(a: AccountCandidate): boolean {
   const type = a.type.toUpperCase();
   return type === 'PREPAYMENT' || (type === 'CURRENT' && /prepayment/i.test(a.name));
 }
+/** Owner decision (2026-11-23, whole group): a supplier with no coding history and no default account is
+ * posted to the organisation's suspense account and flagged, so the invoice still gets into Xero. Only an
+ * active account whose name contains "suspense" is used, and only when exactly one exists (never a bank
+ * account); otherwise null and the invoice goes to Human review as before. */
+export function chooseSuspenseAccount(accounts: AccountCandidate[]): AccountCandidate | null {
+  const found = accounts.filter(a => a.code && a.status.toUpperCase() === 'ACTIVE' && /\bsuspense\b/i.test(a.name) && a.type.toUpperCase() !== 'BANK');
+  return found.length === 1 ? found[0]! : null;
+}
 /** Coding follows the selected supplier, never a generic fallback: the supplier's
  * latest approved/paid bill code, else that contact's own Xero default purchase
  * account (uncertain). Otherwise null: the invoice is not drafted (Human Review). */
