@@ -61,6 +61,7 @@ import { readFinanceReviewRows } from "./google-sheets-review.js";
 import { describeContactFields } from "./contact-field-shape.js";
 import { buildPayRun, summarise, renderRevolutCsv, renderMetroCsv, findDuplicates, payRunFileName, MAX_LINES } from "./pay-run.js";
 import { loadPayRunConfig, debitAccountFor } from "./pay-run-config.js";
+import { fingerprintKey, ensureBaselineTable, loadBaselines, acceptBaselines, annotateBankStatus, suppliersToVerify, bankCheckCounts } from "./pay-run-fingerprints.js";
 import { payRunDownloads, handlePayRunDownload, DOWNLOAD_TTL_MS } from "./pay-run-download.js";
 import { loadPayRunInputs, explainPayRunCounts, type XeroGet } from "./pay-run-xero.js";
 import { type Company, liveCompanies, loadCompanies, companyByKey, runAsCompany, currentCompany, currentCompanyOrNull, metroPayRunCompanies } from "./companies.js";
@@ -168,6 +169,17 @@ async function assemblePayRun(companyKey: string | undefined) {
     try { parts.push({ company: c, run: await payRunForCompany(c) }); }
     catch (error) { throw new Error(`The pay run for ${c.key} could not be read, so no file was produced (a partial pay run is never created): ${String(error).slice(0, 200)}`); }
   }
+  // Bank-details change check: compare each supplier's details with what a person last verified (keyed hashes
+  // only). Fails closed: a pay run is never reported without it.
+  try {
+    const key = fingerprintKey(process.env.XERO_TOKEN_ENCRYPTION_KEY);
+    if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is not set');
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+    try {
+      await ensureBaselineTable(pool);
+      for (const p of parts) annotateBankStatus(p.run.lines, await loadBaselines(pool, p.company.key), key);
+    } finally { await pool.end(); }
+  } catch (error) { throw new Error(`The bank-details change check could not run, so no pay run is reported: ${String(error).slice(0, 200)}`); }
   return { bank, consolidated, parts, debitAccounts };
 }
 /** Masked view of an assembled pay run: no sort codes, account numbers or account names. */
@@ -178,9 +190,14 @@ function payRunSummary(a: Awaited<ReturnType<typeof assemblePayRun>>) {
     amount: combinedLines.reduce((n, l) => n + Math.round(l.amount * 100), 0) / 100, over_metro_limit: a.bank === 'metro' && combinedLines.length > MAX_LINES };
   return {
     bank: a.bank, consolidated_file: a.consolidated, companies_included: a.parts.map(p => p.company.key), combined,
+    // Suppliers whose bank details are new to the check or differ from what a person last verified. VERIFY BEFORE PAYING
+    // (call the supplier on a number you already hold), then accept with accept_pay_run_bank_details. Never any values.
+    bank_details_to_verify: a.parts.flatMap(p => suppliersToVerify(p.run.lines).map(v => ({ company: p.company.key, ...v }))),
+    bank_details_changed: combinedLines.some(l => l.bankStatus === 'changed'),
     ...(a.bank === 'metro' ? { duplicates: findDuplicates(a.parts.flatMap(p => p.run.lines.map(line => ({ company: p.company.key, line })))) } : {}),
     companies: a.parts.map(p => ({ company: p.company.key, name: p.company.name,
-      ...(a.bank === 'metro' ? { debit_account_configured: a.debitAccounts[p.company.key] !== null } : {}), ...summarise(p.run, a.bank) })),
+      ...(a.bank === 'metro' ? { debit_account_configured: a.debitAccounts[p.company.key] !== null } : {}),
+      bank_details_check: bankCheckCounts(p.run.lines), ...summarise(p.run, a.bank) })),
   };
 }
 
@@ -2600,6 +2617,40 @@ server.registerTool(
   );
 
   server.registerTool(
+    "accept_pay_run_bank_details",
+    {
+      title: "Accept Verified Bank Details (records a keyed hash only)",
+      description: "Records that a person has VERIFIED these suppliers' bank details, so the pay run stops flagging them. Call it only after the owner has checked the details (for example by phoning the supplier on a number already held, or against a trusted record). It records the details Xero holds RIGHT NOW as verified, as a keyed hash: the details themselves are never stored, shown or returned. Applies to suppliers flagged `changed` or `unverified`; a supplier whose details are incomplete cannot be accepted. You MUST name the suppliers, or set all to true: with neither, nothing is recorded. Optional company key narrows it to one company; otherwise every company in the consolidated Metro pay run is covered. Writes only to the agent's own database; nothing is written to Xero.",
+      inputSchema: { company: companyKeySchema(), suppliers: z.array(z.string().min(1).max(200)).max(100).optional(), all: z.boolean().optional() },
+    },
+    async ({ company, suppliers, all }) => {
+      try {
+        if (all && suppliers?.length) return toolFailure("Give either suppliers or all, not both. Nothing was recorded.");
+        if (!all && !suppliers?.length) return toolFailure("Name the suppliers to accept, or set all to true. Nothing was recorded.");
+        const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+        const a = await assemblePayRun(company);
+        const key = fingerprintKey(process.env.XERO_TOKEN_ENCRYPTION_KEY);
+        const wanted = new Set((suppliers ?? []).map(norm));
+        const accepted: Array<{ company: string; supplier: string; was: string }> = [];
+        const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+        try {
+          await ensureBaselineTable(pool);
+          for (const p of a.parts) {
+            const candidates = p.run.lines.filter(l => (l.bankStatus === "changed" || l.bankStatus === "unverified") && (all || wanted.has(norm(l.supplier))));
+            if (!candidates.length) continue;
+            await acceptBaselines(pool, p.company.key, candidates, key);
+            for (const v of suppliersToVerify(candidates)) accepted.push({ company: p.company.key, supplier: v.supplier, was: v.status });
+          }
+        } finally { await pool.end(); }
+        const matched = new Set(accepted.map(x => norm(x.supplier)));
+        return toolResult({ recorded: accepted.length, accepted, not_accepted: [...wanted].filter(w => !matched.has(w)),
+          note: "Not accepted means no flagged supplier with complete details matched that name. Only a keyed hash was stored, never the details." });
+      } catch (error) { return safeError("Accepting bank details failed", error); }
+    }
+  );
+
+
+server.registerTool(
     "explain_pay_run_counts",
     {
       title: "Explain Pay Run Counts (read only)",

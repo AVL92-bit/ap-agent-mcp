@@ -26,6 +26,31 @@
       "vat_recovery": "none",
       "xero_purchase_tax_type": "NONE",
       "expense_amount_basis": "gross_invoice_amount"
+    },
+    "inb_byr6e": {
+      "vat_recovery": "none",
+      "xero_purchase_tax_type": "NONE",
+      "expense_amount_basis": "gross_invoice_amount"
+    },
+    "inb_coyfq": {
+      "vat_recovery": "none",
+      "xero_purchase_tax_type": "NONE",
+      "expense_amount_basis": "gross_invoice_amount"
+    },
+    "inb_bysba": {
+      "vat_recovery": "none",
+      "xero_purchase_tax_type": "NONE",
+      "expense_amount_basis": "gross_invoice_amount"
+    },
+    "inb_cl5jq": {
+      "vat_recovery": "none",
+      "xero_purchase_tax_type": "NONE",
+      "expense_amount_basis": "gross_invoice_amount"
+    },
+    "inb_bys9i": {
+      "vat_recovery": "none",
+      "xero_purchase_tax_type": "NONE",
+      "expense_amount_basis": "gross_invoice_amount"
     }
   },
   "vat_policy_scope": "front_inbox_id",

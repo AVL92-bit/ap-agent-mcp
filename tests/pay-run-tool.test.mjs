@@ -9,7 +9,8 @@ const reader = between('async function payRunForCompany', 'async function assemb
 const assembler = between('async function assemblePayRun', 'function payRunSummary');
 const summaryFn = between('function payRunSummary', 'const EXCEPTIONS_GUIDANCE=');
 const preview = between('"prepare_pay_run_preview"', '"create_pay_run_download"');
-const download = between('"create_pay_run_download"', '"explain_pay_run_counts"');
+const download = between('"create_pay_run_download"', '"accept_pay_run_bank_details"');
+const accept = between('"accept_pay_run_bank_details"', '"explain_pay_run_counts"');
 const explain = between('"explain_pay_run_counts"', '"get_scheduled_run_history"');
 
 test('the Xero reader is read-only: GETs only, in read mode, through the company guard', () => {
@@ -68,4 +69,26 @@ test('the count diagnostic is read-only, company-guarded, and shows no bank deta
 });
 test('the download route is mounted before the other routes', () => {
   assert.ok(src.indexOf('handlePayRunDownload(req, res, url.pathname)') > 0);
+});
+
+// ---- the bank-details change check ----
+test('every pay run assembly runs the bank-details change check, and fails closed if it cannot', () => {
+  assert.match(assembler, /fingerprintKey\(process\.env\.XERO_TOKEN_ENCRYPTION_KEY\)/);
+  assert.match(assembler, /annotateBankStatus\(p\.run\.lines, await loadBaselines\(pool, p\.company\.key\), key\)/);
+  assert.match(assembler, /The bank-details change check could not run, so no pay run is reported/);
+});
+test('the masked summary lists the suppliers to verify and per-company counts, never any values', () => {
+  assert.match(summaryFn, /bank_details_to_verify: a\.parts\.flatMap\(p => suppliersToVerify\(p\.run\.lines\)/);
+  assert.match(summaryFn, /bank_details_changed:/);
+  assert.match(summaryFn, /bank_details_check: bankCheckCounts\(p\.run\.lines\)/);
+});
+test('the accept tool refuses unless suppliers are named or all is set, and records only keyed hashes', () => {
+  assert.match(accept, /Name the suppliers to accept, or set all to true\. Nothing was recorded\./);
+  assert.match(accept, /Give either suppliers or all, not both/);
+  assert.ok(accept.indexOf('Nothing was recorded') < accept.indexOf('assemblePayRun(company)'), 'argument checks come before any Xero read');
+  assert.match(accept, /acceptBaselines\(pool, p\.company\.key, candidates, key\)/);
+  assert.match(accept, /\(l\.bankStatus === "changed" \|\| l\.bankStatus === "unverified"\)/); // only flagged suppliers can be accepted
+  const result = accept.match(/toolResult\(\{[\s\S]*?\}\);/)?.[0] ?? '';
+  assert.equal(/sortCode|accountNumber|\.name\b|fingerprint|key\b/.test(result), false, result);
+  assert.equal(/method:\s*["'](POST|PUT|DELETE|PATCH)/i.test(accept), false); // nothing is written to Xero
 });
