@@ -174,10 +174,10 @@ test('Castletown is registered live and pays through Metro: it is in the consoli
   assert.equal(castletown.payBank, 'metro');
   assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['carrfield', 'castlefields', 'castletown', 'giffard-drive', 'lamberhurst', 'st-georges', 'westerhope', 'westwood-road']);
 });
-test('the five new practices and AVL are registered as dry_run (no writes, no schedule); AVL pays by Revolut', () => {
+test('the five new practices and AVL are registered live (2026-11-23); AVL pays by Revolut', () => {
   _setCompaniesForTest(null);
   const all = loadCompanies();
-  for (const k of ['carrfield', 'castlefields', 'giffard-drive', 'westerhope', 'westwood-road', 'avl']) assert.equal(all.find(c => c.key === k).status, 'dry_run', k);
+  for (const k of ['carrfield', 'castlefields', 'giffard-drive', 'westerhope', 'westwood-road', 'avl']) assert.equal(all.find(c => c.key === k).status, 'live', k);
   assert.equal(all.find(c => c.key === 'avl').payBank, 'revolut');
   assert.equal(all.find(c => c.key === 'avl').frontInboxId, 'inb_debo6');
 });
