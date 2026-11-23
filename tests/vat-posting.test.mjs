@@ -113,3 +113,19 @@ test('small invoices whose printed pence move the rate still resolve to the righ
   assert.equal(p.lines[0].taxType, 'INPUT2');
   assert.equal(plan([{ label: 'unknown', rate: null, net: 40, vat: 2 }], 42, []).lines[0].taxType, 'INPUT5');
 });
+
+// ---- own companies are customers, never suppliers; conditional reverse charge wording ----
+import { isOwnCompany } from '../dist/model-extraction.js';
+test('the group\'s own companies are recognised, so a "Client" heading is never read as the supplier', () => {
+  assert.equal(isOwnCompany('Archvale Limited'), true);
+  assert.equal(isOwnCompany('ARCHVALE LTD'), true);
+  assert.equal(isOwnCompany('Carrfield Medical Centre'), true);
+  assert.equal(isOwnCompany('Westerhope Medical Group'), true);
+  assert.equal(isOwnCompany('Chubb Fire and Security Ltd'), false);
+});
+test('the extraction prompt tells the model Client/Bill to is the customer and that "may apply" is not reverse charge', () => {
+  const src = readFileSync(new URL('../src/model-extraction.ts', import.meta.url), 'utf8');
+  assert.match(src, /"Client", "Customer", "Bill to"/);
+  assert.match(src, /"reverse charge may apply"/);
+  assert.match(src, /!isOwnCompany\(f\.supplier_name\)/);
+});
