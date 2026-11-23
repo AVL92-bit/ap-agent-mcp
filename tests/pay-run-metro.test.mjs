@@ -141,9 +141,9 @@ test('payBank: metro companies go into the consolidated file; a revolut company 
   assert.throws(() => parseCompanies({ companies: [co('xx', 'inb_a', '45a1074b-b172-4f49-a192-f0a8e293b54d', { payBank: 'paypal' })] }), /payBank/);
   _setCompaniesForTest(null);
 });
-test('the shipped registry puts all the live practices on Metro', () => {
+test('the shipped registry puts all eight practices on Metro (the AVL entry pays through Revolut)', () => {
   _setCompaniesForTest(null);
-  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['castletown', 'lamberhurst', 'st-georges']);
+  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['carrfield', 'castlefields', 'castletown', 'giffard-drive', 'lamberhurst', 'st-georges', 'westerhope', 'westwood-road']);
 });
 
 // ---- file names: Metro's upload rejects anything but letters, digits, space and ( ) + , . _ ----
@@ -172,5 +172,12 @@ test('Castletown is registered live and pays through Metro: it is in the consoli
   assert.equal(castletown.xeroTenantName, 'Castletown Medical');
   assert.equal(castletown.status, 'live');
   assert.equal(castletown.payBank, 'metro');
-  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['castletown', 'lamberhurst', 'st-georges']);
+  assert.deepEqual(metroPayRunCompanies().map(c => c.key).sort(), ['carrfield', 'castlefields', 'castletown', 'giffard-drive', 'lamberhurst', 'st-georges', 'westerhope', 'westwood-road']);
+});
+test('the five new practices and AVL are registered as dry_run (no writes, no schedule); AVL pays by Revolut', () => {
+  _setCompaniesForTest(null);
+  const all = loadCompanies();
+  for (const k of ['carrfield', 'castlefields', 'giffard-drive', 'westerhope', 'westwood-road', 'avl']) assert.equal(all.find(c => c.key === k).status, 'dry_run', k);
+  assert.equal(all.find(c => c.key === 'avl').payBank, 'revolut');
+  assert.equal(all.find(c => c.key === 'avl').frontInboxId, 'inb_debo6');
 });
