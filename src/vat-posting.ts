@@ -55,8 +55,12 @@ export function taxRatesFromXero(raw: Array<{ Name?: string; TaxType?: string; S
 }
 
 function pickUnique(c: TaxRateInfo[], what: string): TaxRateInfo {
+  if (c.length > 1) { // several candidates: prefer the one named as an expense rate, if that is unique
+    const exp = c.filter(t => /expense/i.test(t.name));
+    if (exp.length === 1) return exp[0]!;
+  }
   if (c.length === 1) return c[0]!;
-  throw new VatReviewError(`${what}: ${c.length === 0 ? 'no matching' : 'more than one matching'} active tax rate in Xero, so the agent will not choose`);
+  throw new VatReviewError(`${what}: ${c.length === 0 ? 'no matching' : `more than one matching (${c.map(t => `${t.name} [${t.taxType}]`).join('; ')})`} active tax rate in Xero, so the agent will not choose`);
 }
 
 /** Choose the Xero tax type for one invoice row. */
@@ -84,7 +88,7 @@ function taxTypeFor(r: VatRow, rates: TaxRateInfo[], history: TaxRateInfo[]): { 
   }
   // 0%: the invoice's own label decides; if it does not say, the supplier's history does.
   const zeroHist = history.filter(t => !isReverse(t) && t.rate === 0);
-  const named = (re: RegExp) => usable.filter(t => t.rate === 0 && re.test(t.name) && !isReverse(t));
+  const named = (re: RegExp) => usable.filter(t => t.rate === 0 && re.test(t.name) && !EXCLUDED_FOR_RATE.test(t.name));
   if (r.label === 'exempt') return { rate: pickUnique(named(/exempt/i), 'Exempt'), reverse: false };
   if (r.label === 'zero') return { rate: pickUnique(named(/zero/i), 'Zero rated'), reverse: false };
   if (r.label === 'outside_scope') return { rate: pickUnique(usable.filter(t => t.rate === 0 && (t.taxType === 'NONE' || /no vat|out of scope|outside/i.test(t.name))), 'Outside the scope of VAT'), reverse: false };

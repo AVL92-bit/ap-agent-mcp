@@ -129,3 +129,15 @@ test('the extraction prompt tells the model Client/Bill to is the customer and t
   assert.match(src, /"reverse charge may apply"/);
   assert.match(src, /!isOwnCompany\(f\.supplier_name\)/);
 });
+
+test('several zero rated tax rates: EC, import and sales ones are ignored, an expense one is preferred, and an unresolved tie names the candidates', () => {
+  const r = taxRatesFromXero([
+    { Name: 'Zero Rated Expenses', TaxType: 'ZERORATEDINPUT', Status: 'ACTIVE', CanApplyToExpenses: true, EffectiveRate: 0 },
+    { Name: 'Zero Rated EC Expenses', TaxType: 'ZERORATEDECINPUT', Status: 'ACTIVE', CanApplyToExpenses: true, EffectiveRate: 0 },
+    { Name: 'Zero Rated Income', TaxType: 'ZERORATEDOUTPUT', Status: 'ACTIVE', CanApplyToExpenses: true, EffectiveRate: 0 },
+    { Name: 'Zero Rated Capital', TaxType: 'ZRCAP', Status: 'ACTIVE', CanApplyToExpenses: true, EffectiveRate: 0 }]);
+  assert.equal(planVatPosting({ gross: 10, rows: [row('zero', 0, 10, 0)], taxRates: r, historyTaxTypes: [] }).lines[0].taxType, 'ZERORATEDINPUT');
+  const two = taxRatesFromXero([
+    { Name: 'Zero Rated A', TaxType: 'A', Status: 'ACTIVE', EffectiveRate: 0 }, { Name: 'Zero Rated B', TaxType: 'B', Status: 'ACTIVE', EffectiveRate: 0 }]);
+  assert.throws(() => planVatPosting({ gross: 10, rows: [row('zero', 0, 10, 0)], taxRates: two, historyTaxTypes: [] }), /Zero Rated A \[A\]; Zero Rated B \[B\]/);
+});
