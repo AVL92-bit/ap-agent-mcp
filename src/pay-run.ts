@@ -79,7 +79,15 @@ export function parseBankDetails(c: XeroContact): BankParse {
 
 /** What is blank on a line, and why. Never contains the values themselves. */
 export type Missing = 'account_name' | 'bank_details' | 'bank_details_unrecognised' | 'bank_details_disagree' | 'contact_not_found';
+/** Have this supplier's bank details changed since a person last verified them? `unverified`: never verified (no
+ * baseline). `changed`: differ from what was verified. `unchanged`: identical to what was verified. `n/a`: the
+ * details are incomplete, so there is nothing to compare (the blank cells already flag it). */
+export type BankStatus = 'unchanged' | 'changed' | 'unverified' | 'n/a';
 export type PayLine = {
+  /** Xero contact id: identifies the supplier for the bank-details change check. Never written to the CSV. */
+  contactId: string;
+  /** Set by the change check (src/pay-run-fingerprints.ts); absent until then. */
+  bankStatus?: BankStatus;
   /** Xero contact name: for the masked summary only, never written to the CSV. */
   supplier: string; billNumber: string; dueDate: string | null;
   // The eight template columns' variable values (blank string when Xero has no reliable value):
@@ -118,7 +126,7 @@ export function buildPayRun(bills: XeroBill[], contacts: XeroContact[], options:
       else missing.push(bank.problem === 'missing' ? 'bank_details' : bank.problem === 'unrecognised_format' ? 'bank_details_unrecognised' : 'bank_details_disagree');
     }
     const isForcedBusiness = forcedBusiness.has(normName(supplier)) || (name !== '' && forcedBusiness.has(normName(name)));
-    lines.push({ supplier, billNumber: b.number, dueDate: b.dueDate, name,
+    lines.push({ contactId: b.contactId, supplier, billNumber: b.number, dueDate: b.dueDate, name,
       recipientType: isForcedBusiness ? 'BUSINESS' : name ? recipientTypeFor(name) : '',
       accountNumber, sortCode, amount: b.amountDue, reference: referenceFor(b.number), missing });
   }
@@ -153,9 +161,9 @@ export function summarise(run: ReturnType<typeof buildPayRun>, bank: 'metro' | '
     skipped: run.skipped,
     lines: run.lines.map(l => bank === 'metro'
       ? { supplier: l.supplier, invoice: l.billNumber, due: l.dueDate, amount: l.amount, reference: l.reference,
-          name_shortened: cleanName(l.name).length > NAME_MAX, blank: l.missing }
+          name_shortened: cleanName(l.name).length > NAME_MAX, blank: l.missing, bank_details: l.bankStatus ?? 'n/a' }
       : { supplier: l.supplier, invoice: l.billNumber, due: l.dueDate, amount: l.amount,
-          reference: l.reference, recipient_type: l.recipientType || null, blank: l.missing }),
+          reference: l.reference, recipient_type: l.recipientType || null, blank: l.missing, bank_details: l.bankStatus ?? 'n/a' }),
   };
 }
 
