@@ -1,4 +1,5 @@
 import type { XeroPurchaseMatch } from './xero-duplicate-lookup.js';
+import type { VatPlan } from './vat-posting.js';
 
 /** A single-document Xero boundary. The caller supplies extracted candidates,
  * selected contact/coding, and the original PDF. This module never approves a bill.
@@ -25,6 +26,8 @@ export type DraftCommand = {
   infoNotes?: string[];
   /** What the invoice is for (from the document's line items); the Xero line description. */
   description?: string;
+  /** Present only for inboxes that recover VAT: the net lines with the invoice's own VAT rate. Absent = gross-only posting. */
+  vatPlan?: VatPlan;
 };
 export type XeroDraftPort = {
   lookup(number: string): Promise<XeroPurchaseMatch[]>;

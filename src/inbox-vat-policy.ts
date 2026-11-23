@@ -19,8 +19,10 @@ export function vatPolicyForInbox(inboxId: string | undefined | null): InboxVatP
   const entry=config.inbox_vat_policies?.[inboxId];
   if (!entry || !Object.prototype.hasOwnProperty.call(config.inbox_vat_policies,inboxId))
     throw new Error(`No explicitly configured VAT policy for Front inbox ${inboxId}; processing blocked`);
-  // Only non-recoverable VAT posting is implemented. Future inbox policies
-  // must receive a separate validated posting implementation before use.
+  // Two policies are implemented: none (VAT is part of the gross expense, TaxType NONE) and
+  // recoverable (net amounts with the invoice's own VAT rate, see vat-posting.ts). Anything else is blocked.
+  if (entry.vat_recovery==='recoverable' && entry.xero_purchase_tax_type==='FROM_INVOICE' && entry.expense_amount_basis==='net_invoice_amount')
+    return Object.freeze({recoverInputVat:true,purchaseTaxType:'FROM_INVOICE',expenseBasis:'net'});
   if (entry.vat_recovery!=='none' || entry.xero_purchase_tax_type!=='NONE' || entry.expense_amount_basis!=='gross_invoice_amount')
     throw new Error(`Unsupported VAT policy for Front inbox ${inboxId}; processing blocked`);
   return Object.freeze({recoverInputVat:false,purchaseTaxType:'NONE',expenseBasis:'gross'});

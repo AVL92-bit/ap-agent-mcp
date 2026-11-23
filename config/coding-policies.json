@@ -51,6 +51,11 @@
       "vat_recovery": "none",
       "xero_purchase_tax_type": "NONE",
       "expense_amount_basis": "gross_invoice_amount"
+    },
+    "inb_debo6": {
+      "vat_recovery": "recoverable",
+      "xero_purchase_tax_type": "FROM_INVOICE",
+      "expense_amount_basis": "net_invoice_amount"
     }
   },
   "vat_policy_scope": "front_inbox_id",
