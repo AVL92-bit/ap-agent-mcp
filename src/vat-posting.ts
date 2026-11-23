@@ -30,7 +30,13 @@ export function vatRowsFromExtraction(x: { breakdown?: VatRow[] | null; netTotal
 function rowRate(r: VatRow): number {
   if (typeof r.rate === 'number' && Number.isFinite(r.rate)) return r.rate;
   if (cents(r.vat) === 0) return 0;
-  return r.net > 0 ? Math.round((r.vat / r.net) * 1000) / 10 : NaN;
+  if (!(r.net > 0)) return NaN;
+  const computed = Math.round((r.vat / r.net) * 1000) / 10;
+  // Printed pence rounding moves small invoices off the true rate: snap to the UK rate the label (or closeness) points to.
+  const hint = r.label === 'standard' ? 20 : r.label === 'reduced' ? 5 : null;
+  if (hint !== null && Math.abs(computed - hint) < 1.5) return hint;
+  for (const known of [20, 5]) if (Math.abs(computed - known) < 0.3) return known;
+  return computed;
 }
 
 /** Tax types used on the supplier's most recent approved or paid purchase bill in Xero (empty if none). */
