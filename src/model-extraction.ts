@@ -9,7 +9,16 @@
  */
 import { extractInvoiceCandidates, type CandidateField, type InvoiceCandidates } from './invoice-candidates.js';
 import { legalNameKey, PRACTICE_NAME, assessSupplierEvidence } from './supplier-evidence.js';
+import { loadCompanies } from './companies.js';
 import { createHash } from 'node:crypto';
+
+/** True when a name is one of the group's own companies (a practice or Archvale Limited): these are the
+ * customer on an invoice, never the supplier, whatever the model read. */
+export function isOwnCompany(name: string): boolean {
+  const x = legalNameKey(name);
+  if (!x) return false;
+  return loadCompanies().some(c => { const y = legalNameKey(c.name); return !!y && (x === y || x.includes(y)); });
+}
 import type { Pool } from 'pg';
 
 export const DEFAULT_EXTRACTION_MODEL = 'claude-sonnet-5-5';
@@ -60,15 +69,15 @@ const FIELD_SCHEMA = {
     'gross_total', 'gross_evidence', 'net_total', 'vat_total', 'vat_breakdown', 'currency', 'account_balance', 'billed_to', 'customer_account_number', 'line_description', 'low_confidence_fields', 'notes'],
 } as const;
 
-const INSTRUCTIONS = `You are an accounts payable clerk for St George's Road Surgery (a GP practice in Coventry, UK). Read the attached supplier document and return its fields as JSON matching the schema. Dates are ISO YYYY-MM-DD. Rules:
+const INSTRUCTIONS = `You are an accounts payable clerk for a group of UK GP practices and their company Archvale Limited. Read the attached supplier document and return its fields as JSON matching the schema. Dates are ISO YYYY-MM-DD. Rules:
 - document_type: "invoice" or "credit_note" only if the document requests or credits payment for goods/services. A payment confirmation is "receipt"; an account summary listing several invoices is "statement"; a remittance advice is "remittance".
-- supplier_name: the company that ISSUED the document (letterhead, "payable to", registered name). Never the practice, a person at the practice, or the bill-to/customer. Prefer the trading name printed on the document; supplier_evidence quotes the line(s) you used.
+- supplier_name: the company that ISSUED the document (letterhead, "payable to", registered name). Never the practice, a person at the practice, or the bill-to/customer. Prefer the trading name printed on the document; supplier_evidence quotes the line(s) you used. A name under a heading such as "Client", "Customer", "Bill to", "Invoice to", "Sold to" or "Deliver to" is the customer, never the supplier, even when it is prominent (Archvale Limited and the practices are always customers). If the document has a "Supplier" heading, use that name.
 - invoice_number: the document's own number exactly as printed (keep dashes/slashes). Not an account number, order number or customer number. If a character is damaged, give your best reading and list invoice_number as low confidence.
 - invoice_date / due_date: ISO YYYY-MM-DD. If no due date is printed, null.
 - gross_total: the total payable for THIS document's charges including VAT, as a positive number. Never use a brought-forward, carried-forward or account balance as the gross. If the account is in credit, still give this period's charges as gross_total and put the account balance (negative if in credit) in account_balance.
 - For a statement, still fill invoice_number with the statement number and gross_total with the total of the charges on THIS statement (not a brought-forward balance), so the document can be checked.
 - net_total and vat_total when printed; otherwise null.
-- vat_breakdown: one entry per VAT rate or treatment printed on the document, with the net amount and VAT amount for it (vat 0 when none is charged). label: "standard" (20%), "reduced" (5%), "zero" (zero rated / 0%), "exempt", "reverse_charge" (the document says reverse charge applies or the customer accounts for the VAT), "outside_scope" (outside the scope of VAT / no VAT), or "unknown" when the document charges no VAT and does not say why. Use an empty array if the document shows no net/VAT split.
+- vat_breakdown: one entry per VAT rate or treatment printed on the document, with the net amount and VAT amount for it (vat 0 when none is charged). label: "standard" (20%), "reduced" (5%), "zero" (zero rated / 0%), "exempt", "reverse_charge" (ONLY when the document states that the reverse charge DOES apply to this invoice and the customer must account for the VAT; wording such as "reverse charge may apply", "if applicable" or a general note is NOT reverse charge: label the entry by the VAT actually charged, or "unknown" if none is charged), "outside_scope" (outside the scope of VAT / no VAT), or "unknown" when the document charges no VAT and does not say why. Use an empty array if the document shows no net/VAT split.
 - line_description: what the supplier is charging for, taken from the document's line items, as a short accounting description (max 100 characters): goods or services, plus the period or site when printed. Examples: "GP Voice users and Sogea 80/20 line rental, October 2026"; "Boiler service, 102 St Georges Road"; "Payroll bureau services, October 2026". Never describe the email, the payment method or the document type. null if no charges are listed.
 - customer_account_number: the account/customer number the supplier uses for the practice (e.g. "Account No", "Customer Ref", "Account number"), exactly as printed. Not the invoice number. null if none is printed.
 - List in low_confidence_fields any field you are not sure of. Quote evidence exactly as printed. Do not guess values that are not on the document: use null.`;
@@ -210,7 +219,7 @@ export function mergeModelAndText(text: InvoiceCandidates, result: ModelResult, 
     return { value: modelValue, evidence, uncertain: low.has(lowKey) };
   };
 
-  const supplierName = f.supplier_name && !PRACTICE_NAME.test(f.supplier_name) ? f.supplier_name : null;
+  const supplierName = f.supplier_name && !PRACTICE_NAME.test(f.supplier_name) && !isOwnCompany(f.supplier_name) ? f.supplier_name : null;
   // Text-rule supplier guesses are only weighed against the model when they rest on strong
   // evidence ("Supplier:" label or a payment instruction). Weak guesses (a heading, a name above
   // an address) are often the recipient or a label and would only add noise.
