@@ -27,6 +27,60 @@
       "xeroTenantName": "Castletown Medical",
       "status": "live",
       "payBank": "metro"
+    },
+    {
+      "key": "carrfield",
+      "name": "Carrfield Medical Centre",
+      "frontInboxId": "inb_byr6e",
+      "xeroTenantId": "7aacfa15-9834-466b-a439-83066d93f1d4",
+      "xeroTenantName": "Carrfield Medical Centre",
+      "status": "dry_run",
+      "payBank": "metro"
+    },
+    {
+      "key": "castlefields",
+      "name": "Castlefields Surgery",
+      "frontInboxId": "inb_coyfq",
+      "xeroTenantId": "10290cdc-67bb-4f11-8089-37bb39ef4507",
+      "xeroTenantName": "Castlefields Surgery",
+      "status": "dry_run",
+      "payBank": "metro"
+    },
+    {
+      "key": "giffard-drive",
+      "name": "Giffard Drive Surgery",
+      "frontInboxId": "inb_bysba",
+      "xeroTenantId": "3cd08cbb-a338-4143-8647-3cdaad4f7014",
+      "xeroTenantName": "Giffard Drive Surgery",
+      "status": "dry_run",
+      "payBank": "metro"
+    },
+    {
+      "key": "westerhope",
+      "name": "Westerhope Medical Group",
+      "frontInboxId": "inb_cl5jq",
+      "xeroTenantId": "ec30a9cb-2df8-40c3-9734-7294de5f79de",
+      "xeroTenantName": "Westerhope Medical Group",
+      "status": "dry_run",
+      "payBank": "metro"
+    },
+    {
+      "key": "westwood-road",
+      "name": "Westwood Road Surgery",
+      "frontInboxId": "inb_bys9i",
+      "xeroTenantId": "cccd4b81-0fe1-4f11-bae7-838aea5a9976",
+      "xeroTenantName": "Westwood Road Surgery",
+      "status": "dry_run",
+      "payBank": "metro"
+    },
+    {
+      "key": "avl",
+      "name": "Archvale Limited",
+      "frontInboxId": "inb_debo6",
+      "xeroTenantId": "31f74a7c-34a0-4390-980f-017852c518e1",
+      "xeroTenantName": "Archvale Limited",
+      "status": "dry_run",
+      "payBank": "revolut"
     }
   ]
 }
