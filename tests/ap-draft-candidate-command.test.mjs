@@ -90,3 +90,32 @@ test('existing Xero contact match carries source and score into draft audit',asy
  assert.equal(command.supplierMatchScore,1);
  assert.ok(command.uncertainFields.includes('supplier'));
 });
+
+// ---- owner decision 2026-11-23: no history and no default account -> the suspense account, flagged ----
+const suspenseText = 'Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00';
+test('no history and no default: posted to the single active suspense account, flagged for finance in the sheet', async () => {
+  const candidates = extractInvoiceCandidates(suspenseText);
+  const command = await buildDraftFromAvailableCandidates({ candidates, contacts: [{ id: 'known', name: 'Example Limited' }], pdf,
+    accounts: [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }, { code: '999', name: 'Suspense', type: 'CURRENT', status: 'ACTIVE' }] });
+  assert.equal(command.accountCode, '999');
+  assert.ok(command.uncertainFields.includes('accountCode'));
+  assert.ok(command.reviewNotes.some(n => /No coding history or default account for Example Limited: posted to suspense account 999 \(Suspense\); finance to recode/.test(n)));
+});
+test('supplier history or a contact default still wins over the suspense account', async () => {
+  const accounts = [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }, { code: '999', name: 'Suspense', type: 'CURRENT', status: 'ACTIVE' }];
+  const candidates = extractInvoiceCandidates(suspenseText);
+  const a = await buildDraftFromAvailableCandidates({ candidates, contacts: [{ id: 'known', name: 'Example Limited' }], accounts, pdf, recentAccountCodeForContact: async () => '449' });
+  assert.equal(a.accountCode, '449'); assert.equal((a.reviewNotes ?? []).some(n => /suspense/i.test(n)), false);
+  const b = await buildDraftFromAvailableCandidates({ candidates, contacts: [{ id: 'known', name: 'Example Limited', defaultPurchaseCode: '449' }], accounts, pdf });
+  assert.equal(b.accountCode, '449');
+});
+test('no suspense account, an inactive one, a bank account named suspense, or two of them: Human review as before', async () => {
+  const candidates = extractInvoiceCandidates(suspenseText);
+  const contacts = [{ id: 'known', name: 'Example Limited' }];
+  for (const accounts of [
+    [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }],
+    [{ code: '999', name: 'Suspense', type: 'CURRENT', status: 'ARCHIVED' }],
+    [{ code: '998', name: 'Suspense bank', type: 'BANK', status: 'ACTIVE' }],
+    [{ code: '999', name: 'Suspense', type: 'CURRENT', status: 'ACTIVE' }, { code: '997', name: 'Suspense 2', type: 'CURRENT', status: 'ACTIVE' }],
+  ]) await assert.rejects(buildDraftFromAvailableCandidates({ candidates, contacts, accounts, pdf }), /no single active suspense account/);
+});

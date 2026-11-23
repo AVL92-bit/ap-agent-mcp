@@ -1,5 +1,5 @@
 import { DocumentNeedsHumanReview } from './ap-document-verification.js';
-import { chooseAccount, chooseSupplier, type ContactCandidate, type AccountCandidate } from './ap-best-candidate-selection.js';
+import { chooseAccount, chooseSuspenseAccount, chooseSupplier, type ContactCandidate, type AccountCandidate } from './ap-best-candidate-selection.js';
 import type { InvoiceCandidates } from './invoice-candidates.js';
 import type { DraftCommand, OriginalPdf } from './ap-xero-document-coordinator.js';
 function normaliseInvoiceDate(value?: string | null): string | null {
@@ -87,13 +87,21 @@ export async function buildDraftFromAvailableCandidates(input: {
   }
   const supplier = matched;
   const historicalCode = input.recentAccountCodeForContact ? await input.recentAccountCodeForContact(supplier.value.id) : undefined;
-  const account = chooseAccount(input.accounts, historicalCode, supplier.value.defaultPurchaseCode);
-  // No generic fallback: without the supplier's own coding the invoice is not drafted.
-  if (!account) throw new DocumentNeedsHumanReview('unclear',`No approved bill history and no default purchase account for ${supplier.value.name} in Xero; invoice not drafted`);
+  let account = chooseAccount(input.accounts, historicalCode, supplier.value.defaultPurchaseCode);
+  let suspenseNote: string | undefined;
+  if (!account) {
+    // No coding history and no default account: post to the suspense account and flag it (owner decision,
+    // whole group). Without a single active suspense account the invoice goes to Human review.
+    const suspense = chooseSuspenseAccount(input.accounts);
+    if (!suspense) throw new DocumentNeedsHumanReview('unclear',`No approved bill history and no default purchase account for ${supplier.value.name} in Xero, and no single active suspense account to post to; invoice not drafted`);
+    account = {value:suspense,uncertainFields:['accountCode'],explanation:'Suspense account used'};
+    suspenseNote = `No coding history or default account for ${supplier.value.name}: posted to suspense account ${suspense.code} (${suspense.name}); finance to recode`;
+  }
   // All drafts receive normal finance review; account-code selection alone does not
   // trigger an additional uncertainty exception. Historical codes must still be active and expense-eligible.
   return buildDraftCommand({candidates:input.candidates,supplierContactId:supplier.value.id,supplierName:supplier.value.name,extractedSupplierName:input.candidates.supplier?.value,supplierMatchScore:supplier.score,
     accountCode:account.value.code,pdf:input.pdf,fallbackDate:input.fallbackDate,
     fallbackReference:input.fallbackReference,fallbackGross:input.fallbackGross,
-    extraUncertainty:[...supplier.uncertainFields,...account.uncertainFields],reviewNotes:input.reviewNotes});
+    extraUncertainty:[...supplier.uncertainFields,...account.uncertainFields],
+    reviewNotes:suspenseNote?[...(input.reviewNotes??[]),suspenseNote]:input.reviewNotes});
 }
