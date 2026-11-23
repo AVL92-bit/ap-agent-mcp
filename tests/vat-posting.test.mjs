@@ -100,3 +100,16 @@ test('the plan is built only for recovering inboxes and failures become Human re
   assert.match(src, /new DocumentNeedsHumanReview\('unclear', `VAT not posted: /);
   assert.match(src, /command\.reviewNotes = \[\.\.\.\(command\.reviewNotes \?\? \[\]\), \.\.\.plan\.notes\]/);
 });
+
+// ---- the model's structured-output schema: the API refuses more than 16 union-typed parameters ----
+test('the extraction schema stays within the API limit of 16 nullable/union parameters (18 broke every company on 2026-11-23)', () => {
+  const src = readFileSync(new URL('../src/model-extraction.ts', import.meta.url), 'utf8');
+  const block = src.slice(src.indexOf('const FIELD_SCHEMA'), src.indexOf('} as const;', src.indexOf('const FIELD_SCHEMA')));
+  const unions = (block.match(/nullable\(/g) ?? []).length + (block.match(/anyOf/g) ?? []).length - 1 /* the helper's own anyOf is not in this block */ + (block.match(/type: \[/g) ?? []).length;
+  assert.ok(unions <= 16, `${unions} union-typed parameters`);
+});
+test('small invoices whose printed pence move the rate still resolve to the right UK rate', () => {
+  const p = plan([{ label: 'standard', rate: null, net: 1.23, vat: 0.25 }], 1.48, ['INPUT2']);
+  assert.equal(p.lines[0].taxType, 'INPUT2');
+  assert.equal(plan([{ label: 'unknown', rate: null, net: 40, vat: 2 }], 42, []).lines[0].taxType, 'INPUT5');
+});

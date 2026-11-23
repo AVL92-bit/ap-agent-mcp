@@ -233,7 +233,7 @@ export async function makeLiveDraftCommand(conversation: InboxConversation, atta
         cache.taxRates=taxRatesFromXero(body.TaxRates);
       }
       const plan = planVatPosting({gross:command.gross,
-        rows:vatRowsFromExtraction({breakdown:extraction.vat.breakdown,netTotal:extraction.vat.netTotal,vatTotal:extraction.vat.vatTotal}),
+        rows:vatRowsFromExtraction({breakdown:(extraction.vat.breakdown??[]).map(b=>({...b,rate:null})),netTotal:extraction.vat.netTotal,vatTotal:extraction.vat.vatTotal}),
         taxRates:cache.taxRates, historyTaxTypes:latestHistoryTaxTypes(cache.bills as Parameters<typeof latestHistoryTaxTypes>[0], command.supplierContactId)});
       command.vatPlan = plan;
       command.reviewNotes = [...(command.reviewNotes ?? []), ...plan.notes];
