@@ -192,3 +192,8 @@ Postgres tables: `ap_document_journal`, `ap_model_extraction_cache`, `ap_schedul
 - Multi-company (owner plans 8 more companies/inboxes): registry, per-company run, schedule loop and Sheet column L are built (Lamberhurst is the second). Still open: per-company coding rules beyond VAT, an AVL entry with its own VAT policy, and the Xero Core tier (>5 connections).
 - Optional: Anthropic Batch API for the 6am run (half price, slower).
 - Minor: meter-reading emails classified inconsistently (one archived, one human review).
+
+## Front comments (trial from 2026-11-26, alongside the Sheet)
+- `src/ap-front-comments.ts`: every exception row that goes to the Finance review Sheet is also posted as an internal Front comment on the conversation (`POST /conversations/{id}/comments`). Same outbox pattern (`ap_front_comment_outbox`, one comment per conversation + document + outcome, so a still-open item is commented once, not daily). A row is retried, then given up on after 5 failed attempts (error kept). Comment problems are reported in the run record as `front_comments` and never count as failures or block a draft, tag, archive or the Sheet.
+- Off switch: Railway variable `FRONT_COMMENTS_ENABLED=false`. Dry runs write no comments. The comment holds reason, file, supplier, invoice number and amount only: no bank details, no Xero ids.
+- Unverified until the first live run: the Front token must be allowed to write comments (a 403 shows in `front_comments`).

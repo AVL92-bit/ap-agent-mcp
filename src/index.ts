@@ -1,6 +1,7 @@
 import { classifyFrontCorrespondence, actionableAttachments, isSupportedDocument } from "./front-triage-classification.js";
 import { ensureApContactIntent } from './ap-contact-write-intent.js';
 import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
+import { FRONT_COMMENTS_TABLE, FRONT_COMMENT_MAX_ATTEMPTS, frontCommentsEnabled, makeFrontCommentDeliver } from './ap-front-comments.js';
 import { ensureApDocumentJournal, makeApDocumentJournal, clearFullRunWriteIntent } from './ap-document-journal.js';
 import { executeCompleteApInbox } from "./ap-inbox-execution.js";
 import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
@@ -92,6 +93,17 @@ async function runLiveInboxForCurrentCompany(limit:{conversationIds?:string[];ma
     await ensureApSheetOutbox(runClient);
     const sheetOutbox=makeApSheetOutbox(runClient,appendApInboxException);
     const sheetBefore=await sheetOutbox.flush();
+    // Front comments (trial alongside the Sheet): the same exception rows, as internal comments on the conversation.
+    // Any failure here is reported in front_comments but never blocks the Sheet, a draft, a tag or an archive.
+    let commentOutbox:ReturnType<typeof makeApSheetOutbox>|null=null;
+    let commentsBefore:Record<string,number>|{error:string}|null=null;
+    if (frontCommentsEnabled()) {
+      try {
+        await ensureApSheetOutbox(runClient,FRONT_COMMENTS_TABLE);
+        commentOutbox=makeApSheetOutbox(runClient,makeFrontCommentDeliver(frontWrite),FRONT_COMMENTS_TABLE,FRONT_COMMENT_MAX_ATTEMPTS);
+        commentsBefore=await commentOutbox.flush();
+      } catch(e){ console.warn('Front comments unavailable',String(e)); commentOutbox=null; commentsBefore={error:String(e).slice(0,200)}; }
+    }
     const {inboxId}=frontConfig();
     progress(`Running inbox for ${company.name}`);
     const result=await executeCompleteApInbox({
@@ -106,13 +118,19 @@ async function runLiveInboxForCurrentCompany(limit:{conversationIds?:string[];ma
         else throw new Error('Unknown AP Front tag');
       },
       archive:archiveApFrontConversation,
-      reportReview:row=>sheetOutbox.enqueue({...row,company:company.name}),
+      reportReview:async row=>{
+        await sheetOutbox.enqueue({...row,company:company.name});
+        if (commentOutbox) { try { await commentOutbox.enqueue({...row,company:company.name}); } catch(e){ console.warn('Front comment not queued',String(e)); } }
+      },
       journal:makeApDocumentJournal(runClient),
       expandEmail:expandFrontEmail,
       select:all=>selectConversations(all,limit),
     });
     const sheetAfter=await sheetOutbox.flush();
-    return {status:"completed",company:company.key,...result,sheet_outbox:{before:sheetBefore,after:sheetAfter}};
+    let commentsAfter:Record<string,number>|{error:string}|null=null;
+    if (commentOutbox) { try { commentsAfter=await commentOutbox.flush(); } catch(e){ commentsAfter={error:String(e).slice(0,200)}; } }
+    return {status:"completed",company:company.key,...result,sheet_outbox:{before:sheetBefore,after:sheetAfter},
+      ...(commentsBefore||commentsAfter?{front_comments:{before:commentsBefore,after:commentsAfter}}:{})};
   } finally {
     if (runClient) {
       try { await runClient.query('SELECT pg_advisory_unlock(928172, 1204)'); } finally { runClient.release(); }
