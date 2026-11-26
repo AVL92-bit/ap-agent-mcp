@@ -49,7 +49,7 @@ export function summariseRun(result: Record<string, any>): Record<string, unknow
   const items: any[] = Array.isArray(result.items) ? result.items : [];
   return { conversations: result.conversations ?? items.length, documents: result.documents ?? null, archived: result.archived ?? null,
     left_open: items.filter(i => !i.archived).length, failures: items.reduce((n, i) => n + (i.failures?.length ?? 0), 0),
-    stopped_early: result.stoppedEarly ?? null, sheet_outbox: result.sheet_outbox ?? null };
+    stopped_early: result.stoppedEarly ?? null, sheet_outbox: result.sheet_outbox ?? null, front_comments: result.front_comments ?? null };
 }
 
 export function startDailySchedule(deps: { pool: () => Pool; run: (progress: (m: string) => void) => Promise<Record<string, any>> }): void {
