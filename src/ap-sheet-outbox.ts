@@ -42,6 +42,7 @@ export function makeApSheetOutbox(client:PoolClient, deliver:(row:ReviewRow)=>Pr
         } catch (error) {
           failed++;
           const message=String(error).slice(0,2000);
+          console.warn(`Outbox delivery failed (${t}, attempt ${Number(entry.attempts??0)+1}): ${message.slice(0,300)}`);
           if (Number(entry.attempts??0)+1>=maxAttempts) {
             await client.query(`UPDATE ${t} SET delivered_at=now(),attempts=attempts+1,last_error=$2,updated_at=now()
               WHERE source_key=$1 AND delivered_at IS NULL`,[entry.source_key,`GAVE UP after ${maxAttempts} attempts: ${message}`.slice(0,2000)]);
