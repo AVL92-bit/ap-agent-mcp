@@ -1,7 +1,7 @@
 import { classifyFrontCorrespondence, actionableAttachments, isSupportedDocument } from "./front-triage-classification.js";
 import { ensureApContactIntent } from './ap-contact-write-intent.js';
 import { ensureApSheetOutbox, makeApSheetOutbox } from './ap-sheet-outbox.js';
-import { FRONT_COMMENTS_TABLE, FRONT_COMMENT_MAX_ATTEMPTS, frontCommentsEnabled, makeFrontCommentDeliver } from './ap-front-comments.js';
+import { FRONT_COMMENTS_TABLE, FRONT_COMMENT_MAX_ATTEMPTS, frontCommentsEnabled, makeFrontCommentDeliver, requeueGivenUpComments } from './ap-front-comments.js';
 import { ensureApDocumentJournal, makeApDocumentJournal, clearFullRunWriteIntent } from './ap-document-journal.js';
 import { executeCompleteApInbox } from "./ap-inbox-execution.js";
 import { makeLiveXeroDraftPort } from "./ap-xero-live-port.js";
@@ -2708,6 +2708,24 @@ server.registerTool(
           schedule_days: process.env.AP_SCHEDULE_DAYS ?? 'every day', runner_enabled: process.env.AP_INBOX_RUNNER_ENABLED === 'true',
           runs: await recentScheduledRuns(pool, limit ?? 14) });
       } catch (error) { return safeError("Scheduled run history read failed", error); }
+      finally { await pool.end(); }
+    }
+  );
+
+  server.registerTool(
+    "requeue_front_comments",
+    {
+      title: "Requeue Given-Up Front Comments",
+      description: "Writes only to the Front comment queue (a table in the agent's own database): puts comments the agent gave up on (for example while the Front token lacked a scope) back in the queue with a fresh attempt count. Sends nothing now; the next run posts them. Writes nothing to Xero, Front or the Sheet.",
+      inputSchema: {},
+    },
+    async () => {
+      const pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+      try {
+        const client = await pool.connect();
+        try { await ensureApSheetOutbox(client, FRONT_COMMENTS_TABLE); return toolResult({ requeued: await requeueGivenUpComments(client), next: "They are posted on the next run for each company." }); }
+        finally { client.release(); }
+      } catch (error) { return safeError("Requeue of Front comments failed", error); }
       finally { await pool.end(); }
     }
   );

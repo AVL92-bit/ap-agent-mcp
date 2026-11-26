@@ -107,3 +107,21 @@ test('the dry run writes no comments', () => {
   const dry = readFileSync(new URL('../src/ap-inbox-dry-run.ts', import.meta.url), 'utf8');
   assert.equal(/comment/i.test(dry), false);
 });
+
+// ---- requeue of comments given up on ----
+import { requeueGivenUpComments } from '../dist/ap-front-comments.js';
+test('requeue resets only comments that were GIVEN UP on, in the comment table only', async () => {
+  const seen = [];
+  const n = await requeueGivenUpComments({ query: async (sql) => { seen.push(sql); return { rowCount: 2, rows: [] }; } });
+  assert.equal(n, 2);
+  assert.equal(seen.length, 1);
+  assert.match(seen[0], /UPDATE ap_front_comment_outbox SET delivered_at=NULL, attempts=0, last_error=NULL/);
+  assert.match(seen[0], /last_error LIKE 'GAVE UP%'/);
+  assert.equal(/ap_sheet_outbox/.test(seen[0]), false);
+});
+test('the requeue tool touches only the comment queue, and never Xero, Front or the Sheet', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
+  const tool = src.slice(src.indexOf('"requeue_front_comments"'), src.indexOf('"get_finance_review_rows"'));
+  assert.match(tool, /requeueGivenUpComments\(client\)/);
+  assert.equal(/frontWrite|frontGet|xeroFetch|appendApInboxException|sheetOutbox/.test(tool), false);
+});

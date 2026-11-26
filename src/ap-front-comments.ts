@@ -44,3 +44,11 @@ export function makeFrontCommentDeliver(write: FrontWrite): (row: ReviewRow) => 
     }
   };
 }
+
+/** Put comments that were given up on (e.g. while the Front token lacked a scope) back in the queue, with a fresh
+ * attempt count. Touches only the comment queue; nothing is sent until the next run. Returns how many were reset. */
+export async function requeueGivenUpComments(db: { query(sql: string, args?: unknown[]): Promise<{ rowCount?: number | null; rows: unknown[] }> }): Promise<number> {
+  const r = await db.query(`UPDATE ${FRONT_COMMENTS_TABLE} SET delivered_at=NULL, attempts=0, last_error=NULL, updated_at=now()
+    WHERE delivered_at IS NOT NULL AND last_error LIKE 'GAVE UP%'`);
+  return Number(r.rowCount ?? 0);
+}
