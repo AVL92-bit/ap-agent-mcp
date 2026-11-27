@@ -118,6 +118,7 @@ export function planVatPosting(input: { gross: number; rows: VatRow[]; taxRates:
 
 /** Xero line items for a plan (LineAmountTypes Exclusive: net amounts, with the invoice's VAT written on each line). */
 export function vatLineItems(plan: VatPlan, input: { description: string; accountCode: string }) {
-  return plan.lines.map(l => ({ Description: input.description, Quantity: 1, UnitAmount: l.net, AccountCode: input.accountCode, TaxType: l.taxType,
+  // An empty account code is left off the line altogether (the draft is created uncoded for finance).
+  return plan.lines.map(l => ({ Description: input.description, Quantity: 1, UnitAmount: l.net, ...(input.accountCode.trim() ? { AccountCode: input.accountCode } : {}), TaxType: l.taxType,
     ...(l.reverseCharge ? {} : { TaxAmount: l.vat }) }));
 }

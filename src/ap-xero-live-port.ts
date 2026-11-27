@@ -44,7 +44,7 @@ export function makeLiveXeroDraftPort(
         lineItems = vatLineItems(command.vatPlan, { description, accountCode: command.accountCode });
       } else {
         if (command.vatPlan) throw new Error('Unexpected VAT plan for a non-recovering inbox; nothing created');
-        lineItems = [grossExpenseLine({ inboxId: currentCompany().frontInboxId, description, gross: command.gross, accountCode: command.accountCode })];
+        lineItems = [grossExpenseLine({ inboxId: currentCompany().frontInboxId, description, gross: command.gross, accountCode: command.accountCode, allowBlankAccount: command.accountCode === '' })];
       }
       const base = {
         Status: 'DRAFT',

@@ -141,3 +141,28 @@ test('several zero rated tax rates: EC, import and sales ones are ignored, an ex
     { Name: 'Zero Rated A', TaxType: 'A', Status: 'ACTIVE', EffectiveRate: 0 }, { Name: 'Zero Rated B', TaxType: 'B', Status: 'ACTIVE', EffectiveRate: 0 }]);
   assert.throws(() => planVatPosting({ gross: 10, rows: [row('zero', 0, 10, 0)], taxRates: two, historyTaxTypes: [] }), /Zero Rated A \[A\]; Zero Rated B \[B\]/);
 });
+
+// ---- uncoded drafts (no history, no default account): the line carries no AccountCode ----
+import { grossExpenseLine } from '../dist/inbox-vat-policy.js';
+import { reconcileCreateAndAttach } from '../dist/ap-xero-document-coordinator.js';
+test('the gross line leaves AccountCode off for an uncoded draft, and still refuses a blank code unless explicitly allowed', () => {
+  const base = { inboxId: 'inb_bys7q', description: 'd', gross: 10 };
+  assert.throws(() => grossExpenseLine({ ...base, accountCode: '' }), /Verified account code required/);
+  const line = grossExpenseLine({ ...base, accountCode: '', allowBlankAccount: true });
+  assert.equal('AccountCode' in line, false);
+  assert.equal(line.TaxType, 'NONE');
+  assert.equal(grossExpenseLine({ ...base, accountCode: '449', allowBlankAccount: true }).AccountCode, '449');
+});
+test('VAT lines also leave AccountCode off when the code is blank', () => {
+  const p = plan([row('standard', 20, 100, 20)], 120, ['INPUT2']);
+  assert.equal('AccountCode' in vatLineItems(p, { description: 'd', accountCode: '' })[0], false);
+  assert.equal(vatLineItems(p, { description: 'd', accountCode: '410' })[0].AccountCode, '410');
+});
+test('the draft coordinator accepts an empty account code, creates the draft and attaches the PDF', async () => {
+  const calls = [];
+  const port = { lookup: async () => [], createDraft: async (c) => { calls.push(['create', c.accountCode]); return 'id1'; }, attachOriginal: async () => { calls.push(['attach']); }, verifyOriginal: async () => true };
+  const pdf = { filename: 'a.pdf', contentType: 'application/pdf', bytes: new TextEncoder().encode('%PDF-1.4') };
+  const out = await reconcileCreateAndAttach({ kind: 'Invoices', number: 'N1', supplierContactId: 'c', accountCode: '', invoiceDate: '2026-11-01', dueDate: '2026-12-01', gross: 10, pdf, uncertainFields: ['accountCode'] }, port);
+  assert.equal(out.status, 'draft_created');
+  assert.deepEqual(calls, [['create', ''], ['attach']]);
+});
