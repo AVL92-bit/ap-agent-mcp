@@ -14,6 +14,7 @@ export type DraftCommand = {
   supplierName?: string;
   extractedSupplierName?: string;
   supplierMatchScore?: number;
+  /** '' = no account code (no history, no default): the draft is created uncoded and flagged. */
   accountCode: string;
   invoiceDate: string;
   dueDate: string;
@@ -52,7 +53,8 @@ export type DraftOutcome =
   | { status: 'possible_amendment'; kind: PurchaseKind; xeroId: string; uncertainFields: string[]; error: string };
 
 function validate(command: DraftCommand): void {
-  if (!command.number.trim() || !command.supplierContactId || !command.accountCode ||
+  // accountCode may be '' (no history and no default account: drafted uncoded for finance); it must still be a string.
+  if (!command.number.trim() || !command.supplierContactId || typeof command.accountCode !== 'string' ||
       !/^\d{4}-\d{2}-\d{2}$/.test(command.invoiceDate) ||
       !/^\d{4}-\d{2}-\d{2}$/.test(command.dueDate) ||
       !Number.isFinite(command.gross) || command.gross <= 0 ||

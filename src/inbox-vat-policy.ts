@@ -28,12 +28,15 @@ export function vatPolicyForInbox(inboxId: string | undefined | null): InboxVatP
   return Object.freeze({recoverInputVat:false,purchaseTaxType:'NONE',expenseBasis:'gross'});
 }
 
-export function grossExpenseLine(input:{inboxId:string;description:string;gross:number;accountCode:string}) {
+/** accountCode may be '' only when allowBlankAccount is set: a draft with no history and no default account is created
+ * uncoded (no AccountCode on the line) for finance to code before approval. */
+export function grossExpenseLine(input:{inboxId:string;description:string;gross:number;accountCode:string;allowBlankAccount?:boolean}) {
   const policy=vatPolicyForInbox(input.inboxId);
   if (policy.recoverInputVat || policy.expenseBasis!=='gross' || policy.purchaseTaxType!=='NONE')
     throw new Error(`Gross-only writer cannot process inbox ${input.inboxId}`);
   if (!Number.isFinite(input.gross) || input.gross<=0 || Math.abs(input.gross*100-Math.round(input.gross*100))>0.00001)
     throw new Error('Valid gross invoice amount required');
-  if (!input.accountCode.trim()) throw new Error('Verified account code required');
-  return {Description:input.description,Quantity:1,UnitAmount:input.gross,AccountCode:input.accountCode,TaxType:policy.purchaseTaxType};
+  const blank=!input.accountCode.trim();
+  if (blank && input.allowBlankAccount!==true) throw new Error('Verified account code required');
+  return {Description:input.description,Quantity:1,UnitAmount:input.gross,...(blank?{}:{AccountCode:input.accountCode}),TaxType:policy.purchaseTaxType};
 }

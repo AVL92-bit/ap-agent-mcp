@@ -34,10 +34,12 @@ test('unmatched supplier cannot create provisional Xero contact',async()=>{
  }),/Supplier "Unknown Vendor" is not in Xero.*Please create it as a supplier contact.*12345/);
  assert.equal(created,0);
 });
-test('no supplier history and no contact default: not drafted, no generic fallback',async()=>{
+test('no supplier history and no contact default: drafted with NO account code (never a guessed account), flagged',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
- await assert.rejects(buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],pdf}),
-   /No approved bill history and no default purchase account for Example Limited/);
+ const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts:[{code:'449',name:'Expenses',type:'EXPENSE',status:'ACTIVE'}],pdf});
+ assert.equal(command.accountCode,'');
+ assert.ok(command.uncertainFields.includes('accountCode'));
+ assert.ok(command.reviewNotes.some(n=>/No coding history or default account for Example Limited: drafted with no account code; finance to code it before approving/.test(n)));
 });
 test('contact default purchase account drafts with account flagged uncertain',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
@@ -57,7 +59,8 @@ test('most recent matched supplier invoice code wins over contact default',async
 test('inactive historical account falls to contact default, never a generic account',async()=>{
  const candidates=extractInvoiceCandidates('Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00');
  const accounts=[{code:'449',name:'Other',type:'EXPENSE',status:'ACTIVE'},{code:'450',name:'Inactive',type:'EXPENSE',status:'ARCHIVED'}];
- await assert.rejects(buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts,pdf,recentAccountCodeForContact:async()=>'450'}),/not drafted/);
+ const uncoded=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited'}],accounts,pdf,recentAccountCodeForContact:async()=>'450'});
+ assert.equal(uncoded.accountCode,''); // an archived historical account is never used: no code at all
  const command=await buildDraftFromAvailableCandidates({candidates,contacts:[{id:'known',name:'Example Limited',defaultPurchaseCode:'449'}],accounts,pdf,recentAccountCodeForContact:async()=>'450'});
  assert.equal(command.accountCode,'449');
 });
@@ -91,31 +94,19 @@ test('existing Xero contact match carries source and score into draft audit',asy
  assert.ok(command.uncertainFields.includes('supplier'));
 });
 
-// ---- owner decision 2026-11-23: no history and no default account -> the suspense account, flagged ----
-const suspenseText = 'Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00';
-test('no history and no default: posted to the single active suspense account, flagged for finance in the sheet', async () => {
-  const candidates = extractInvoiceCandidates(suspenseText);
+// ---- owner decision 2026-11-27: no history and no default account -> a draft with no account code, flagged ----
+const noCodeText = 'Invoice\nSupplier: Example Limited\nInvoice No: 12345\nTotal Due: £20.00';
+test('a Suspense account in the chart is NOT used: no history and no default means no account code', async () => {
+  const candidates = extractInvoiceCandidates(noCodeText);
   const command = await buildDraftFromAvailableCandidates({ candidates, contacts: [{ id: 'known', name: 'Example Limited' }], pdf,
     accounts: [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }, { code: '999', name: 'Suspense', type: 'CURRENT', status: 'ACTIVE' }] });
-  assert.equal(command.accountCode, '999');
-  assert.ok(command.uncertainFields.includes('accountCode'));
-  assert.ok(command.reviewNotes.some(n => /No coding history or default account for Example Limited: posted to suspense account 999 \(Suspense\); finance to recode/.test(n)));
+  assert.equal(command.accountCode, '');
 });
-test('supplier history or a contact default still wins over the suspense account', async () => {
-  const accounts = [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }, { code: '999', name: 'Suspense', type: 'CURRENT', status: 'ACTIVE' }];
-  const candidates = extractInvoiceCandidates(suspenseText);
+test('supplier history or a contact default still wins: only then is a code posted', async () => {
+  const accounts = [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }];
+  const candidates = extractInvoiceCandidates(noCodeText);
   const a = await buildDraftFromAvailableCandidates({ candidates, contacts: [{ id: 'known', name: 'Example Limited' }], accounts, pdf, recentAccountCodeForContact: async () => '449' });
-  assert.equal(a.accountCode, '449'); assert.equal((a.reviewNotes ?? []).some(n => /suspense/i.test(n)), false);
+  assert.equal(a.accountCode, '449'); assert.equal((a.reviewNotes ?? []).some(n => /no account code/i.test(n)), false);
   const b = await buildDraftFromAvailableCandidates({ candidates, contacts: [{ id: 'known', name: 'Example Limited', defaultPurchaseCode: '449' }], accounts, pdf });
   assert.equal(b.accountCode, '449');
-});
-test('no suspense account, an inactive one, a bank account named suspense, or two of them: Human review as before', async () => {
-  const candidates = extractInvoiceCandidates(suspenseText);
-  const contacts = [{ id: 'known', name: 'Example Limited' }];
-  for (const accounts of [
-    [{ code: '449', name: 'Expenses', type: 'EXPENSE', status: 'ACTIVE' }],
-    [{ code: '999', name: 'Suspense', type: 'CURRENT', status: 'ARCHIVED' }],
-    [{ code: '998', name: 'Suspense bank', type: 'BANK', status: 'ACTIVE' }],
-    [{ code: '999', name: 'Suspense', type: 'CURRENT', status: 'ACTIVE' }, { code: '997', name: 'Suspense 2', type: 'CURRENT', status: 'ACTIVE' }],
-  ]) await assert.rejects(buildDraftFromAvailableCandidates({ candidates, contacts, accounts, pdf }), /no single active suspense account/);
 });
